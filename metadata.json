@@ -1,0 +1,8 @@
+{
+  "name": "CBT SMADIP",
+  "description": "Aplikasi Computer Based Test (CBT) Simulasi TKA dan ANBK Pusmendik dengan dukungan soal Pilihan Ganda, Pilihan Ganda Kompleks, Benar/Salah, Menjodohkan, dan Isian Singkat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

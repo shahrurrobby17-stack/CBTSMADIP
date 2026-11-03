@@ -1,0 +1,19 @@
+{
+  "name": "CBT SMA ISLAM DIPONEGORO WAGIR",
+  "short_name": "CBT SMADIP",
+  "description": "Aplikasi Computer Based Test (CBT) SMA Islam Diponegoro Wagir - Sumatif Akhir Semester",
+  "start_url": "/",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "portrait",
+  "background_color": "#eef1f6",
+  "theme_color": "#2b6496",
+  "icons": [
+    {
+      "src": "/logo-kemendikbud.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
