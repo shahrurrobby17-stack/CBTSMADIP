@@ -220,7 +220,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
 
 const KELAS_OPTIONS = ['X', 'XI IPA', 'XI IPS', 'XII IPA', 'XII IPS'] as const;
 
-const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
+export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
   {
     id: 'ap1',
     selected: true,
@@ -294,9 +294,33 @@ const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     kelas: 'X',
     loginState: 'Belum Login',
   },
+  {
+    id: 'p7',
+    selected: false,
+    status: 'Active',
+    kodeTes: 'GLDTKA25MAH2',
+    username: 'P130100240',
+    password: 'ANBKTKA26*',
+    namaPeserta: 'NADIA PUTRI PRATAMA',
+    kelompok: '1',
+    kelas: 'XII IPA',
+    loginState: 'Sedang Mengerjakan',
+  },
+  {
+    id: 'p8',
+    selected: false,
+    status: 'Active',
+    kodeTes: 'GLDTKA25MAH2',
+    username: 'K020500118',
+    password: 'SAINSTKA*',
+    namaPeserta: 'BAGAS ADITYA NUGRAHA',
+    kelompok: '2',
+    kelas: 'XII IPA',
+    loginState: 'Selesai',
+  },
 ];
 
-interface AdminProctorItem {
+export interface AdminProctorItem {
   id: string;
   proctorId: string;
   fullName: string;
@@ -307,7 +331,7 @@ interface AdminProctorItem {
   status: 'Active' | 'Non Active';
 }
 
-const INITIAL_ADMIN_PROCTORS: AdminProctorItem[] = [
+export const INITIAL_ADMIN_PROCTORS: AdminProctorItem[] = [
   {
     id: 'pr1',
     proctorId: 'K05060108-KB6K',
@@ -407,11 +431,20 @@ interface AdminDashboardViewProps {
   onUpdateToken: (newToken: string) => void;
   schedules: AdminScheduleItem[];
   onUpdateSchedules: (nextSchedules: AdminScheduleItem[]) => void;
+  participants?: ProctorParticipantRow[];
+  onUpdateParticipants?: React.Dispatch<
+    React.SetStateAction<ProctorParticipantRow[]>
+  >;
+  proctors?: AdminProctorItem[];
+  onUpdateProctors?: React.Dispatch<React.SetStateAction<AdminProctorItem[]>>;
   packages: ExamPackage[];
   onUpdatePackages: (nextPackages: ExamPackage[]) => void;
   onResetDefaultPackages: () => void;
   resultsHistory: ExamResultSummary[];
   onClearHistory: () => void;
+  storageEngine?: 'vercel-kv' | 'vercel-serverless' | 'local';
+  lastSyncedLabel?: string;
+  onForceSyncStorage?: () => void;
   onLogoutAdmin: () => void;
 }
 
@@ -422,22 +455,33 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   onUpdateToken,
   schedules,
   onUpdateSchedules,
+  participants: externalParticipants,
+  onUpdateParticipants,
+  proctors: externalProctors,
+  onUpdateProctors,
   packages,
   onUpdatePackages,
   onResetDefaultPackages,
   resultsHistory,
   onClearHistory,
+  storageEngine = 'vercel-serverless',
+  lastSyncedLabel = 'Tersimpan Otomatis',
+  onForceSyncStorage,
   onLogoutAdmin,
 }) => {
   // Default view is 'kelompok_tes' to match the user's attached screenshot 100%
   const [activeMenu, setActiveMenu] = useState<AdminSidebarMenuId>('kelompok_tes');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [participants, setParticipants] = useState<ProctorParticipantRow[]>(
-    INITIAL_ADMIN_PARTICIPANTS
-  );
-  const [proctors, setProctors] = useState<AdminProctorItem[]>(
+  const [localParticipants, setLocalParticipants] = useState<
+    ProctorParticipantRow[]
+  >(INITIAL_ADMIN_PARTICIPANTS);
+  const [localProctors, setLocalProctors] = useState<AdminProctorItem[]>(
     INITIAL_ADMIN_PROCTORS
   );
+  const participants = externalParticipants ?? localParticipants;
+  const setParticipants = onUpdateParticipants ?? setLocalParticipants;
+  const proctors = externalProctors ?? localProctors;
+  const setProctors = onUpdateProctors ?? setLocalProctors;
 
   // Add New Proctor Form States
   const [newProctorName, setNewProctorName] = useState('');
@@ -1294,13 +1338,51 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </div>
               </div>
 
-              <div className="bg-white rounded-xl p-6 border border-slate-200/80 shadow-2xs space-y-3">
-                <h3 className="text-sm font-bold text-slate-800">
-                  Dashboard Administrator — CBT SMA Islam Diponegoro Wagir
-                </h3>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  Kartu <strong>Token Ujian Aktif</strong> pada halaman Beranda ini akan berganti secara otomatis setiap <strong>5 menit</strong>. Gunakan menu <strong>Daftar Proktor</strong> untuk mengelola akun proktor ruang ujian, menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Daftar Peserta</strong> untuk menambah peserta baru, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk merekapitulasi nilai.
-                </p>
+              <div className="bg-white rounded-xl p-6 border border-slate-200/80 shadow-2xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-bold text-slate-800">
+                        Penyimpanan Cloud Vercel (`/api/storage`)
+                      </h3>
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-emerald-100 text-emerald-700 text-[11px] font-bold">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>
+                          {storageEngine === 'vercel-kv'
+                            ? 'Vercel KV / Redis Aktif'
+                            : 'Vercel Serverless Storage Aktif'}
+                        </span>
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Seluruh data Jadwal Ujian, Daftar Proktor, Daftar Peserta, Kelompok Tes, Bank Soal, Token Aktif, dan Laporan Nilai tersimpan otomatis di Vercel Storage ({lastSyncedLabel}).
+                    </p>
+                  </div>
+                  {onForceSyncStorage && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onForceSyncStorage();
+                        showNotice(
+                          'Data sistem berhasil disinkronkan ke Penyimpanan Vercel!'
+                        );
+                      }}
+                      className="shrink-0 inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0095ff] hover:bg-[#007acc] text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Sinkronkan ke Vercel</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold text-slate-700">
+                    Dashboard Administrator — CBT SMA Islam Diponegoro Wagir
+                  </h4>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Kartu <strong>Token Ujian Aktif</strong> pada halaman Beranda ini akan berganti secara otomatis setiap <strong>5 menit</strong>. Gunakan menu <strong>Daftar Proktor</strong> untuk mengelola akun proktor ruang ujian, menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Daftar Peserta</strong> untuk menambah peserta baru, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk merekapitulasi nilai.
+                  </p>
+                </div>
               </div>
             </div>
           )}

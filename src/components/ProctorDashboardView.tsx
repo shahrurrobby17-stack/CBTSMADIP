@@ -145,6 +145,10 @@ interface ProctorDashboardViewProps {
   onUpdateToken: (newToken: string) => void;
   isScheduleActive: boolean;
   activeSchedules: AdminScheduleItem[];
+  participants?: ProctorParticipantRow[];
+  onUpdateParticipants?: React.Dispatch<
+    React.SetStateAction<ProctorParticipantRow[]>
+  >;
   packages: ExamPackage[];
   onUpdatePackages: (nextPackages: ExamPackage[]) => void;
   onResetDefaultPackages: () => void;
@@ -160,6 +164,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   tokenSecondsLeft,
   isScheduleActive,
   activeSchedules,
+  participants: externalParticipants,
+  onUpdateParticipants,
   packages,
   onUpdatePackages,
   onResetDefaultPackages,
@@ -170,9 +176,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   // Default active tab is 'kelompok_tes' to match the reference screenshot immediately
   const [activeMenu, setActiveMenu] = useState<SidebarMenuId>('kelompok_tes');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [participants, setParticipants] = useState<ProctorParticipantRow[]>(
-    INITIAL_PARTICIPANT_ROWS
-  );
+  const [localParticipants, setLocalParticipants] = useState<
+    ProctorParticipantRow[]
+  >(INITIAL_PARTICIPANT_ROWS);
+  const participants = externalParticipants ?? localParticipants;
+  const setParticipants = onUpdateParticipants ?? setLocalParticipants;
 
   // Filter states for Kelompok Tes (matching 1, 2, 3, 4 in screenshot)
   const [filterStatus, setFilterStatus] = useState<string>('Non Aktif');

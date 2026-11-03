@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { PusmendikHeader } from './components/PusmendikHeader';
 import { LoginView } from './components/LoginView';
 import {
@@ -13,11 +13,17 @@ import {
 import { ExamRunnerView } from './components/ExamRunnerView';
 import { ExamResultView } from './components/ExamResultView';
 import { ProctorLoginView } from './components/ProctorLoginView';
-import { ProctorDashboardView } from './components/ProctorDashboardView';
+import {
+  ProctorDashboardView,
+  ProctorParticipantRow,
+} from './components/ProctorDashboardView';
 import {
   AdminLoginView,
   AdminDashboardView,
+  AdminProctorItem,
   INITIAL_ADMIN_SCHEDULES,
+  INITIAL_ADMIN_PARTICIPANTS,
+  INITIAL_ADMIN_PROCTORS,
 } from './components/AdminViews';
 import {
   DEFAULT_EXAM_TOKEN,
@@ -32,6 +38,10 @@ import {
   ParticipantProfile,
   StudentAnswer,
 } from './types/cbt';
+import {
+  fetchVercelStorage,
+  saveVercelStorage,
+} from './utils/vercelStorage';
 
 type AppStage =
   | 'login'
@@ -46,6 +56,9 @@ type AppStage =
 
 const STORAGE_KEYS = {
   PACKAGES: 'pusmendik_cbt_packages_v1',
+  SCHEDULES: 'pusmendik_cbt_schedules_v1',
+  PARTICIPANTS: 'pusmendik_cbt_participants_v1',
+  PROCTORS: 'pusmendik_cbt_proctors_v1',
   TOKEN: 'pusmendik_cbt_token_v1',
   HISTORY: 'pusmendik_cbt_history_v1',
 };
@@ -60,9 +73,46 @@ export default function App() {
     encryptionCode: 'GLDTKASMA',
   });
   const [adminUsername, setAdminUsername] = useState<string>('ADMIN_SMADIP');
-  const [schedules, setSchedules] = useState<AdminScheduleItem[]>(
-    INITIAL_ADMIN_SCHEDULES
-  );
+
+  const [schedules, setSchedules] = useState<AdminScheduleItem[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.SCHEDULES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // Fallback to initial schedules
+    }
+    return INITIAL_ADMIN_SCHEDULES;
+  });
+
+  const [participants, setParticipants] = useState<ProctorParticipantRow[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.PARTICIPANTS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // Fallback to initial participants
+    }
+    return INITIAL_ADMIN_PARTICIPANTS;
+  });
+
+  const [proctors, setProctors] = useState<AdminProctorItem[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.PROCTORS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // Fallback to initial proctors
+    }
+    return INITIAL_ADMIN_PROCTORS;
+  });
+
   const activeSchedules = schedules.filter((s) => s.isActive);
   const isScheduleActive = activeSchedules.length > 0;
 
@@ -131,6 +181,15 @@ export default function App() {
     }
   });
 
+  const [storageEngine, setStorageEngine] = useState<
+    'vercel-kv' | 'vercel-serverless' | 'local'
+  >('vercel-serverless');
+  const [lastSyncedLabel, setLastSyncedLabel] = useState<string>(
+    'Tersimpan Otomatis'
+  );
+  const isHydratedFromCloud = useRef(false);
+  const isApplyingRemoteUpdate = useRef(false);
+
   const [participant, setParticipant] = useState<ParticipantProfile>({
     username: 'P130100240',
     nik: '3273011805080002',
@@ -147,16 +206,42 @@ export default function App() {
   const [answers, setAnswers] = useState<Record<string, StudentAnswer>>({});
   const [timeUsedSeconds, setTimeUsedSeconds] = useState(0);
 
-  // Sync packages to localStorage
+  // Sync localStorage whenever state changes
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.PACKAGES, JSON.stringify(packages));
     } catch {
-      // ignore storage error
+      // ignore
     }
   }, [packages]);
 
-  // Sync token to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.SCHEDULES, JSON.stringify(schedules));
+    } catch {
+      // ignore
+    }
+  }, [schedules]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.PARTICIPANTS,
+        JSON.stringify(participants)
+      );
+    } catch {
+      // ignore
+    }
+  }, [participants]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.PROCTORS, JSON.stringify(proctors));
+    } catch {
+      // ignore
+    }
+  }, [proctors]);
+
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.TOKEN, activeToken);
@@ -165,7 +250,6 @@ export default function App() {
     }
   }, [activeToken]);
 
-  // Sync history to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(resultsHistory));
@@ -173,6 +257,125 @@ export default function App() {
       // ignore
     }
   }, [resultsHistory]);
+
+  // Initial Hydration & Background Polling from Vercel Storage (/api/storage)
+  const syncFromVercelCloud = useCallback(async () => {
+    const res = await fetchVercelStorage();
+    if (!res.ok) return;
+    setStorageEngine(res.engine);
+
+    if (res.data) {
+      isApplyingRemoteUpdate.current = true;
+      if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
+        setPackages(res.data.packages);
+      }
+      if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
+        setSchedules(res.data.schedules);
+      }
+      if (
+        Array.isArray(res.data.participants) &&
+        res.data.participants.length > 0
+      ) {
+        setParticipants(res.data.participants);
+      }
+      if (Array.isArray(res.data.proctors) && res.data.proctors.length > 0) {
+        setProctors(res.data.proctors);
+      }
+      if (typeof res.data.activeToken === 'string' && res.data.activeToken) {
+        setActiveToken(res.data.activeToken);
+      }
+      if (Array.isArray(res.data.resultsHistory)) {
+        setResultsHistory(res.data.resultsHistory);
+      }
+      setLastSyncedLabel(
+        new Date().toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      );
+      setTimeout(() => {
+        isApplyingRemoteUpdate.current = false;
+      }, 150);
+    } else if (!isHydratedFromCloud.current) {
+      // First boot on Vercel Storage: seed cloud storage with current state
+      const seedRes = await saveVercelStorage({
+        packages,
+        schedules,
+        participants,
+        proctors,
+        activeToken,
+        resultsHistory,
+      });
+      if (seedRes.ok) {
+        setStorageEngine(seedRes.engine);
+      }
+    }
+    isHydratedFromCloud.current = true;
+  }, [
+    activeToken,
+    packages,
+    participants,
+    proctors,
+    resultsHistory,
+    schedules,
+  ]);
+
+  useEffect(() => {
+    syncFromVercelCloud();
+    const pollTimer = window.setInterval(() => {
+      syncFromVercelCloud();
+    }, 6000);
+    return () => window.clearInterval(pollTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Push changes to Vercel Storage (/api/storage) when modified locally
+  const pushToVercelCloud = useCallback(async () => {
+    const res = await saveVercelStorage({
+      packages,
+      schedules,
+      participants,
+      proctors,
+      activeToken,
+      resultsHistory,
+    });
+    if (res.ok) {
+      setStorageEngine(res.engine);
+      setLastSyncedLabel(
+        new Date().toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      );
+    }
+  }, [
+    activeToken,
+    packages,
+    participants,
+    proctors,
+    resultsHistory,
+    schedules,
+  ]);
+
+  useEffect(() => {
+    if (!isHydratedFromCloud.current || isApplyingRemoteUpdate.current) {
+      return;
+    }
+    const debounce = window.setTimeout(() => {
+      pushToVercelCloud();
+    }, 350);
+    return () => window.clearTimeout(debounce);
+  }, [
+    packages,
+    schedules,
+    participants,
+    proctors,
+    activeToken,
+    resultsHistory,
+    pushToVercelCloud,
+  ]);
 
   const selectedPackage =
     packages.find((p) => p.id === participant.selectedPackageId) || packages[0];
@@ -248,12 +451,29 @@ export default function App() {
     if (window.innerWidth < 768) {
       requestMobileFullscreen();
     }
+    const matchedRow = participants.find(
+      (p) => p.username.toUpperCase() === username.toUpperCase()
+    );
     const isSainsPreset = username.startsWith('K02');
+
+    // Update participant loginState in shared Vercel Storage
+    if (matchedRow) {
+      setParticipants((prev) =>
+        prev.map((row) =>
+          row.id === matchedRow.id
+            ? { ...row, loginState: 'Sedang Mengerjakan' }
+            : row
+        )
+      );
+    }
+
     setParticipant((prev) => ({
       ...prev,
       username,
       nik: isSainsPreset ? '3174052209080004' : '3273011805080002',
-      fullName: isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : 'NADIA PUTRI PRATAMA',
+      fullName:
+        matchedRow?.namaPeserta ||
+        (isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : 'NADIA PUTRI PRATAMA'),
       gender: isSainsPreset ? 'Laki-Laki' : 'Perempuan',
       selectedPackageId: isSainsPreset
         ? packages[1]?.id || packages[0].id
@@ -339,6 +559,13 @@ export default function App() {
         finalScore,
       };
 
+      setParticipants((prev) =>
+        prev.map((row) =>
+          row.username.toUpperCase() === participant.username.toUpperCase()
+            ? { ...row, loginState: 'Selesai' }
+            : row
+        )
+      );
       setResultsHistory((prev) => [summary, ...prev]);
       setStage('exam_result');
     },
@@ -361,6 +588,8 @@ export default function App() {
         onUpdateToken={handleUpdateToken}
         isScheduleActive={isScheduleActive}
         activeSchedules={activeSchedules}
+        participants={participants}
+        onUpdateParticipants={setParticipants}
         packages={packages}
         onUpdatePackages={setPackages}
         onResetDefaultPackages={() => setPackages(INITIAL_EXAM_PACKAGES)}
@@ -381,11 +610,18 @@ export default function App() {
         onUpdateToken={handleUpdateToken}
         schedules={schedules}
         onUpdateSchedules={setSchedules}
+        participants={participants}
+        onUpdateParticipants={setParticipants}
+        proctors={proctors}
+        onUpdateProctors={setProctors}
         packages={packages}
         onUpdatePackages={setPackages}
         onResetDefaultPackages={() => setPackages(INITIAL_EXAM_PACKAGES)}
         resultsHistory={resultsHistory}
         onClearHistory={() => setResultsHistory([])}
+        storageEngine={storageEngine}
+        lastSyncedLabel={lastSyncedLabel}
+        onForceSyncStorage={pushToVercelCloud}
         onLogoutAdmin={() => setStage('login')}
       />
     );
