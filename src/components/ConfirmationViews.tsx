@@ -38,8 +38,32 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
 }) => {
   const [fullName, setFullName] = useState(initialProfile.fullName);
   const [gender, setGender] = useState<'Laki-Laki' | 'Perempuan'>(initialProfile.gender);
+  const nonTkaPackages = packages.filter(
+    (pkg) =>
+      !pkg.title.toLowerCase().includes('simulasi tka') &&
+      !pkg.code.toUpperCase().startsWith('TKA-')
+  );
+  const availablePackages = nonTkaPackages.length > 0 ? nonTkaPackages : packages;
+
+  const resolveActivePackage = (): ExamPackage | undefined => {
+    if (activeSchedules.length > 0) {
+      for (const sch of activeSchedules) {
+        const matched = availablePackages.find(
+          (pkg) =>
+            pkg.title.trim().toLowerCase() === sch.mapel.trim().toLowerCase()
+        );
+        if (matched) return matched;
+      }
+    }
+    return (
+      availablePackages.find((pkg) => pkg.id === initialProfile.selectedPackageId) ||
+      availablePackages[0]
+    );
+  };
+
+  const activePackage = resolveActivePackage();
   const [selectedPackageId, setSelectedPackageId] = useState(
-    initialProfile.selectedPackageId || packages[0]?.id || ''
+    activePackage?.id || initialProfile.selectedPackageId || availablePackages[0]?.id || ''
   );
   const [birthDay, setBirthDay] = useState(initialProfile.birthDay);
   const [birthMonth, setBirthMonth] = useState(initialProfile.birthMonth);
@@ -49,6 +73,13 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   );
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    const resolved = resolveActivePackage();
+    if (resolved && resolved.id !== selectedPackageId) {
+      setSelectedPackageId(resolved.id);
+    }
+  }, [activeSchedules, packages]);
 
   useEffect(() => {
     if (!isScheduleActive) {
@@ -90,13 +121,18 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       ...initialProfile,
       fullName: fullName.trim(),
       gender,
-      selectedPackageId,
+      selectedPackageId: activePackage?.id || selectedPackageId,
       birthDay,
       birthMonth,
       birthYear,
       enteredToken: enteredToken.trim().toUpperCase(),
     });
   };
+
+  const activeSubjectLabel =
+    isScheduleActive && activeSchedules.length > 0
+      ? activeSchedules[0].mapel || activePackage?.title || '-'
+      : '-';
 
   return (
     <main className="flex-1 max-w-[1200px] w-full mx-auto px-4 sm:px-8 py-8">
@@ -106,7 +142,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
           Konfirmasi Data Peserta
         </h1>
         <p className="text-xs text-slate-500 mt-1">
-          Pastikan identitas peserta dan mata pelajaran di bawah ini sudah sesuai sebelum memulai simulasi.
+          Pastikan identitas peserta dan mata pelajaran di bawah ini sudah sesuai sebelum memulai ujian.
         </p>
 
         {error && (
@@ -127,24 +163,13 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             </div>
           </div>
 
-          {/* Mata Pelajaran / Paket Soal */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5">
-            <label htmlFor="mataUjian" className="text-xs font-semibold text-slate-600">
+          {/* Mata Pelajaran (Otomatis sesuai jadwal aktif tanpa dropdown Simulasi TKA) */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
+            <label className="text-xs font-semibold text-slate-500">
               Mata Pelajaran
             </label>
-            <div className="sm:col-span-2">
-              <select
-                id="mataUjian"
-                value={selectedPackageId}
-                onChange={(e) => setSelectedPackageId(e.target.value)}
-                className="w-full px-3.5 py-2 text-sm text-slate-800 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white transition-colors"
-              >
-                {packages.map((pkg) => (
-                  <option key={pkg.id} value={pkg.id}>
-                    {pkg.title} ({pkg.questions.length} Soal · {pkg.durationMinutes} Menit)
-                  </option>
-                ))}
-              </select>
+            <div className="sm:col-span-2 text-sm font-bold text-slate-800">
+              {activeSubjectLabel}
             </div>
           </div>
 

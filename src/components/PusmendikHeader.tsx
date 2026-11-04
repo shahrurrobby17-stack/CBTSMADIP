@@ -31,7 +31,7 @@ export const PusmendikHeader: React.FC<PusmendikHeaderProps> = ({
   return (
     <header
       className={`relative w-full overflow-hidden bg-[#2b6496] text-white select-none ${
-        compact ? 'h-24 md:h-28' : 'h-36 md:h-40'
+        compact ? 'h-28 md:h-28' : 'h-40 md:h-40'
       } transition-all duration-200`}
     >
       {/* Geometric Polygonal Banner Background matching screenshot */}
@@ -69,23 +69,23 @@ export const PusmendikHeader: React.FC<PusmendikHeaderProps> = ({
         <polygon points="315,200 470,0 680,200" fill="#235b8c" fillOpacity="0.35" />
       </svg>
 
-      {/* Top Bar Content */}
-      <div className="relative z-10 max-w-[1400px] mx-auto px-5 md:px-10 pt-4 flex items-center justify-between gap-4">
+      {/* Top Bar Content (pt-10 on mobile so logo & title sit comfortably below the phone front camera) */}
+      <div className="relative z-10 max-w-[1400px] mx-auto px-3.5 sm:px-6 md:px-10 pt-10 sm:pt-8 md:pt-4 flex items-center justify-between gap-2 sm:gap-4">
         {/* Left Brand Zone: Logo + CBT SMA ISLAM DIPONEGORO WAGIR / APLIKASI SUMATIF AKHIR SEMESTER */}
-        <div className="flex items-center gap-3.5">
-          <TutWuriLogo className="w-12 h-12 md:w-14 md:h-14 shrink-0 drop-shadow-sm" />
-          <div className="leading-tight">
-            <div className="text-[15px] md:text-base font-extrabold tracking-wide text-white uppercase">
+        <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+          <TutWuriLogo className="w-10 h-10 sm:w-12 sm:h-12 md:w-14 md:h-14 shrink-0 drop-shadow-sm" />
+          <div className="leading-tight min-w-0">
+            <div className="text-[11.5px] min-[375px]:text-[12.5px] sm:text-[14px] md:text-base font-extrabold tracking-tight sm:tracking-wide text-white uppercase whitespace-nowrap">
               CBT SMA ISLAM DIPONEGORO WAGIR
             </div>
-            <div className="text-xs md:text-[13px] font-normal tracking-wide text-white/95 uppercase mt-0.5">
+            <div className="text-[10px] min-[375px]:text-[11px] sm:text-xs md:text-[13px] font-normal tracking-tight sm:tracking-wide text-white/95 uppercase mt-0.5 whitespace-nowrap">
               APLIKASI SUMATIF AKHIR SEMESTER
             </div>
           </div>
         </div>
 
         {/* Right Zone: Login Administrator above Login Proktor + Participant Info */}
-        <div className="flex items-center gap-2.5 md:gap-3">
+        <div className="flex items-center gap-2 md:gap-3 shrink-0">
           {(onOpenAdminLogin || onOpenProctorModal) && (
             <div className="hidden md:flex flex-col items-stretch gap-1.5">
               {onOpenAdminLogin && (
@@ -115,7 +115,7 @@ export const PusmendikHeader: React.FC<PusmendikHeaderProps> = ({
           )}
 
           {participantName && (
-            <div className="flex items-center gap-3 bg-[#1b4b75]/80 border border-white/15 px-3.5 py-1.5 rounded-lg">
+            <div className="flex items-center gap-1.5 sm:gap-3 bg-[#1b4b75]/80 border border-white/15 px-2 sm:px-3.5 py-1 sm:py-1.5 rounded-lg">
               <div className="hidden sm:flex flex-col text-right leading-tight">
                 <span className="text-xs font-bold text-white truncate max-w-[180px]">
                   {participantName}
@@ -126,14 +126,14 @@ export const PusmendikHeader: React.FC<PusmendikHeaderProps> = ({
                   </span>
                 )}
               </div>
-              <div className="w-8 h-8 rounded-full bg-sky-500/30 border border-sky-300/40 flex items-center justify-center">
+              <div className="hidden sm:flex w-8 h-8 rounded-full bg-sky-500/30 border border-sky-300/40 items-center justify-center">
                 <User className="w-4 h-4 text-white" />
               </div>
               {onLogout && (
                 <button
                   type="button"
                   onClick={onLogout}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                  className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
                   title="Keluar / Logout"
                 >
                   <LogOut className="w-3.5 h-3.5" />

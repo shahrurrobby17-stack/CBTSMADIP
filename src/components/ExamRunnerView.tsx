@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -39,24 +39,44 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
   onFinishExam,
 }) => {
   const questions = examPackage.questions;
+  const totalDurationSeconds = Math.max(
+    60,
+    (Number(examPackage.durationMinutes) || 90) * 60
+  );
   const [currentIndex, setCurrentIndex] = useState(0);
   const [fontScale, setFontScale] = useState<FontScale>('md');
-  const [remainingSeconds, setRemainingSeconds] = useState(
-    examPackage.durationMinutes * 60
-  );
+  const [remainingSeconds, setRemainingSeconds] = useState(totalDurationSeconds);
   const [showQuestionListModal, setShowQuestionListModal] = useState(false);
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [showFinishModal, setShowFinishModal] = useState(false);
   const [showDoubtWarningModal, setShowDoubtWarningModal] = useState(false);
   const [confirmFinishChecked, setConfirmFinishChecked] = useState(false);
 
+  // Stable refs for timer accuracy across re-renders & background cloud polling
+  const onFinishExamRef = useRef(onFinishExam);
+  useEffect(() => {
+    onFinishExamRef.current = onFinishExam;
+  }, [onFinishExam]);
+
+  const endTimeRef = useRef<number>(Date.now() + totalDurationSeconds * 1000);
+  const hasFinishedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    endTimeRef.current = Date.now() + totalDurationSeconds * 1000;
+    hasFinishedRef.current = false;
+    setRemainingSeconds(totalDurationSeconds);
+  }, [examPackage.id, totalDurationSeconds]);
+
   // For matching question type: currently selected premise ID
   const [activePremiseId, setActivePremiseId] = useState<string | null>(null);
 
-  const currentQuestion: Question = questions[currentIndex];
-  const currentAnswer: StudentAnswer = answers[currentQuestion.id] || {
-    questionId: currentQuestion.id,
-  };
+  const safeIndex = Math.min(currentIndex, Math.max(0, questions.length - 1));
+  const currentQuestion: Question | undefined = questions[safeIndex];
+  const currentAnswer: StudentAnswer = currentQuestion
+    ? answers[currentQuestion.id] || {
+        questionId: currentQuestion.id,
+      }
+    : { questionId: '' };
 
   // Reset activePremiseId and scroll smoothly to top on mobile when changing question
   useEffect(() => {
@@ -64,22 +84,25 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
     if (window.innerWidth < 1024) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
-  }, [currentQuestion.id]);
+  }, [currentQuestion?.id]);
 
-  // Countdown timer
+  // Countdown timer driven by wall-clock deadline so re-renders never freeze it
   useEffect(() => {
-    const timer = setInterval(() => {
-      setRemainingSeconds((prev) => {
-        if (prev <= 1) {
-          clearInterval(timer);
-          onFinishExam(examPackage.durationMinutes * 60);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [examPackage.durationMinutes, onFinishExam]);
+    const tick = () => {
+      const diffMs = endTimeRef.current - Date.now();
+      const secsLeft = Math.max(0, Math.ceil(diffMs / 1000));
+      setRemainingSeconds(secsLeft);
+
+      if (secsLeft <= 0 && !hasFinishedRef.current) {
+        hasFinishedRef.current = true;
+        onFinishExamRef.current(totalDurationSeconds);
+      }
+    };
+
+    tick();
+    const timer = window.setInterval(tick, 250);
+    return () => window.clearInterval(timer);
+  }, [totalDurationSeconds]);
 
   // Keyboard navigation (Left / Right arrows when not typing in input)
   useEffect(() => {
@@ -194,13 +217,36 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
 
   const handleConfirmFinish = () => {
     if (!confirmFinishChecked) return;
-    const usedSeconds = examPackage.durationMinutes * 60 - remainingSeconds;
+    hasFinishedRef.current = true;
+    const usedSeconds = totalDurationSeconds - remainingSeconds;
     onFinishExam(Math.max(1, usedSeconds));
   };
 
   const answeredCount = questions.filter((q) =>
     isQuestionAnswered(q, answers[q.id])
   ).length;
+
+  if (!currentQuestion) {
+    return (
+      <main className="flex-1 max-w-[960px] w-full mx-auto px-4 py-10 flex items-center justify-center">
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center shadow-sm max-w-md w-full">
+          <p className="text-sm font-bold text-slate-800">
+            Belum Ada Butir Soal pada Mata Pelajaran Ini
+          </p>
+          <p className="text-xs text-slate-500 mt-1.5">
+            Silakan hubungi Proktor atau Administrator untuk mengunggah soal pada menu Status Tes.
+          </p>
+          <button
+            type="button"
+            onClick={() => onFinishExam(1)}
+            className="mt-5 px-5 py-2.5 rounded-full bg-[#0066ff] text-white text-xs font-semibold cursor-pointer"
+          >
+            Kembali
+          </button>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="flex-1 max-w-[1380px] w-full mx-auto px-3 sm:px-6 py-5 flex flex-col">
@@ -311,96 +357,57 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
           </div>
         </div>
 
-        {/* Main Split Question Area: Left (Stimulus/Wacana) & Right (Soal & Opsi) */}
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
-          {/* Left Column: Wacana / Stimulus */}
-          <div className="lg:col-span-6 p-5 sm:p-7 lg:overflow-y-auto lg:max-h-[62vh] bg-slate-50/30">
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
-              Wacana / Stimulus Soal
-            </div>
-
-            {currentQuestion.stimulusTitle && (
-              <h2 className="text-base sm:text-lg font-bold text-slate-900 mb-3">
-                {currentQuestion.stimulusTitle}
-              </h2>
-            )}
-
-            {currentQuestion.stimulusText && (
-              <div className={`space-y-3.5 text-slate-700 ${fontSizeClass}`}>
-                {currentQuestion.stimulusText.split('\n\n').map((para, idx) => (
-                  <p key={idx} className="text-justify">
-                    {para}
-                  </p>
-                ))}
-              </div>
-            )}
-
-            {/* Optional Stimulus Data Table */}
-            {currentQuestion.stimulusTable && (
-              <div className="mt-5 border border-slate-200 rounded-xl overflow-hidden bg-white shadow-2xs">
-                {currentQuestion.stimulusTable.title && (
-                  <div className="px-4 py-2.5 bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-800">
-                    {currentQuestion.stimulusTable.title}
-                  </div>
-                )}
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs sm:text-sm">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-700">
-                        {currentQuestion.stimulusTable.headers.map((h, i) => (
-                          <th key={i} className="py-2.5 px-3 font-semibold">
-                            {h}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {currentQuestion.stimulusTable.rows.map((row, rIdx) => (
-                        <tr key={rIdx} className="hover:bg-slate-50/70">
-                          {row.map((cell, cIdx) => (
-                            <td
-                              key={cIdx}
-                              className={`py-2 px-3 ${
-                                cIdx > 0 ? 'font-mono tabular-nums text-slate-800' : 'font-medium text-slate-800'
-                              }`}
-                            >
-                              {cell}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {currentQuestion.stimulusTable.caption && (
-                  <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 text-[11px] text-slate-500 italic">
-                    {currentQuestion.stimulusTable.caption}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Optional Highlight Formula / Info Box */}
-            {currentQuestion.stimulusHighlightBox && (
-              <div className="mt-4 p-3.5 rounded-lg bg-blue-50/70 border border-blue-200 text-xs sm:text-sm font-mono font-semibold text-blue-900">
-                {currentQuestion.stimulusHighlightBox}
-              </div>
-            )}
-
-            {currentQuestion.stimulusSource && (
-              <div className="mt-4 pt-3 border-t border-slate-200/70 text-xs text-slate-500 italic">
-                {currentQuestion.stimulusSource}
-              </div>
-            )}
-          </div>
-
-          {/* Right Column: Pertanyaan & Area Jawaban */}
-          <div className="lg:col-span-6 p-5 sm:p-7 lg:overflow-y-auto lg:max-h-[62vh] flex flex-col justify-between">
+        {/* Main Question & Answer Area */}
+        <div className="flex-1 flex flex-col">
+          <div className="flex-1 p-5 sm:p-7 lg:overflow-y-auto lg:max-h-[62vh] flex flex-col justify-between">
             <div>
               {/* Question Text */}
               <div className={`font-semibold text-slate-900 ${fontSizeClass}`}>
                 {currentQuestion.questionText}
               </div>
+
+              {/* Optional Table inside Question */}
+              {currentQuestion.stimulusTable && (
+                <div className="my-4 border border-slate-200 rounded-xl overflow-hidden bg-white shadow-2xs">
+                  {currentQuestion.stimulusTable.title && (
+                    <div className="px-4 py-2.5 bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-800">
+                      {currentQuestion.stimulusTable.title}
+                    </div>
+                  )}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-700">
+                          {currentQuestion.stimulusTable.headers.map((h, i) => (
+                            <th key={i} className="py-2.5 px-3 font-semibold border-r last:border-r-0 border-slate-200/70">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {currentQuestion.stimulusTable.rows.map((row, rIdx) => (
+                          <tr key={rIdx} className="hover:bg-slate-50/70">
+                            {row.map((cell, cIdx) => (
+                              <td
+                                key={cIdx}
+                                className="py-2 px-3 text-slate-800 border-r last:border-r-0 border-slate-100"
+                              >
+                                {cell}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {currentQuestion.stimulusTable.caption && (
+                    <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 text-[11px] text-slate-500 italic">
+                      {currentQuestion.stimulusTable.caption}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {currentQuestion.instructionText && (
                 <p className="mt-1.5 text-xs font-medium text-blue-700">

@@ -73,6 +73,7 @@ export interface ExamPackage {
   subtest: string;
   durationMinutes: number;
   questions: Question[];
+  targetClass?: string; // e.g. 'Kelas X', 'Kelas XI IPA', 'Kelas XI IPS', 'Kelas XII IPA', 'Kelas XII IPS', 'Semua Kelas'
 }
 
 export interface StudentAnswer {

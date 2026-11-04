@@ -116,12 +116,30 @@ export default function App() {
   const activeSchedules = schedules.filter((s) => s.isActive);
   const isScheduleActive = activeSchedules.length > 0;
 
+  const filterOutSimulasiTka = useCallback((list: ExamPackage[]): ExamPackage[] => {
+    const cleaned = list.filter(
+      (pkg) =>
+        !pkg.title.toLowerCase().includes('simulasi tka') &&
+        !pkg.code.toUpperCase().startsWith('TKA-')
+    );
+    return cleaned.length > 0 ? cleaned : INITIAL_EXAM_PACKAGES;
+  }, []);
+
   const [packages, setPackages] = useState<ExamPackage[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.PACKAGES);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const cleaned = parsed.filter(
+            (pkg: ExamPackage) =>
+              pkg &&
+              typeof pkg.title === 'string' &&
+              !pkg.title.toLowerCase().includes('simulasi tka') &&
+              !String(pkg.code || '').toUpperCase().startsWith('TKA-')
+          );
+          if (cleaned.length > 0) return cleaned;
+        }
       }
     } catch {
       // Fallback to initial packages
@@ -189,6 +207,8 @@ export default function App() {
   );
   const isHydratedFromCloud = useRef(false);
   const isApplyingRemoteUpdate = useRef(false);
+  const lastLocalMutationAt = useRef<number>(0);
+  const pendingPushCount = useRef<number>(0);
 
   const [participant, setParticipant] = useState<ParticipantProfile>({
     username: 'P130100240',
@@ -260,16 +280,80 @@ export default function App() {
     }
   }, [resultsHistory]);
 
+  const handleUpdatePackages = useCallback(
+    (
+      updater:
+        | ExamPackage[]
+        | ((prevPackages: ExamPackage[]) => ExamPackage[])
+    ) => {
+      lastLocalMutationAt.current = Date.now();
+      setPackages((prev) => {
+        const nextPackages =
+          typeof updater === 'function' ? updater(prev) : updater;
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.PACKAGES,
+            JSON.stringify(nextPackages)
+          );
+        } catch {
+          // ignore
+        }
+        pendingPushCount.current += 1;
+        saveVercelStorage({
+          packages: nextPackages,
+        })
+          .then((res) => {
+            if (res.ok) {
+              setStorageEngine(res.engine);
+              setLastSyncedLabel(
+                new Date().toLocaleTimeString('id-ID', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })
+              );
+            }
+          })
+          .finally(() => {
+            pendingPushCount.current = Math.max(
+              0,
+              pendingPushCount.current - 1
+            );
+          });
+        return nextPackages;
+      });
+    },
+    []
+  );
+
   // Initial Hydration & Background Polling from Vercel Storage (/api/storage)
   const syncFromVercelCloud = useCallback(async () => {
+    if (
+      pendingPushCount.current > 0 ||
+      Date.now() - lastLocalMutationAt.current < 4000
+    ) {
+      return;
+    }
+    const fetchStartedAt = Date.now();
     const res = await fetchVercelStorage();
     if (!res.ok) return;
+    if (
+      pendingPushCount.current > 0 ||
+      lastLocalMutationAt.current >= fetchStartedAt ||
+      Date.now() - lastLocalMutationAt.current < 4000
+    ) {
+      return;
+    }
     setStorageEngine(res.engine);
 
     if (res.data) {
       isApplyingRemoteUpdate.current = true;
       if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
-        setPackages(res.data.packages);
+        const cleanedPackages = filterOutSimulasiTka(res.data.packages);
+        setPackages(cleanedPackages);
+        if (cleanedPackages.length !== res.data.packages.length) {
+          saveVercelStorage({ packages: cleanedPackages }).catch(() => {});
+        }
       }
       if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
         setSchedules(res.data.schedules);
@@ -316,6 +400,7 @@ export default function App() {
     isHydratedFromCloud.current = true;
   }, [
     activeToken,
+    filterOutSimulasiTka,
     packages,
     participants,
     proctors,
@@ -329,28 +414,33 @@ export default function App() {
       syncFromVercelCloud();
     }, 6000);
     return () => window.clearInterval(pollTimer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [syncFromVercelCloud]);
 
   // Push changes to Vercel Storage (/api/storage) when modified locally
   const pushToVercelCloud = useCallback(async () => {
-    const res = await saveVercelStorage({
-      packages,
-      schedules,
-      participants,
-      proctors,
-      activeToken,
-      resultsHistory,
-    });
-    if (res.ok) {
-      setStorageEngine(res.engine);
-      setLastSyncedLabel(
-        new Date().toLocaleTimeString('id-ID', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        })
-      );
+    lastLocalMutationAt.current = Date.now();
+    pendingPushCount.current += 1;
+    try {
+      const res = await saveVercelStorage({
+        packages,
+        schedules,
+        participants,
+        proctors,
+        activeToken,
+        resultsHistory,
+      });
+      if (res.ok) {
+        setStorageEngine(res.engine);
+        setLastSyncedLabel(
+          new Date().toLocaleTimeString('id-ID', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        );
+      }
+    } finally {
+      pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
     }
   }, [
     activeToken,
@@ -365,9 +455,10 @@ export default function App() {
     if (!isHydratedFromCloud.current || isApplyingRemoteUpdate.current) {
       return;
     }
+    lastLocalMutationAt.current = Date.now();
     const debounce = window.setTimeout(() => {
       pushToVercelCloud();
-    }, 350);
+    }, 250);
     return () => window.clearTimeout(debounce);
   }, [
     packages,
@@ -380,7 +471,15 @@ export default function App() {
   ]);
 
   const selectedPackage =
-    packages.find((p) => p.id === participant.selectedPackageId) || packages[0];
+    packages.find((p) => p.id === participant.selectedPackageId) ||
+    (activeSchedules.length > 0
+      ? packages.find(
+          (p) =>
+            p.title.trim().toLowerCase() ===
+            activeSchedules[0].mapel.trim().toLowerCase()
+        )
+      : undefined) ||
+    packages[0];
 
   const [isFullscreenActive, setIsFullscreenActive] = useState<boolean>(false);
 
@@ -554,40 +653,45 @@ export default function App() {
       }
     };
 
-    const handleUserInteractionFullscreen = () => {
+    const handleActiveExamUserInteraction = () => {
       suppressIncomingNotifications();
-      // Auto-trigger full screen on laptop & all devices when accessing student CBT views
-      if (stage !== 'admin_dashboard' && stage !== 'proctor_dashboard') {
+      // Hanya re-enforce layar penuh saat siswa sudah berada di halaman soal aktif
+      if (stage === 'exam_running') {
         requestCbtFullscreen();
       }
     };
 
-    // Attempt immediately when first entering CBT link
-    handleUserInteractionFullscreen();
-
-    // Re-enforce on load, pageshow, and on ANY click/pointer interaction so clicking the CBT link/page immediately opens fullscreen on laptop!
-    window.addEventListener('load', handleUserInteractionFullscreen, { passive: true });
-    window.addEventListener('pageshow', handleUserInteractionFullscreen, { passive: true });
-    document.addEventListener('pointerdown', handleUserInteractionFullscreen, { capture: true, passive: true });
-    document.addEventListener('mousedown', handleUserInteractionFullscreen, { capture: true, passive: true });
-    document.addEventListener('touchstart', handleUserInteractionFullscreen, { capture: true, passive: true });
-    document.addEventListener('click', handleUserInteractionFullscreen, { capture: true, passive: true });
+    // Re-enforce saat sesi ujian aktif jika siswa mengklik di dalam ujian
+    window.addEventListener('load', handleActiveExamUserInteraction, { passive: true });
+    window.addEventListener('pageshow', handleActiveExamUserInteraction, { passive: true });
+    document.addEventListener('pointerdown', handleActiveExamUserInteraction, { capture: true, passive: true });
+    document.addEventListener('click', handleActiveExamUserInteraction, { capture: true, passive: true });
 
     // Handle Esc key on keyboard to exit CBT on laptop
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) {
         exitCbtFullscreen();
 
-        // If currently in active exam session, exiting CBT locks the session
-        if (
-          stage === 'exam_running' ||
-          stage === 'confirm_test' ||
-          stage === 'confirm_participant'
-        ) {
+        // Hanya catat pelanggaran jika siswa sudah masuk ke halaman soal (exam_running)
+        if (stage === 'exam_running') {
           lockStudentByViolation(
-            'Keluar dari sistem CBT (Menekan tombol Esc pada keyboard laptop)'
+            'Keluar dari halaman soal ujian CBT (Menekan tombol Esc pada keyboard laptop)'
           );
-        } else if (stage === 'exam_result') {
+        } else if (
+          stage === 'confirm_participant' ||
+          stage === 'confirm_test' ||
+          stage === 'exam_result'
+        ) {
+          if (stage === 'confirm_participant' || stage === 'confirm_test') {
+            setParticipants((prev) =>
+              prev.map((row) =>
+                row.username.toUpperCase() === participant.username.toUpperCase() &&
+                row.loginState === 'Sedang Mengerjakan'
+                  ? { ...row, loginState: 'Belum Login', requestReset: false }
+                  : row
+              )
+            );
+          }
           setStage('login');
         }
       }
@@ -597,13 +701,9 @@ export default function App() {
     const handleFullscreenChange = () => {
       const isFs = updateFullscreenState();
       if (!isFs) {
-        if (
-          stage === 'exam_running' ||
-          stage === 'confirm_test' ||
-          stage === 'confirm_participant'
-        ) {
+        if (stage === 'exam_running') {
           lockStudentByViolation(
-            'Keluar dari sistem CBT (Menekan tombol Esc / Keluar dari Fullscreen)'
+            'Keluar dari halaman soal ujian CBT (Menekan tombol Esc / Keluar dari Fullscreen)'
           );
         }
       }
@@ -614,44 +714,45 @@ export default function App() {
     document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
     return () => {
-      window.removeEventListener('load', handleUserInteractionFullscreen);
-      window.removeEventListener('pageshow', handleUserInteractionFullscreen);
-      document.removeEventListener('pointerdown', handleUserInteractionFullscreen, { capture: true });
-      document.removeEventListener('mousedown', handleUserInteractionFullscreen, { capture: true });
-      document.removeEventListener('touchstart', handleUserInteractionFullscreen, { capture: true });
-      document.removeEventListener('click', handleUserInteractionFullscreen, { capture: true });
+      window.removeEventListener('load', handleActiveExamUserInteraction);
+      window.removeEventListener('pageshow', handleActiveExamUserInteraction);
+      document.removeEventListener('pointerdown', handleActiveExamUserInteraction, { capture: true });
+      document.removeEventListener('click', handleActiveExamUserInteraction, { capture: true });
       window.removeEventListener('keydown', handleKeyDown, { capture: true });
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
     };
-  }, [requestCbtFullscreen, exitCbtFullscreen, stage, lockStudentByViolation]);
+  }, [
+    requestCbtFullscreen,
+    exitCbtFullscreen,
+    stage,
+    lockStudentByViolation,
+    participant.username,
+  ]);
 
-  // Detect student exit violation when inside active CBT session
+  // Detect student exit violation ONLY when inside active question page (exam_running)
   useEffect(() => {
-    const isStudentInActiveCbtSession =
-      stage === 'confirm_participant' ||
-      stage === 'confirm_test' ||
-      stage === 'exam_running';
+    const isStudentInActiveCbtSession = stage === 'exam_running';
 
     if (!isStudentInActiveCbtSession) return;
 
     const handleVisibilityViolation = () => {
       if (document.visibilityState === 'hidden') {
         lockStudentByViolation(
-          'Keluar dari sistem CBT / berpindah tab atau aplikasi saat sesi berlangsung'
+          'Keluar dari halaman soal CBT / berpindah tab atau aplikasi saat ujian berlangsung'
         );
       }
     };
 
     const handleWindowBlurViolation = () => {
       lockStudentByViolation(
-        'Keluar dari fokus layar sistem CBT / membuka jendela atau aplikasi lain'
+        'Keluar dari fokus layar soal CBT / membuka jendela atau aplikasi lain saat ujian berlangsung'
       );
     };
 
     const handlePageLeaveViolation = () => {
       lockStudentByViolation(
-        'Menutup atau keluar dari halaman sistem CBT saat sesi aktif'
+        'Menutup atau keluar dari halaman soal CBT saat ujian berlangsung'
       );
     };
 
@@ -772,6 +873,13 @@ export default function App() {
 
   const handleStartExam = () => {
     requestCbtFullscreen();
+    setParticipants((prev) =>
+      prev.map((row) =>
+        row.username.toUpperCase() === participant.username.toUpperCase()
+          ? { ...row, loginState: 'Sedang Mengerjakan', requestReset: false }
+          : row
+      )
+    );
     setAnswers({});
     setTimeUsedSeconds(0);
     setStage('exam_running');
@@ -847,17 +955,24 @@ export default function App() {
   );
 
   const handleLogout = () => {
-    if (
-      stage === 'confirm_participant' ||
-      stage === 'confirm_test' ||
-      stage === 'exam_running'
-    ) {
+    if (stage === 'exam_running') {
       setAnswers({});
       lockStudentByViolation(
-        'Keluar dari sistem CBT sebelum menyelesaikan ujian'
+        'Keluar dari halaman soal CBT sebelum menyelesaikan ujian'
       );
       return;
     }
+    if (stage === 'confirm_participant' || stage === 'confirm_test') {
+      setParticipants((prev) =>
+        prev.map((row) =>
+          row.username.toUpperCase() === participant.username.toUpperCase() &&
+          row.loginState === 'Sedang Mengerjakan'
+            ? { ...row, loginState: 'Belum Login', requestReset: false }
+            : row
+        )
+      );
+    }
+    exitCbtFullscreen();
     setAnswers({});
     setStage('login');
   };
@@ -876,8 +991,8 @@ export default function App() {
         participants={participants}
         onUpdateParticipants={setParticipants}
         packages={packages}
-        onUpdatePackages={setPackages}
-        onResetDefaultPackages={() => setPackages(INITIAL_EXAM_PACKAGES)}
+        onUpdatePackages={handleUpdatePackages}
+        onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
         resultsHistory={resultsHistory}
         onClearHistory={() => setResultsHistory([])}
         onLogoutProctor={() => setStage('login')}
@@ -900,8 +1015,8 @@ export default function App() {
         proctors={proctors}
         onUpdateProctors={setProctors}
         packages={packages}
-        onUpdatePackages={setPackages}
-        onResetDefaultPackages={() => setPackages(INITIAL_EXAM_PACKAGES)}
+        onUpdatePackages={handleUpdatePackages}
+        onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
         resultsHistory={resultsHistory}
         onClearHistory={() => setResultsHistory([])}
         storageEngine={storageEngine}
@@ -940,10 +1055,12 @@ export default function App() {
           lastViolationInfo={lastViolationInfo}
           onRequestResetLogin={handleRequestResetFromLogin}
           onQuickLoginAdmin={() => {
+            requestCbtFullscreen();
             setAdminUsername('K05060108-KB6K');
             setStage('admin_dashboard');
           }}
           onQuickLoginProctor={() => {
+            requestCbtFullscreen();
             setProctorSession({
               name: 'K05060108-KB6K',
               encryptionCode: 'GLDTKASMA',
@@ -957,6 +1074,7 @@ export default function App() {
       {stage === 'proctor_login' && (
         <ProctorLoginView
           onProctorLoginSuccess={(proctorName, encryptionCode) => {
+            requestCbtFullscreen();
             setProctorSession({ name: proctorName, encryptionCode });
             setStage('proctor_dashboard');
           }}
@@ -969,6 +1087,7 @@ export default function App() {
       {stage === 'admin_login' && (
         <AdminLoginView
           onAdminLoginSuccess={(adminUser) => {
+            requestCbtFullscreen();
             setAdminUsername(adminUser);
             setStage('admin_dashboard');
           }}

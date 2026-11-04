@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
   AlertTriangle,
-  CheckCircle2,
   Eye,
   EyeOff,
-  RotateCcw,
   ShieldCheck,
   UserCog,
   Zap,
@@ -42,7 +40,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [password, setPassword] = useState('ANBKTKA26*');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [resetRequestedNotice, setResetRequestedNotice] = useState('');
 
   useEffect(() => {
     if (lastViolationInfo?.username) {
@@ -83,19 +80,28 @@ export const LoginView: React.FC<LoginViewProps> = ({
       return;
     }
 
-    setErrorMsg('');
-    setResetRequestedNotice('');
-    onLoginSuccess(cleanUser);
-  };
-
-  const handleSendResetRequest = () => {
-    if (!cleanUpperUsername) return;
-    if (onRequestResetLogin) {
-      onRequestResetLogin(cleanUpperUsername);
+    // Opsi B: Seketika masuk mode Fullscreen saat tombol Login diklik
+    try {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+        msFullscreenElement?: Element | null;
+      };
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+      };
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+        } else if (docEl.webkitRequestFullscreen) {
+          docEl.webkitRequestFullscreen();
+        }
+      }
+    } catch {
+      // Ignore
     }
-    setResetRequestedNotice(
-      'Permintaan Reset Login berhasil dikirim ke Proktor & Administrator. Silakan tunggu hingga Proktor/Administrator menekan tombol Reset Login.'
-    );
+
+    setErrorMsg('');
+    onLoginSuccess(cleanUser);
   };
 
   return (
@@ -137,22 +143,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 )}
               </div>
             </div>
-
-            <button
-              type="button"
-              onClick={handleSendResetRequest}
-              className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Minta Reset Login ke Proktor / Administrator</span>
-            </button>
-
-            {resetRequestedNotice && (
-              <div className="flex items-start gap-1.5 pt-1 text-[11px] font-semibold text-amber-800">
-                <CheckCircle2 className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
-                <span>{resetRequestedNotice}</span>
-              </div>
-            )}
           </div>
         )}
 

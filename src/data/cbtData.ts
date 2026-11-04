@@ -10,6 +10,7 @@ export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
     level: 'SMA / MA / SMK / Sederajat',
     subtest: 'Literasi Membaca & Teks Informasi',
     durationMinutes: 90,
+    targetClass: 'Kelas X',
     questions: [
       {
         id: 'q1',
@@ -345,6 +346,7 @@ export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
     level: 'SMA / MA / SMK / Sederajat',
     subtest: 'Penalaran Kuantitatif & Sains Terpadu',
     durationMinutes: 45,
+    targetClass: 'Kelas XI IPA',
     questions: [
       {
         id: 'sq1',
@@ -504,6 +506,7 @@ export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
     level: 'SMA / MA / SMK / Sederajat',
     subtest: 'Aljabar, Geometri & Statistika Terapan',
     durationMinutes: 90,
+    targetClass: 'Kelas XI IPS',
     questions: [
       {
         id: 'qm1',
@@ -556,6 +559,7 @@ export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
     level: 'SMA / MA / SMK / Sederajat',
     subtest: 'Reading Comprehension & Critical Analysis',
     durationMinutes: 90,
+    targetClass: 'Kelas XII IPA',
     questions: [
       {
         id: 'qb1',
@@ -577,6 +581,67 @@ export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
         correctOptionId: 'B',
         points: 25,
         explanation: 'The text states that AI platforms analyze learning habits and provide targeted feedback and customized study trajectories.',
+      },
+    ],
+  },
+  {
+    id: 'sej-sas-01',
+    code: 'SEJ-SAS-05',
+    title: 'Sejarah Indonesia & Kebangsaan',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Pemahaman Sejarah & Kebangsaan',
+    durationMinutes: 60,
+    targetClass: 'Kelas XII IPS',
+    questions: [
+      {
+        id: 'qs1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'Sejarah Indonesia - Peristiwa Proklamasi',
+        stimulusTitle: 'Peristiwa Rengasdengklok dan Proklamasi Kemerdekaan 1945',
+        stimulusText:
+          'Peristiwa Rengasdengklok terjadi pada tanggal 16 Agustus 1945. Golongan muda membawa Soekarno dan Hatta ke Rengasdengklok untuk menjauhkan mereka dari pengaruh Jepang dan mendesak agar proklamasi kemerdekaan segera dilaksanakan tanpa menunggu janji Jepang.',
+        questionText:
+          'Apa tujuan utama golongan muda membawa Soekarno dan Hatta ke Rengasdengklok menjelang Proklamasi Kemerdekaan?',
+        options: [
+          { id: 'A', text: 'Menunggu perintah resmi dari Marsekal Terauchi di Dalat' },
+          { id: 'B', text: 'Menjauhkan dari pengaruh Jepang dan menyegerakan Proklamasi' },
+          { id: 'C', text: 'Membentuk kabinet pemerintahan baru yang berkedudukan di Jawa Barat' },
+          { id: 'D', text: 'Mengamankan dokumen perjanjian Linggajati dari kehancuran' },
+          { id: 'E', text: 'Menyerahkan kekuasaan politik kepada tentara Sekutu' },
+        ],
+        correctOptionId: 'B',
+        points: 25,
+        explanation:
+          'Golongan muda membawa Soekarno-Hatta ke Rengasdengklok agar terbebas dari tekanan/pengaruh Jepang dan proklamasi dapat dilakukan secepatnya secara mandiri.',
+      },
+      {
+        id: 'qs2',
+        number: 2,
+        type: 'benar_salah',
+        category: 'Sejarah Indonesia - Perjuangan Diplomasi',
+        stimulusTitle: 'Konferensi Meja Bundar (KMB) 1949',
+        stimulusText:
+          'Konferensi Meja Bundar dilaksanakan di Den Haag, Belanda, dari 23 Agustus hingga 2 November 1949 sebagai puncaknya diplomasi Indonesia.',
+        questionText:
+          'Tentukan Benar atau Salah pernyataan berikut terkait hasil Konferensi Meja Bundar!',
+        trueLabel: 'Benar',
+        falseLabel: 'Salah',
+        statements: [
+          {
+            id: 'sts1',
+            statement: 'Belanda mengakui kedaulatan Republik Indonesia Serikat (RIS) sebagai negara merdeka dan berdaulat.',
+            correctValue: 'Benar',
+          },
+          {
+            id: 'sts2',
+            statement: 'Masalah Irian Barat berhasil diselesaikan secara tuntas pada saat penandatanganan dokumen KMB di Den Haag.',
+            correctValue: 'Salah',
+          },
+        ],
+        points: 25,
+        explanation:
+          'KMB menghasilkan pengakuan kedaulatan RIS. Masalah Irian Barat ditunda dan disepakati akan diselesaikan dalam waktu 1 tahun setelah KMB.',
       },
     ],
   },

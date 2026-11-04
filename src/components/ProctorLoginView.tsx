@@ -36,6 +36,26 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
     }
 
     setErrorMsg('');
+
+    // Langsung memicu Fullscreen pada interaksi klik Login Proktor
+    try {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+      };
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+        } else if (docEl.webkitRequestFullscreen) {
+          docEl.webkitRequestFullscreen();
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
     onProctorLoginSuccess(cleanName.toUpperCase(), cleanEnc.toUpperCase());
   };
 
