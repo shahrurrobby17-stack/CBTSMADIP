@@ -25,13 +25,65 @@
     <div id="root"></div>
     <script>
       (function () {
+        // 1. Suppress incoming Web Notifications, ServiceWorker popups, and Vibrations
+        try {
+          if (typeof window !== 'undefined') {
+            var SilentNotification = function () {
+              return {
+                close: function () {},
+                addEventListener: function () {},
+                removeEventListener: function () {},
+              };
+            };
+            SilentNotification.permission = 'denied';
+            SilentNotification.requestPermission = function () {
+              return Promise.resolve('denied');
+            };
+            Object.defineProperty(window, 'Notification', {
+              configurable: true,
+              writable: true,
+              value: SilentNotification,
+            });
+          }
+          if (navigator && navigator.vibrate) {
+            navigator.vibrate = function () {
+              return false;
+            };
+          }
+          if (navigator && navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+            navigator.serviceWorker.getRegistrations().then(function (regs) {
+              regs.forEach(function (reg) {
+                if (reg.getNotifications) {
+                  reg.getNotifications().then(function (list) {
+                    list.forEach(function (n) {
+                      n.close();
+                    });
+                  });
+                }
+              });
+            }).catch(function () {});
+          }
+        } catch (e) {}
+
+        // 2. Request Screen Wake Lock so mobile stays in exam focus mode
+        function requestExamWakeLock() {
+          try {
+            if (navigator && 'wakeLock' in navigator && navigator.wakeLock) {
+              navigator.wakeLock.request('screen').catch(function () {});
+            }
+          } catch (e) {}
+        }
+
+        // 3. Enter Fullscreen on Mobile without interrupting native scroll
         function enterMobileFullscreen() {
           var isMobile =
             window.innerWidth < 768 ||
             (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
             /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
           if (!isMobile) return;
-          window.scrollTo(0, 1);
+
+          requestExamWakeLock();
+
           var docEl = document.documentElement;
           if (!document.fullscreenElement && !document.webkitFullscreenElement) {
             if (docEl.requestFullscreen) {
@@ -43,10 +95,12 @@
             }
           }
         }
+
         enterMobileFullscreen();
         window.addEventListener('DOMContentLoaded', enterMobileFullscreen, { passive: true });
         window.addEventListener('load', enterMobileFullscreen, { passive: true });
-        ['pointerdown', 'touchstart', 'touchend', 'click'].forEach(function (evt) {
+        window.addEventListener('pageshow', enterMobileFullscreen, { passive: true });
+        ['pointerdown', 'click'].forEach(function (evt) {
           document.addEventListener(evt, enterMobileFullscreen, { capture: true, passive: true });
         });
       })();

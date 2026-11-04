@@ -1,40 +1,101 @@
-import React, { useState } from 'react';
-import { Eye, EyeOff, KeyRound, ShieldCheck, UserCog, Zap } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  RotateCcw,
+  ShieldCheck,
+  UserCog,
+  Zap,
+} from 'lucide-react';
+import { ProctorParticipantRow } from './ProctorDashboardView';
+
+export interface ViolationAlertInfo {
+  username: string;
+  fullName: string;
+  reason: string;
+  timestamp: string;
+}
 
 interface LoginViewProps {
   onLoginSuccess: (username: string) => void;
-  onOpenProctorModal: () => void;
+  onOpenProctorModal?: () => void;
   onQuickLoginAdmin?: () => void;
   onQuickLoginProctor?: () => void;
+  participants?: ProctorParticipantRow[];
+  lastViolationInfo?: ViolationAlertInfo | null;
+  onRequestResetLogin?: (username: string) => void;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({
   onLoginSuccess,
-  onOpenProctorModal,
   onQuickLoginAdmin,
   onQuickLoginProctor,
+  participants = [],
+  lastViolationInfo,
+  onRequestResetLogin,
 }) => {
-  const [username, setUsername] = useState('P130100240');
+  const [username, setUsername] = useState(
+    lastViolationInfo?.username || 'P130100240'
+  );
   const [password, setPassword] = useState('ANBKTKA26*');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [resetRequestedNotice, setResetRequestedNotice] = useState('');
+
+  useEffect(() => {
+    if (lastViolationInfo?.username) {
+      setUsername(lastViolationInfo.username);
+    }
+  }, [lastViolationInfo]);
+
+  const cleanUpperUsername = username.trim().toUpperCase();
+  const matchedParticipant = participants.find(
+    (p) => p.username.toUpperCase() === cleanUpperUsername
+  );
+
+  const isLockedByViolation = Boolean(
+    matchedParticipant &&
+      (matchedParticipant.loginState === 'Terkunci (Pelanggaran)' ||
+        matchedParticipant.requestReset)
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanUser = username.trim();
+    const cleanUser = username.trim().toUpperCase();
     const cleanPass = password.trim();
     if (!cleanUser || !cleanPass) {
       setErrorMsg('Username dan password wajib diisi.');
       return;
     }
+
+    const row = participants.find(
+      (p) => p.username.toUpperCase() === cleanUser
+    );
+    if (
+      row &&
+      (row.loginState === 'Terkunci (Pelanggaran)' || row.requestReset)
+    ) {
+      setErrorMsg(
+        'Akses Login Ditolak: Akun Anda terkunci karena pelanggaran keluar dari sistem CBT. Anda wajib meminta Reset Login kepada Proktor atau Administrator.'
+      );
+      return;
+    }
+
     setErrorMsg('');
-    onLoginSuccess(cleanUser.toUpperCase());
+    setResetRequestedNotice('');
+    onLoginSuccess(cleanUser);
   };
 
-  const handleQuickFill = (presetUser: string, presetPass: string) => {
-    setUsername(presetUser);
-    setPassword(presetPass);
-    setErrorMsg('');
+  const handleSendResetRequest = () => {
+    if (!cleanUpperUsername) return;
+    if (onRequestResetLogin) {
+      onRequestResetLogin(cleanUpperUsername);
+    }
+    setResetRequestedNotice(
+      'Permintaan Reset Login berhasil dikirim ke Proktor & Administrator. Silakan tunggu hingga Proktor/Administrator menekan tombol Reset Login.'
+    );
   };
 
   return (
@@ -48,7 +109,54 @@ export const LoginView: React.FC<LoginViewProps> = ({
           Silakan login dengan menggunakan username dan password yang anda miliki
         </p>
 
-        {errorMsg && (
+        {/* Peringatan Pelanggaran Keluar Sistem CBT */}
+        {isLockedByViolation && matchedParticipant && (
+          <div className="mt-4 p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-2.5">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="text-xs font-extrabold uppercase tracking-wide text-rose-800">
+                  Pelanggaran Terdeteksi — Sesi Login Terkunci
+                </div>
+                <p className="text-xs leading-relaxed text-rose-700">
+                  Peserta <strong>{matchedParticipant.namaPeserta}</strong> (
+                  <span className="font-mono font-bold">
+                    {matchedParticipant.username}
+                  </span>
+                  ) terdeteksi melakukan pelanggaran keluar dari sistem CBT.
+                  Untuk masuk kembali, Anda wajib meminta{' '}
+                  <strong>Reset Login</strong> ke Proktor atau Administrator.
+                </p>
+                {matchedParticipant.violationReason && (
+                  <p className="text-[11px] font-medium text-rose-600">
+                    Keterangan: {matchedParticipant.violationReason}
+                    {matchedParticipant.violationAt
+                      ? ` (${matchedParticipant.violationAt})`
+                      : ''}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSendResetRequest}
+              className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Minta Reset Login ke Proktor / Administrator</span>
+            </button>
+
+            {resetRequestedNotice && (
+              <div className="flex items-start gap-1.5 pt-1 text-[11px] font-semibold text-amber-800">
+                <CheckCircle2 className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                <span>{resetRequestedNotice}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {errorMsg && !isLockedByViolation && (
           <div className="mt-4 px-3.5 py-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs font-medium text-rose-700">
             {errorMsg}
           </div>
@@ -71,7 +179,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <input
                 type="text"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                onChange={(e) => {
+                  setUsername(e.target.value);
+                  setErrorMsg('');
+                }}
                 placeholder="Username"
                 aria-label="Username"
                 autoComplete="username"
@@ -121,9 +232,15 @@ export const LoginView: React.FC<LoginViewProps> = ({
           <div className="pt-2">
             <button
               type="submit"
-              className="w-full py-2.5 px-6 rounded-full bg-[#0066ff] hover:bg-[#0052cc] active:scale-[0.99] text-white text-[14px] font-semibold shadow-[0_6px_16px_rgba(0,102,255,0.28)] transition-all cursor-pointer"
+              className={`w-full py-2.5 px-6 rounded-full text-white text-[14px] font-semibold transition-all cursor-pointer ${
+                isLockedByViolation
+                  ? 'bg-slate-400 hover:bg-slate-500'
+                  : 'bg-[#0066ff] hover:bg-[#0052cc] active:scale-[0.99] shadow-[0_6px_16px_rgba(0,102,255,0.28)]'
+              }`}
             >
-              Login
+              {isLockedByViolation
+                ? 'Akun Terkunci (Wajib Reset Proktor/Admin)'
+                : 'Login'}
             </button>
           </div>
         </form>
@@ -159,36 +276,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
         </div>
       </div>
 
-      {/* Quiet Quick-Access Helper below card for instant student testing */}
-      <div className="mt-4 flex flex-wrap items-center justify-center gap-3 text-xs text-slate-500">
-        <span className="flex items-center gap-1.5">
-          <KeyRound className="w-3.5 h-3.5 text-slate-400" />
-          Akun Peserta:
-        </span>
-        <button
-          type="button"
-          onClick={() => handleQuickFill('P130100240', 'ANBKTKA26*')}
-          className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
-        >
-          Peserta SMA (P130100240)
-        </button>
-        <span aria-hidden="true">·</span>
-        <button
-          type="button"
-          onClick={() => handleQuickFill('K020500118', 'SAINSTKA*')}
-          className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
-        >
-          Peserta Sains (K020500118)
-        </button>
-        <span aria-hidden="true" className="hidden md:inline">·</span>
-        <button
-          type="button"
-          onClick={onOpenProctorModal}
-          className="hidden md:inline text-slate-600 hover:text-slate-900 hover:underline font-medium cursor-pointer"
-        >
-          Halaman Login Proktor
-        </button>
+      {/* Copyright Footer */}
+      <div className="mt-4 flex flex-wrap items-center justify-center text-xs text-slate-500 font-medium text-center">
+        Copyright © 2026. CBT SMA Islam Diponegoro Wagir
       </div>
     </main>
   );
 };
+
+

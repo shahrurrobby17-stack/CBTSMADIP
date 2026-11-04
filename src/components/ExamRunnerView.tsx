@@ -58,9 +58,12 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
     questionId: currentQuestion.id,
   };
 
-  // Reset activePremiseId when changing question
+  // Reset activePremiseId and scroll smoothly to top on mobile when changing question
   useEffect(() => {
     setActivePremiseId(null);
+    if (window.innerWidth < 1024) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   }, [currentQuestion.id]);
 
   // Countdown timer
@@ -311,7 +314,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
         {/* Main Split Question Area: Left (Stimulus/Wacana) & Right (Soal & Opsi) */}
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
           {/* Left Column: Wacana / Stimulus */}
-          <div className="lg:col-span-6 p-5 sm:p-7 overflow-y-auto max-h-[62vh] bg-slate-50/30">
+          <div className="lg:col-span-6 p-5 sm:p-7 lg:overflow-y-auto lg:max-h-[62vh] bg-slate-50/30">
             <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
               Wacana / Stimulus Soal
             </div>
@@ -392,7 +395,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
           </div>
 
           {/* Right Column: Pertanyaan & Area Jawaban */}
-          <div className="lg:col-span-6 p-5 sm:p-7 overflow-y-auto max-h-[62vh] flex flex-col justify-between">
+          <div className="lg:col-span-6 p-5 sm:p-7 lg:overflow-y-auto lg:max-h-[62vh] flex flex-col justify-between">
             <div>
               {/* Question Text */}
               <div className={`font-semibold text-slate-900 ${fontSizeClass}`}>

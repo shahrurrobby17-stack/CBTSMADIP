@@ -19,6 +19,7 @@ import {
   ArrowUpDown,
   KeyRound,
   BookOpen,
+  Download,
 } from 'lucide-react';
 import { TutWuriLogo } from './PusmendikHeader';
 import {
@@ -28,6 +29,7 @@ import {
   Question,
 } from '../types/cbt';
 import { getQuestionTypeLabel } from '../data/cbtData';
+import { generateParticipantCardsPDF } from '../utils/pdfParticipantCard';
 
 export interface ProctorParticipantRow {
   id: string;
@@ -39,8 +41,14 @@ export interface ProctorParticipantRow {
   namaPeserta: string;
   kelompok: string;
   kelas?: string;
-  loginState: 'Belum Login' | 'Sedang Mengerjakan' | 'Selesai';
+  loginState:
+    | 'Belum Login'
+    | 'Sedang Mengerjakan'
+    | 'Selesai'
+    | 'Terkunci (Pelanggaran)';
   requestReset?: boolean;
+  violationReason?: string;
+  violationAt?: string;
 }
 
 const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
@@ -197,6 +205,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   // Bank Soal & Status Tes state
   const [selectedPkgId, setSelectedPkgId] = useState(packages[0]?.id || '');
+  const [statusTesKelas, setStatusTesKelas] = useState('Semua Kelas');
   const tokenMinutes = String(Math.floor(tokenSecondsLeft / 60)).padStart(2, '0');
   const tokenSeconds = String(tokenSecondsLeft % 60).padStart(2, '0');
   const tokenCountdownLabel = `${tokenMinutes}:${tokenSeconds}`;
@@ -335,11 +344,17 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     setParticipants((prev) =>
       prev.map((r) =>
         r.id === id
-          ? { ...r, loginState: 'Belum Login', requestReset: false }
+          ? {
+              ...r,
+              loginState: 'Belum Login',
+              requestReset: false,
+              violationReason: undefined,
+              violationAt: undefined,
+            }
           : r
       )
     );
-    showNotice(`Sesi login peserta ${name} berhasil di-reset.`);
+    showNotice(`Sesi login peserta ${name} berhasil di-reset. Siswa kini dapat login kembali.`);
   };
 
   const selectedPackage =
@@ -445,12 +460,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         </svg>
 
         {/* Top Brand inside Sidebar */}
-        <div className="relative z-10 h-16 shrink-0 px-5 bg-[#001147] flex items-center justify-between">
-          <div className="flex items-center gap-2.5 overflow-hidden">
+        <div className="relative z-10 h-16 shrink-0 px-4 bg-[#001147] flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 overflow-hidden min-w-0">
             <TutWuriLogo className="w-8 h-8 shrink-0" />
             {!sidebarCollapsed && (
-              <span className="text-[16px] font-extrabold tracking-wide text-white whitespace-nowrap">
-                ANBK
+              <span className="text-[14px] font-extrabold tracking-wide text-white whitespace-nowrap truncate">
+                PROKTOR SAS
               </span>
             )}
           </div>
@@ -473,21 +488,36 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
           {SIDEBAR_MENUS.map((item) => {
             const IconComponent = item.icon;
             const isActive = activeMenu === item.id;
+            const resetCount =
+              item.id === 'request_reset'
+                ? participants.filter(
+                    (p) =>
+                      p.requestReset ||
+                      p.loginState === 'Terkunci (Pelanggaran)'
+                  ).length
+                : 0;
             return (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => setActiveMenu(item.id)}
-                className={`w-full h-12 shrink-0 flex items-center gap-3.5 px-6 text-left text-[13.5px] font-semibold leading-none transition-colors cursor-pointer ${
+                className={`w-full h-12 shrink-0 flex items-center justify-between gap-2 px-6 text-left text-[13.5px] font-semibold leading-none transition-colors cursor-pointer ${
                   isActive
                     ? 'bg-[#020c36] text-white'
                     : 'text-white hover:bg-[#020c36]/55'
                 }`}
                 title={item.label}
               >
-                <IconComponent className="w-[18px] h-[18px] shrink-0 text-white" />
-                {!sidebarCollapsed && (
-                  <span className="truncate">{item.label}</span>
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <IconComponent className="w-[18px] h-[18px] shrink-0 text-white" />
+                  {!sidebarCollapsed && (
+                    <span className="truncate">{item.label}</span>
+                  )}
+                </div>
+                {!sidebarCollapsed && resetCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-bold">
+                    {resetCount}
+                  </span>
                 )}
               </button>
             );
@@ -513,7 +543,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         <header className="shrink-0 bg-white px-7 py-3.5 flex items-center justify-between gap-4 border-b border-slate-200/80">
           <div>
             <h1 className="text-sm sm:text-[15px] font-bold tracking-wide text-slate-700 uppercase">
-              ASSESMENT NASIONAL BERBASIS KOMPUTER
+              SUMATIF AKHIR SEMESTER
             </h1>
             <p className="text-[11px] font-semibold text-blue-600">
               CBT SMA ISLAM DIPONEGORO WAGIR · APLIKASI SUMATIF AKHIR SEMESTER
@@ -885,46 +915,215 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
             </div>
           )}
 
-          {/* VIEW 3: STATUS TES (Question Bank Management) */}
+          {/* VIEW 3: STATUS TES (Question Bank Management & Input Soal) */}
           {activeMenu === 'status_tes' && selectedPackage && (
             <div className="space-y-6">
-              {/* Bank Soal Management Card */}
+              {/* KARTU 1 (ATAS): TAMBAH BUTIR SOAL PILIHAN GANDA BARU */}
+              <div className="bg-white p-6 rounded-xl border border-slate-200/80 shadow-2xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <Plus className="w-4 h-4 text-[#0095ff]" />
+                    <h3 className="text-sm font-bold text-slate-800">
+                      Tambah Butir Soal Pilihan Ganda Baru
+                    </h3>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-slate-500 font-medium">Paket Target:</span>
+                    <span className="px-2.5 py-0.5 rounded-md bg-blue-50 text-[#001a6e] font-semibold border border-blue-200">
+                      {selectedPackage.title.replace(/^Simulasi TKA\s*-\s*/i, '').replace(/\s*\(SMA\/MA\/SMK\)/i, '')}
+                    </span>
+                  </div>
+                </div>
+
+                <form
+                  onSubmit={handleAddQuestion}
+                  className="space-y-4 text-xs"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Kategori / Materi
+                      </label>
+                      <input
+                        type="text"
+                        value={newCategory}
+                        onChange={(e) => setNewCategory(e.target.value)}
+                        placeholder="Kategori / Materi"
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Judul Wacana / Stimulus (Opsional)
+                      </label>
+                      <input
+                        type="text"
+                        value={newStimulusTitle}
+                        onChange={(e) => setNewStimulusTitle(e.target.value)}
+                        placeholder="Judul Wacana / Stimulus"
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Isi Wacana / Bacaan Soal (Opsional)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={newStimulusText}
+                      onChange={(e) => setNewStimulusText(e.target.value)}
+                      placeholder="Isi Wacana / Bacaan Soal..."
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Kalimat Pertanyaan *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={newQuestionText}
+                      onChange={(e) => setNewQuestionText(e.target.value)}
+                      placeholder="Kalimat Pertanyaan *"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Pilihan Jawaban (A, B, C, D, E) & Kunci Jawaban *
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                      <input
+                        type="text"
+                        required
+                        value={optA}
+                        onChange={(e) => setOptA(e.target.value)}
+                        placeholder="Opsi A *"
+                        className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      />
+                      <input
+                        type="text"
+                        required
+                        value={optB}
+                        onChange={(e) => setOptB(e.target.value)}
+                        placeholder="Opsi B *"
+                        className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      />
+                      <input
+                        type="text"
+                        value={optC}
+                        onChange={(e) => setOptC(e.target.value)}
+                        placeholder="Opsi C"
+                        className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      />
+                      <input
+                        type="text"
+                        value={optD}
+                        onChange={(e) => setOptD(e.target.value)}
+                        placeholder="Opsi D"
+                        className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      />
+                      <input
+                        type="text"
+                        value={optE}
+                        onChange={(e) => setOptE(e.target.value)}
+                        placeholder="Opsi E"
+                        className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      />
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-slate-600">
+                          Kunci:
+                        </span>
+                        <select
+                          value={correctOpt}
+                          onChange={(e) => setCorrectOpt(e.target.value)}
+                          className="flex-1 px-2.5 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                        >
+                          {['A', 'B', 'C', 'D', 'E'].map((k) => (
+                            <option key={k} value={k}>
+                              Opsi {k}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end pt-2">
+                    <button
+                      type="submit"
+                      className="px-5 py-2 rounded-lg bg-[#001a6e] hover:bg-[#00155a] text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-sm transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Simpan Soal ke Paket
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* KARTU 2 (BAWAH): MANAJEMEN BANK SOAL */}
               <div className="bg-white p-6 rounded-xl border border-slate-200/80 shadow-2xs space-y-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-slate-100">
                   <div className="flex items-center gap-2">
                     <BookOpen className="w-4 h-4 text-[#0095ff]" />
                     <h3 className="text-sm font-bold text-slate-800">
-                      Manajemen Paket Tes & Bank Soal
+                      Manajemen Paket Tes & Bank Soal ({selectedPackage.questions.length} Soal)
                     </h3>
                   </div>
 
-                  <div className="flex items-center gap-3">
-                    <select
-                      value={selectedPackage.id}
-                      onChange={(e) => setSelectedPkgId(e.target.value)}
-                      className="px-3 py-1.5 text-xs font-semibold bg-slate-50 border border-slate-300 rounded-lg"
-                    >
-                      {packages.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.title} ({p.questions.length} Soal)
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onResetDefaultPackages();
-                        showNotice('Bank soal dikembalikan ke setelan awal.');
-                      }}
-                      className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
-                    >
-                      Reset Soal Bawaan
-                    </button>
+                  {/* Dropdown Mata Pelajaran dan Dropdown Kelas */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    {/* Dropdown Mata Pelajaran */}
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <label className="font-semibold text-slate-700 whitespace-nowrap">
+                        Mata Pelajaran:
+                      </label>
+                      <select
+                        value={selectedPackage.id}
+                        onChange={(e) => setSelectedPkgId(e.target.value)}
+                        className="px-3 py-1.5 text-xs font-semibold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      >
+                        {packages.map((p) => {
+                          const cleanTitle = p.title
+                            .replace(/^Simulasi TKA\s*-\s*/i, '')
+                            .replace(/\s*\(SMA\/MA\/SMK\)/i, '');
+                          return (
+                            <option key={p.id} value={p.id}>
+                              {cleanTitle}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    {/* Dropdown Kelas disebelah Dropdown Mata Pelajaran */}
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <label className="font-semibold text-slate-700 whitespace-nowrap">
+                        Kelas:
+                      </label>
+                      <select
+                        value={statusTesKelas}
+                        onChange={(e) => setStatusTesKelas(e.target.value)}
+                        className="px-3 py-1.5 text-xs font-semibold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      >
+                        <option value="Semua Kelas">Semua Kelas</option>
+                        <option value="Kelas X">Kelas X</option>
+                        <option value="Kelas XI IPA">Kelas XI IPA</option>
+                        <option value="Kelas XI IPS">Kelas XI IPS</option>
+                        <option value="Kelas XII IPA">Kelas XII IPA</option>
+                        <option value="Kelas XII IPS">Kelas XII IPS</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
 
                 {/* Question List */}
-                <div className="divide-y divide-slate-100 max-h-60 overflow-y-auto border border-slate-200 rounded-lg">
+                <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto border border-slate-200 rounded-lg">
                   {selectedPackage.questions.map((q) => (
                     <div
                       key={q.id}
@@ -954,109 +1153,6 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                     </div>
                   ))}
                 </div>
-
-                {/* Add Question Form */}
-                <form
-                  onSubmit={handleAddQuestion}
-                  className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3"
-                >
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
-                    <Plus className="w-4 h-4 text-[#0095ff]" />
-                    <span>Tambah Butir Soal Pilihan Ganda Baru</span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <input
-                      type="text"
-                      value={newCategory}
-                      onChange={(e) => setNewCategory(e.target.value)}
-                      placeholder="Kategori / Materi"
-                      className="px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg"
-                    />
-                    <input
-                      type="text"
-                      value={newStimulusTitle}
-                      onChange={(e) => setNewStimulusTitle(e.target.value)}
-                      placeholder="Judul Wacana / Stimulus"
-                      className="px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg"
-                    />
-                  </div>
-                  <textarea
-                    rows={2}
-                    value={newStimulusText}
-                    onChange={(e) => setNewStimulusText(e.target.value)}
-                    placeholder="Isi Wacana / Bacaan Soal..."
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg"
-                  />
-                  <input
-                    type="text"
-                    required
-                    value={newQuestionText}
-                    onChange={(e) => setNewQuestionText(e.target.value)}
-                    placeholder="Kalimat Pertanyaan *"
-                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg"
-                  />
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <input
-                      type="text"
-                      required
-                      value={optA}
-                      onChange={(e) => setOptA(e.target.value)}
-                      placeholder="Opsi A *"
-                      className="px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
-                    />
-                    <input
-                      type="text"
-                      required
-                      value={optB}
-                      onChange={(e) => setOptB(e.target.value)}
-                      placeholder="Opsi B *"
-                      className="px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
-                    />
-                    <input
-                      type="text"
-                      value={optC}
-                      onChange={(e) => setOptC(e.target.value)}
-                      placeholder="Opsi C"
-                      className="px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
-                    />
-                    <input
-                      type="text"
-                      value={optD}
-                      onChange={(e) => setOptD(e.target.value)}
-                      placeholder="Opsi D"
-                      className="px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
-                    />
-                    <input
-                      type="text"
-                      value={optE}
-                      onChange={(e) => setOptE(e.target.value)}
-                      placeholder="Opsi E"
-                      className="px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
-                    />
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-slate-600">
-                        Kunci:
-                      </span>
-                      <select
-                        value={correctOpt}
-                        onChange={(e) => setCorrectOpt(e.target.value)}
-                        className="flex-1 px-2.5 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg"
-                      >
-                        {['A', 'B', 'C', 'D', 'E'].map((k) => (
-                          <option key={k} value={k}>
-                            Opsi {k}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <button
-                    type="submit"
-                    className="px-5 py-2 rounded-lg bg-[#0095ff] hover:bg-[#007acc] text-white text-xs font-semibold cursor-pointer"
-                  >
-                    Simpan Soal ke Paket
-                  </button>
-                </form>
               </div>
             </div>
           )}
@@ -1066,74 +1162,139 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
             activeMenu === 'daftar_peserta' ||
             activeMenu === 'daftar_login' ||
             activeMenu === 'request_reset') && (
-            <div className="bg-white rounded-xl shadow-xs border border-slate-100 overflow-hidden">
-              <div className="p-5 border-b border-slate-100 flex items-center justify-between">
-                <h3 className="text-sm font-bold text-slate-800">
-                  {currentMenuMeta.label} — Ruang Server SMA Islam Diponegoro Wagir
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setActiveMenu('kelompok_tes')}
-                  className="text-xs font-semibold text-[#0095ff] hover:underline cursor-pointer"
-                >
-                  Ke Menu Kelompok Tes →
-                </button>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-[#f8f9fc] border-b border-slate-100 text-slate-600 font-bold">
-                      <th className="py-3.5 px-5">Username</th>
-                      <th className="py-3.5 px-4">Nama Peserta</th>
-                      <th className="py-3.5 px-4">Kode Tes</th>
-                      <th className="py-3.5 px-4">Status Assign</th>
-                      <th className="py-3.5 px-4">Status Sesi Login</th>
-                      <th className="py-3.5 px-4 text-right">Tindakan</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {participants
-                      .filter((p) =>
-                        activeMenu === 'request_reset' ? p.requestReset : true
-                      )
-                      .map((p) => (
-                        <tr key={p.id} className="hover:bg-slate-50">
-                          <td className="py-3.5 px-5 font-mono">{p.username}</td>
-                          <td className="py-3.5 px-4 font-semibold text-slate-800">
-                            {p.namaPeserta}
-                          </td>
-                          <td className="py-3.5 px-4 text-slate-600">
-                            {p.kodeTes}
-                          </td>
-                          <td className="py-3.5 px-4">
-                            {p.status === 'Active' ? (
-                              <span className="px-2.5 py-1 rounded bg-emerald-100 text-emerald-700 font-semibold">
-                                Active
-                              </span>
-                            ) : (
-                              <span className="px-2.5 py-1 rounded bg-[#ffe4e6] text-[#f43f5e] font-semibold">
-                                Non Active
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-4 font-medium text-slate-700">
-                            {p.loginState}
-                          </td>
-                          <td className="py-3.5 px-4 text-right">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleResetParticipantLogin(p.id, p.namaPeserta)
-                              }
-                              className="px-3 py-1.5 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-[11px] font-semibold cursor-pointer"
-                            >
-                              Reset Login
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
+            <div className="space-y-6">
+              {activeMenu === 'daftar_peserta' && (
+                <div className="bg-white rounded-xl shadow-xs border border-slate-200 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  {/* Logo Kementerian Pendidikan di Sebelah Kiri Atas */}
+                  <div className="flex items-center gap-4">
+                    <div className="w-14 h-14 shrink-0 rounded-xl bg-blue-50/70 border border-blue-200/80 p-1 flex items-center justify-center shadow-xs">
+                      <TutWuriLogo className="w-11 h-11" />
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                        Kementerian Pendidikan Dasar dan Menengah RI
+                      </div>
+                      <h2 className="text-base font-extrabold text-[#001a6e] tracking-tight">
+                        Daftar Peserta & Cetak Kartu Login SAS 2026
+                      </h2>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        SMA Islam Diponegoro Wagir · Proktor Server: <strong>{proctorName}</strong> · Total Peserta: <strong>{participants.length} Siswa</strong>
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Tombol Unduh Kartu Peserta dengan Format PDF */}
+                  <div className="flex items-center gap-2.5 flex-wrap self-start md:self-auto">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        generateParticipantCardsPDF(
+                          participants,
+                          'Kartu_Peserta_SAS_2026_SMA_Islam_Diponegoro_Wagir.pdf',
+                          'SMA ISLAM DIPONEGORO WAGIR',
+                          'ROMEO GALISTRA, S.Pd.'
+                        );
+                        showNotice(`File PDF Kartu Peserta (${participants.length} Siswa) berhasil diunduh!`);
+                      }}
+                      className="px-4 py-2 bg-[#001a6e] hover:bg-[#00155a] text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-2 shadow-sm"
+                      title="Unduh seluruh kartu peserta dalam format PDF (A4 siap cetak)"
+                    >
+                      <Download className="w-4 h-4 text-[#0095ff]" />
+                      <span>Unduh Kartu Peserta (PDF)</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-white rounded-xl shadow-xs border border-slate-100 overflow-hidden">
+                <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <h3 className="text-sm font-bold text-slate-800">
+                    {currentMenuMeta.label} — Ruang Server SMA Islam Diponegoro Wagir
+                  </h3>
+                  <div className="flex items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setActiveMenu('kelompok_tes')}
+                      className="text-xs font-semibold text-[#0095ff] hover:underline cursor-pointer"
+                    >
+                      Ke Menu Kelompok Tes →
+                    </button>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-[#f8f9fc] border-b border-slate-100 text-slate-600 font-bold">
+                        <th className="py-3.5 px-5">Username</th>
+                        <th className="py-3.5 px-4">Nama Peserta</th>
+                        <th className="py-3.5 px-4">Kode Tes</th>
+                        <th className="py-3.5 px-4">Status Assign</th>
+                        <th className="py-3.5 px-4">Status Sesi Login</th>
+                        <th className="py-3.5 px-4 text-right">Tindakan</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {participants
+                        .filter((p) =>
+                          activeMenu === 'request_reset'
+                            ? p.requestReset ||
+                              p.loginState === 'Terkunci (Pelanggaran)'
+                            : true
+                        )
+                        .map((p) => (
+                          <tr key={p.id} className="hover:bg-slate-50">
+                            <td className="py-3.5 px-5 font-mono">{p.username}</td>
+                            <td className="py-3.5 px-4 font-semibold text-slate-800">
+                              {p.namaPeserta}
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-600">
+                              {p.kodeTes}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              {p.status === 'Active' ? (
+                                <span className="px-2.5 py-1 rounded bg-emerald-100 text-emerald-700 font-semibold">
+                                  Active
+                                </span>
+                              ) : (
+                                <span className="px-2.5 py-1 rounded bg-[#ffe4e6] text-[#f43f5e] font-semibold">
+                                  Non Active
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 font-medium text-slate-700">
+                              {p.loginState === 'Terkunci (Pelanggaran)' ||
+                              p.requestReset ? (
+                                <div className="space-y-1">
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-bold text-[11px]">
+                                    Terkunci (Pelanggaran Keluar CBT)
+                                  </span>
+                                  {p.violationReason && (
+                                    <div className="text-[11px] text-rose-600">
+                                      {p.violationReason}
+                                      {p.violationAt ? ` (${p.violationAt})` : ''}
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                p.loginState
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-right space-x-2 whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleResetParticipantLogin(p.id, p.namaPeserta)
+                                }
+                                className="px-3 py-1.5 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-[11px] font-semibold cursor-pointer"
+                              >
+                                Reset Login
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}

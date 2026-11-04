@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { PusmendikHeader } from './components/PusmendikHeader';
-import { LoginView } from './components/LoginView';
+import { LoginView, ViolationAlertInfo } from './components/LoginView';
 import {
   ParticipantConfirmationView,
   TestConfirmationView,
@@ -205,6 +205,8 @@ export default function App() {
 
   const [answers, setAnswers] = useState<Record<string, StudentAnswer>>({});
   const [timeUsedSeconds, setTimeUsedSeconds] = useState(0);
+  const [lastViolationInfo, setLastViolationInfo] =
+    useState<ViolationAlertInfo | null>(null);
 
   // Sync localStorage whenever state changes
   useEffect(() => {
@@ -380,9 +382,11 @@ export default function App() {
   const selectedPackage =
     packages.find((p) => p.id === participant.selectedPackageId) || packages[0];
 
-  const requestMobileFullscreen = useCallback(() => {
+  const [isFullscreenActive, setIsFullscreenActive] = useState<boolean>(false);
+
+  const requestCbtFullscreen = useCallback(() => {
     const docEl = document.documentElement as HTMLElement & {
-      webkitRequestFullscreen?: () => Promise<void>;
+      webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
       msRequestFullscreen?: () => Promise<void>;
     };
     const doc = document as Document & {
@@ -390,90 +394,364 @@ export default function App() {
       msFullscreenElement?: Element | null;
     };
 
+    // Request wakeLock to keep exam active and suppress system idle/status overlays
+    try {
+      if ('wakeLock' in navigator && navigator.wakeLock) {
+        navigator.wakeLock.request('screen').catch(() => {});
+      }
+    } catch {
+      // Ignore
+    }
+
     if (doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement) {
+      setIsFullscreenActive(true);
       return;
     }
 
     if (docEl.requestFullscreen) {
       docEl
         .requestFullscreen({ navigationUI: 'hide' })
+        .then(() => setIsFullscreenActive(true))
         .catch(() => {
-          // Ignore if browser defers until user gesture
+          // Deferred to subsequent user click gesture
         });
     } else if (docEl.webkitRequestFullscreen) {
       try {
         docEl.webkitRequestFullscreen();
+        setIsFullscreenActive(true);
       } catch {
         // Ignore
       }
     }
   }, []);
 
-  // Automatically enter fullscreen on mobile viewports immediately on entry
-  // and on earliest user gesture to hide status bar and Google browser tabs
-  useEffect(() => {
-    const isMobileDevice = () =>
-      window.innerWidth < 768 ||
-      window.matchMedia('(pointer: coarse)').matches ||
-      /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const exitCbtFullscreen = useCallback(() => {
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      msFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void>;
+    };
 
-    const enforceMobileFullscreen = () => {
-      if (isMobileDevice()) {
-        window.scrollTo(0, 1);
-        requestMobileFullscreen();
+    if (doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement) {
+      if (document.exitFullscreen) {
+        document
+          .exitFullscreen()
+          .then(() => setIsFullscreenActive(false))
+          .catch(() => {});
+      } else if (doc.webkitExitFullscreen) {
+        try {
+          doc.webkitExitFullscreen();
+          setIsFullscreenActive(false);
+        } catch {
+          // Ignore
+        }
+      }
+    } else {
+      setIsFullscreenActive(false);
+    }
+  }, []);
+
+  const lockStudentByViolation = useCallback(
+    (reason: string) => {
+      const timeStr = new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      setParticipants((prev) => {
+        const exists = prev.some(
+          (row) =>
+            row.username.toUpperCase() === participant.username.toUpperCase()
+        );
+        const nextList: ProctorParticipantRow[] = exists
+          ? prev.map((row) =>
+              row.username.toUpperCase() === participant.username.toUpperCase()
+                ? {
+                    ...row,
+                    loginState: 'Terkunci (Pelanggaran)',
+                    requestReset: true,
+                    violationReason: reason,
+                    violationAt: timeStr,
+                  }
+                : row
+            )
+          : [
+              {
+                id: `p_viol_${Date.now()}`,
+                selected: false,
+                status: 'Active',
+                kodeTes: 'GLDTKA25MAH2',
+                username: participant.username.toUpperCase(),
+                namaPeserta: participant.fullName,
+                kelompok: '1',
+                kelas: 'XII IPA',
+                loginState: 'Terkunci (Pelanggaran)',
+                requestReset: true,
+                violationReason: reason,
+                violationAt: timeStr,
+              },
+              ...prev,
+            ];
+
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.PARTICIPANTS,
+            JSON.stringify(nextList)
+          );
+        } catch {
+          // ignore
+        }
+        return nextList;
+      });
+
+      setLastViolationInfo({
+        username: participant.username.toUpperCase(),
+        fullName: participant.fullName,
+        reason,
+        timestamp: timeStr,
+      });
+      setStage('login');
+    },
+    [participant.fullName, participant.username]
+  );
+
+  // Automatically enter fullscreen on laptop and mobile immediately when CBT is clicked / accessed
+  // and handle Esc key on laptop keyboard to exit CBT
+  useEffect(() => {
+    const updateFullscreenState = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+        msFullscreenElement?: Element | null;
+      };
+      const active = Boolean(
+        doc.fullscreenElement ||
+          doc.webkitFullscreenElement ||
+          doc.msFullscreenElement
+      );
+      setIsFullscreenActive(active);
+      return active;
+    };
+
+    const suppressIncomingNotifications = () => {
+      try {
+        if ('serviceWorker' in navigator && navigator.serviceWorker?.getRegistrations) {
+          navigator.serviceWorker
+            .getRegistrations()
+            .then((regs) => {
+              regs.forEach((reg) => {
+                if (reg.getNotifications) {
+                  reg.getNotifications().then((notifications) => {
+                    notifications.forEach((n) => n.close());
+                  });
+                }
+              });
+            })
+            .catch(() => {});
+        }
+      } catch {
+        // Ignore
       }
     };
 
-    // Attempt immediately when first entering the app
-    enforceMobileFullscreen();
+    const handleUserInteractionFullscreen = () => {
+      suppressIncomingNotifications();
+      // Auto-trigger full screen on laptop & all devices when accessing student CBT views
+      if (stage !== 'admin_dashboard' && stage !== 'proctor_dashboard') {
+        requestCbtFullscreen();
+      }
+    };
 
-    // Also attempt on load, visibilitychange, and earliest capture-phase gestures
-    window.addEventListener('load', enforceMobileFullscreen, { passive: true });
-    document.addEventListener('visibilitychange', enforceMobileFullscreen, { passive: true });
-    document.addEventListener('pointerdown', enforceMobileFullscreen, { capture: true, passive: true });
-    document.addEventListener('touchstart', enforceMobileFullscreen, { capture: true, passive: true });
-    document.addEventListener('touchend', enforceMobileFullscreen, { capture: true, passive: true });
-    document.addEventListener('click', enforceMobileFullscreen, { capture: true, passive: true });
-    document.addEventListener('keydown', enforceMobileFullscreen, { capture: true, passive: true });
+    // Attempt immediately when first entering CBT link
+    handleUserInteractionFullscreen();
+
+    // Re-enforce on load, pageshow, and on ANY click/pointer interaction so clicking the CBT link/page immediately opens fullscreen on laptop!
+    window.addEventListener('load', handleUserInteractionFullscreen, { passive: true });
+    window.addEventListener('pageshow', handleUserInteractionFullscreen, { passive: true });
+    document.addEventListener('pointerdown', handleUserInteractionFullscreen, { capture: true, passive: true });
+    document.addEventListener('mousedown', handleUserInteractionFullscreen, { capture: true, passive: true });
+    document.addEventListener('touchstart', handleUserInteractionFullscreen, { capture: true, passive: true });
+    document.addEventListener('click', handleUserInteractionFullscreen, { capture: true, passive: true });
+
+    // Handle Esc key on keyboard to exit CBT on laptop
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) {
+        exitCbtFullscreen();
+
+        // If currently in active exam session, exiting CBT locks the session
+        if (
+          stage === 'exam_running' ||
+          stage === 'confirm_test' ||
+          stage === 'confirm_participant'
+        ) {
+          lockStudentByViolation(
+            'Keluar dari sistem CBT (Menekan tombol Esc pada keyboard laptop)'
+          );
+        } else if (stage === 'exam_result') {
+          setStage('login');
+        }
+      }
+    };
+
+    // Handle native browser fullscreen change (e.g. browser Esc key)
+    const handleFullscreenChange = () => {
+      const isFs = updateFullscreenState();
+      if (!isFs) {
+        if (
+          stage === 'exam_running' ||
+          stage === 'confirm_test' ||
+          stage === 'confirm_participant'
+        ) {
+          lockStudentByViolation(
+            'Keluar dari sistem CBT (Menekan tombol Esc / Keluar dari Fullscreen)'
+          );
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
     return () => {
-      window.removeEventListener('load', enforceMobileFullscreen);
-      document.removeEventListener('visibilitychange', enforceMobileFullscreen);
-      document.removeEventListener('pointerdown', enforceMobileFullscreen, { capture: true });
-      document.removeEventListener('touchstart', enforceMobileFullscreen, { capture: true });
-      document.removeEventListener('touchend', enforceMobileFullscreen, { capture: true });
-      document.removeEventListener('click', enforceMobileFullscreen, { capture: true });
-      document.removeEventListener('keydown', enforceMobileFullscreen, { capture: true });
+      window.removeEventListener('load', handleUserInteractionFullscreen);
+      window.removeEventListener('pageshow', handleUserInteractionFullscreen);
+      document.removeEventListener('pointerdown', handleUserInteractionFullscreen, { capture: true });
+      document.removeEventListener('mousedown', handleUserInteractionFullscreen, { capture: true });
+      document.removeEventListener('touchstart', handleUserInteractionFullscreen, { capture: true });
+      document.removeEventListener('click', handleUserInteractionFullscreen, { capture: true });
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
     };
-  }, [requestMobileFullscreen]);
+  }, [requestCbtFullscreen, exitCbtFullscreen, stage, lockStudentByViolation]);
+
+  // Detect student exit violation when inside active CBT session
+  useEffect(() => {
+    const isStudentInActiveCbtSession =
+      stage === 'confirm_participant' ||
+      stage === 'confirm_test' ||
+      stage === 'exam_running';
+
+    if (!isStudentInActiveCbtSession) return;
+
+    const handleVisibilityViolation = () => {
+      if (document.visibilityState === 'hidden') {
+        lockStudentByViolation(
+          'Keluar dari sistem CBT / berpindah tab atau aplikasi saat sesi berlangsung'
+        );
+      }
+    };
+
+    const handleWindowBlurViolation = () => {
+      lockStudentByViolation(
+        'Keluar dari fokus layar sistem CBT / membuka jendela atau aplikasi lain'
+      );
+    };
+
+    const handlePageLeaveViolation = () => {
+      lockStudentByViolation(
+        'Menutup atau keluar dari halaman sistem CBT saat sesi aktif'
+      );
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityViolation);
+    window.addEventListener('blur', handleWindowBlurViolation);
+    window.addEventListener('pagehide', handlePageLeaveViolation);
+    window.addEventListener('beforeunload', handlePageLeaveViolation);
+
+    return () => {
+      document.removeEventListener(
+        'visibilitychange',
+        handleVisibilityViolation
+      );
+      window.removeEventListener('blur', handleWindowBlurViolation);
+      window.removeEventListener('pagehide', handlePageLeaveViolation);
+      window.removeEventListener('beforeunload', handlePageLeaveViolation);
+    };
+  }, [stage, lockStudentByViolation]);
+
+  const handleRequestResetFromLogin = useCallback((username: string) => {
+    const cleanUser = username.trim().toUpperCase();
+    const timeStr = new Date().toLocaleTimeString('id-ID', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    setParticipants((prev) =>
+      prev.map((row) =>
+        row.username.toUpperCase() === cleanUser
+          ? {
+              ...row,
+              loginState: 'Terkunci (Pelanggaran)',
+              requestReset: true,
+              violationReason:
+                row.violationReason ||
+                'Siswa mengajukan permintaan Reset Login ke Proktor/Administrator',
+              violationAt: row.violationAt || timeStr,
+            }
+          : row
+      )
+    );
+  }, []);
 
   const handleLoginSuccess = (username: string) => {
-    if (window.innerWidth < 768) {
-      requestMobileFullscreen();
-    }
+    const cleanUser = username.trim().toUpperCase();
     const matchedRow = participants.find(
-      (p) => p.username.toUpperCase() === username.toUpperCase()
+      (p) => p.username.toUpperCase() === cleanUser
     );
-    const isSainsPreset = username.startsWith('K02');
 
-    // Update participant loginState in shared Vercel Storage
-    if (matchedRow) {
-      setParticipants((prev) =>
-        prev.map((row) =>
-          row.id === matchedRow.id
-            ? { ...row, loginState: 'Sedang Mengerjakan' }
-            : row
-        )
-      );
+    // Block login if student is locked due to exit violation
+    if (
+      matchedRow &&
+      (matchedRow.loginState === 'Terkunci (Pelanggaran)' ||
+        matchedRow.requestReset)
+    ) {
+      return;
     }
 
+    requestCbtFullscreen();
+
+    const isSainsPreset = cleanUser.startsWith('K02');
+    const resolvedFullName =
+      matchedRow?.namaPeserta ||
+      (isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : 'NADIA PUTRI PRATAMA');
+
+    // Update or register participant loginState in shared Vercel Storage
+    setParticipants((prev) => {
+      const exists = prev.some(
+        (row) => row.username.toUpperCase() === cleanUser
+      );
+      if (exists) {
+        return prev.map((row) =>
+          row.username.toUpperCase() === cleanUser
+            ? { ...row, loginState: 'Sedang Mengerjakan', requestReset: false }
+            : row
+        );
+      }
+      return [
+        {
+          id: `p_${Date.now()}`,
+          selected: false,
+          status: 'Active',
+          kodeTes: 'GLDTKA25MAH2',
+          username: cleanUser,
+          namaPeserta: resolvedFullName,
+          kelompok: '1',
+          kelas: 'XII IPA',
+          loginState: 'Sedang Mengerjakan',
+          requestReset: false,
+        },
+        ...prev,
+      ];
+    });
+
+    setLastViolationInfo(null);
     setParticipant((prev) => ({
       ...prev,
-      username,
+      username: cleanUser,
       nik: isSainsPreset ? '3174052209080004' : '3273011805080002',
-      fullName:
-        matchedRow?.namaPeserta ||
-        (isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : 'NADIA PUTRI PRATAMA'),
+      fullName: resolvedFullName,
       gender: isSainsPreset ? 'Laki-Laki' : 'Perempuan',
       selectedPackageId: isSainsPreset
         ? packages[1]?.id || packages[0].id
@@ -487,17 +765,13 @@ export default function App() {
   };
 
   const handleConfirmParticipant = (updatedProfile: ParticipantProfile) => {
-    if (window.innerWidth < 768) {
-      requestMobileFullscreen();
-    }
+    requestCbtFullscreen();
     setParticipant(updatedProfile);
     setStage('confirm_test');
   };
 
   const handleStartExam = () => {
-    if (window.innerWidth < 768) {
-      requestMobileFullscreen();
-    }
+    requestCbtFullscreen();
     setAnswers({});
     setTimeUsedSeconds(0);
     setStage('exam_running');
@@ -573,6 +847,17 @@ export default function App() {
   );
 
   const handleLogout = () => {
+    if (
+      stage === 'confirm_participant' ||
+      stage === 'confirm_test' ||
+      stage === 'exam_running'
+    ) {
+      setAnswers({});
+      lockStudentByViolation(
+        'Keluar dari sistem CBT sebelum menyelesaikan ujian'
+      );
+      return;
+    }
     setAnswers({});
     setStage('login');
   };
@@ -651,6 +936,9 @@ export default function App() {
         <LoginView
           onLoginSuccess={handleLoginSuccess}
           onOpenProctorModal={() => setStage('proctor_login')}
+          participants={participants}
+          lastViolationInfo={lastViolationInfo}
+          onRequestResetLogin={handleRequestResetFromLogin}
           onQuickLoginAdmin={() => {
             setAdminUsername('K05060108-KB6K');
             setStage('admin_dashboard');

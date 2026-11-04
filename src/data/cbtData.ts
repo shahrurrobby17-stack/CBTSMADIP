@@ -5,11 +5,11 @@ export const DEFAULT_EXAM_TOKEN = 'XKPTZW';
 export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
   {
     id: 'tka-sma-litnum',
-    code: 'TKA-SMA-01',
-    title: 'Simulasi TKA - Literasi Membaca & Numerasi (SMA/MA/SMK)',
+    code: 'BIN-SAS-01',
+    title: 'Bahasa Indonesia & Literasi Membaca',
     level: 'SMA / MA / SMK / Sederajat',
-    subtest: 'Literasi Membaca & Penalaran Numerasi',
-    durationMinutes: 60,
+    subtest: 'Literasi Membaca & Teks Informasi',
+    durationMinutes: 90,
     questions: [
       {
         id: 'q1',
@@ -494,6 +494,89 @@ export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
         points: 20,
         explanation:
           'Saat berhenti v_t = 0. Maka 0² = 20² − 2(4)s → 8s = 400 → s = 50 meter.',
+      },
+    ],
+  },
+  {
+    id: 'mat-sas-01',
+    code: 'MAT-SAS-01',
+    title: 'Matematika Wajib & Numerasi',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Aljabar, Geometri & Statistika Terapan',
+    durationMinutes: 90,
+    questions: [
+      {
+        id: 'qm1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'Matematika - Aljabar & Fungsi',
+        stimulusTitle: 'Model Pertumbuhan Nilai Investasi Saham dan Bunga Majemuk',
+        stimulusText:
+          'Seorang investor pemula menanamkan modal sebesar Rp 10.000.000 pada instrumen reksa dana pendapatan tetap dengan imbal hasil majemuk tahunan sebesar 8% per tahun.',
+        questionText:
+          'Manakah ekspresi matematika yang benar untuk menghitung total saldo investasi setelah n tahun?',
+        options: [
+          { id: 'A', text: 'M_n = 10.000.000 · (1 + 0,08 · n)' },
+          { id: 'B', text: 'M_n = 10.000.000 · (1 + 0,08)^n' },
+          { id: 'C', text: 'M_n = 10.000.000 · (0,08)^n' },
+          { id: 'D', text: 'M_n = 10.000.000 + 0,08^n' },
+          { id: 'E', text: 'M_n = 10.000.000 / (1 + 0,08)^n' },
+        ],
+        correctOptionId: 'B',
+        points: 25,
+        explanation: 'Rumus bunga majemuk adalah M_n = M_0 · (1 + i)^n.',
+      },
+      {
+        id: 'qm2',
+        number: 2,
+        type: 'pilihan_ganda',
+        category: 'Matematika - Geometri Ruang',
+        stimulusTitle: 'Konstruksi Kerangka Kubus Ruang Ujian',
+        stimulusText:
+          'Sebuah kubus ABCD.EFGH memiliki panjang rusuk 12 cm. Titik P terletak tepat di tengah rusuk CG.',
+        questionText:
+          'Berapakah jarak antara titik A ke titik P?',
+        options: [
+          { id: 'A', text: '18 cm' },
+          { id: 'B', text: '15 cm' },
+          { id: 'C', text: '6√5 cm' },
+          { id: 'D', text: '12√2 cm' },
+          { id: 'E', text: '14 cm' },
+        ],
+        correctOptionId: 'A',
+        points: 25,
+        explanation: 'AP = √(AC² + CP²) = √((12√2)² + 6²) = √(288 + 36) = √324 = 18 cm.',
+      },
+    ],
+  },
+  {
+    id: 'big-sas-01',
+    code: 'BIG-SAS-01',
+    title: 'Bahasa Inggris & Literasi Digital',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Reading Comprehension & Critical Analysis',
+    durationMinutes: 90,
+    questions: [
+      {
+        id: 'qb1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'English - Analytical Exposition',
+        stimulusTitle: 'The Crucial Role of Artificial Intelligence in Contemporary Education',
+        stimulusText:
+          'Artificial Intelligence (AI) is transforming learning environments across the globe. By analyzing students learning habits and individual milestones, adaptive platforms provide targeted feedback and customized study trajectories.',
+        questionText:
+          'According to the passage, how does adaptive AI enhance individual student performance?',
+        options: [
+          { id: 'A', text: 'By replacing school teachers completely in curriculum design' },
+          { id: 'B', text: 'By analyzing learning habits and providing tailored study trajectories' },
+          { id: 'C', text: 'By standardizing identical test scores for all participants' },
+          { id: 'D', text: 'By eliminating all computational examinations' },
+          { id: 'E', text: 'By discouraging autonomous exploration of course materials' },
+        ],
+        correctOptionId: 'B',
+        points: 25,
+        explanation: 'The text states that AI platforms analyze learning habits and provide targeted feedback and customized study trajectories.',
       },
     ],
   },
