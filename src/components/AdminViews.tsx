@@ -3228,9 +3228,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => {
+                                    const targetUser = p.username.trim().toUpperCase();
                                     setParticipants((prev) =>
                                       prev.map((row) =>
-                                        row.id === p.id
+                                        row.id === p.id ||
+                                        row.username.trim().toUpperCase() === targetUser
                                           ? {
                                               ...row,
                                               loginState: 'Belum Login',
@@ -3242,7 +3244,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                       )
                                     );
                                     showNotice(
-                                      `Login peserta ${p.namaPeserta} telah di-reset. Siswa kini dapat login kembali.`
+                                      `Login peserta ${p.namaPeserta} (${p.username}) berhasil di-reset. Siswa kini dapat login kembali.`
                                     );
                                   }}
                                   className="px-3 py-1.5 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-[11px] font-semibold cursor-pointer"

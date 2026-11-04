@@ -166,29 +166,18 @@ export default function App() {
     }
   });
 
+  const activeTokenRef = useRef<string>(activeToken);
+  useEffect(() => {
+    activeTokenRef.current = activeToken;
+  }, [activeToken]);
+
+  const tokenEndTimeRef = useRef<number>(
+    Date.now() + TOKEN_DURATION_SECONDS * 1000
+  );
+
   const [tokenSecondsLeft, setTokenSecondsLeft] = useState<number>(
     TOKEN_DURATION_SECONDS
   );
-
-  const handleUpdateToken = useCallback((nextToken: string) => {
-    setActiveToken(nextToken);
-    setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
-  }, []);
-
-  // Automatic 5-minute token rotation timer
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setTokenSecondsLeft((prev) => {
-        if (prev <= 1) {
-          const next = generateRandomToken();
-          setActiveToken(next);
-          return TOKEN_DURATION_SECONDS;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [generateRandomToken]);
 
   const [resultsHistory, setResultsHistory] = useState<ExamResultSummary[]>(() => {
     try {
@@ -209,6 +198,71 @@ export default function App() {
   const isApplyingRemoteUpdate = useRef(false);
   const lastLocalMutationAt = useRef<number>(0);
   const pendingPushCount = useRef<number>(0);
+  const examStartedAtRef = useRef<number>(0);
+
+  const markSyncedSuccess = useCallback(
+    (engine: 'vercel-kv' | 'vercel-serverless' | 'local') => {
+      setStorageEngine(engine);
+      setLastSyncedLabel(
+        new Date().toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      );
+    },
+    []
+  );
+
+  const handleUpdateToken = useCallback(
+    (nextToken: string) => {
+      const cleanToken = nextToken.trim().toUpperCase() || DEFAULT_EXAM_TOKEN;
+      lastLocalMutationAt.current = Date.now();
+      activeTokenRef.current = cleanToken;
+      tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
+      setActiveToken(cleanToken);
+      setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
+      try {
+        localStorage.setItem(STORAGE_KEYS.TOKEN, cleanToken);
+      } catch {
+        // ignore
+      }
+      pendingPushCount.current += 1;
+      saveVercelStorage({ activeToken: cleanToken })
+        .then((res) => {
+          if (res.ok) markSyncedSuccess(res.engine);
+        })
+        .finally(() => {
+          pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
+        });
+    },
+    [markSyncedSuccess]
+  );
+
+  // Automatic 5-minute token countdown timer (wall-clock based, never rotates early)
+  useEffect(() => {
+    const tick = () => {
+      const diffMs = tokenEndTimeRef.current - Date.now();
+      const secsLeft = Math.max(0, Math.ceil(diffMs / 1000));
+      setTokenSecondsLeft(secsLeft);
+
+      if (secsLeft <= 0) {
+        tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
+        setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
+        // Only rotate token on server when schedule is active and user is in Admin/Proctor dashboard
+        if (
+          isScheduleActive &&
+          (stage === 'admin_dashboard' || stage === 'proctor_dashboard')
+        ) {
+          const next = generateRandomToken();
+          handleUpdateToken(next);
+        }
+      }
+    };
+
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [generateRandomToken, handleUpdateToken, isScheduleActive, stage]);
 
   const [participant, setParticipant] = useState<ParticipantProfile>({
     username: 'P130100240',
@@ -227,6 +281,22 @@ export default function App() {
   const [timeUsedSeconds, setTimeUsedSeconds] = useState(0);
   const [lastViolationInfo, setLastViolationInfo] =
     useState<ViolationAlertInfo | null>(null);
+
+  // Automatically clear lastViolationInfo when participant is unlocked via Reset Login
+  useEffect(() => {
+    if (!lastViolationInfo) return;
+    const matched = participants.find(
+      (p) =>
+        p.username.trim().toUpperCase() ===
+        lastViolationInfo.username.trim().toUpperCase()
+    );
+    if (
+      !matched ||
+      (matched.loginState !== 'Terkunci (Pelanggaran)' && !matched.requestReset)
+    ) {
+      setLastViolationInfo(null);
+    }
+  }, [participants, lastViolationInfo]);
 
   // Sync localStorage whenever state changes
   useEffect(() => {
@@ -303,16 +373,7 @@ export default function App() {
           packages: nextPackages,
         })
           .then((res) => {
-            if (res.ok) {
-              setStorageEngine(res.engine);
-              setLastSyncedLabel(
-                new Date().toLocaleTimeString('id-ID', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  second: '2-digit',
-                })
-              );
-            }
+            if (res.ok) markSyncedSuccess(res.engine);
           })
           .finally(() => {
             pendingPushCount.current = Math.max(
@@ -323,14 +384,162 @@ export default function App() {
         return nextPackages;
       });
     },
-    []
+    [markSyncedSuccess]
+  );
+
+  const handleUpdateParticipants = useCallback(
+    (
+      updater:
+        | ProctorParticipantRow[]
+        | ((prevRows: ProctorParticipantRow[]) => ProctorParticipantRow[])
+    ) => {
+      lastLocalMutationAt.current = Date.now();
+      setParticipants((prev) => {
+        const nextParticipants =
+          typeof updater === 'function' ? updater(prev) : updater;
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.PARTICIPANTS,
+            JSON.stringify(nextParticipants)
+          );
+        } catch {
+          // ignore
+        }
+        pendingPushCount.current += 1;
+        saveVercelStorage({
+          participants: nextParticipants,
+        })
+          .then((res) => {
+            if (res.ok) markSyncedSuccess(res.engine);
+          })
+          .finally(() => {
+            pendingPushCount.current = Math.max(
+              0,
+              pendingPushCount.current - 1
+            );
+          });
+        return nextParticipants;
+      });
+    },
+    [markSyncedSuccess]
+  );
+
+  const handleUpdateSchedules = useCallback(
+    (
+      updater:
+        | AdminScheduleItem[]
+        | ((prevSchedules: AdminScheduleItem[]) => AdminScheduleItem[])
+    ) => {
+      lastLocalMutationAt.current = Date.now();
+      setSchedules((prev) => {
+        const nextSchedules =
+          typeof updater === 'function' ? updater(prev) : updater;
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.SCHEDULES,
+            JSON.stringify(nextSchedules)
+          );
+        } catch {
+          // ignore
+        }
+        pendingPushCount.current += 1;
+        saveVercelStorage({
+          schedules: nextSchedules,
+        })
+          .then((res) => {
+            if (res.ok) markSyncedSuccess(res.engine);
+          })
+          .finally(() => {
+            pendingPushCount.current = Math.max(
+              0,
+              pendingPushCount.current - 1
+            );
+          });
+        return nextSchedules;
+      });
+    },
+    [markSyncedSuccess]
+  );
+
+  const handleUpdateProctors = useCallback(
+    (
+      updater:
+        | AdminProctorItem[]
+        | ((prevProctors: AdminProctorItem[]) => AdminProctorItem[])
+    ) => {
+      lastLocalMutationAt.current = Date.now();
+      setProctors((prev) => {
+        const nextProctors =
+          typeof updater === 'function' ? updater(prev) : updater;
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.PROCTORS,
+            JSON.stringify(nextProctors)
+          );
+        } catch {
+          // ignore
+        }
+        pendingPushCount.current += 1;
+        saveVercelStorage({
+          proctors: nextProctors,
+        })
+          .then((res) => {
+            if (res.ok) markSyncedSuccess(res.engine);
+          })
+          .finally(() => {
+            pendingPushCount.current = Math.max(
+              0,
+              pendingPushCount.current - 1
+            );
+          });
+        return nextProctors;
+      });
+    },
+    [markSyncedSuccess]
+  );
+
+  const handleUpdateResultsHistory = useCallback(
+    (
+      updater:
+        | ExamResultSummary[]
+        | ((prevHistory: ExamResultSummary[]) => ExamResultSummary[])
+    ) => {
+      lastLocalMutationAt.current = Date.now();
+      setResultsHistory((prev) => {
+        const nextHistory =
+          typeof updater === 'function' ? updater(prev) : updater;
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.HISTORY,
+            JSON.stringify(nextHistory)
+          );
+        } catch {
+          // ignore
+        }
+        pendingPushCount.current += 1;
+        saveVercelStorage({
+          resultsHistory: nextHistory,
+        })
+          .then((res) => {
+            if (res.ok) markSyncedSuccess(res.engine);
+          })
+          .finally(() => {
+            pendingPushCount.current = Math.max(
+              0,
+              pendingPushCount.current - 1
+            );
+          });
+        return nextHistory;
+      });
+    },
+    [markSyncedSuccess]
   );
 
   // Initial Hydration & Background Polling from Vercel Storage (/api/storage)
   const syncFromVercelCloud = useCallback(async () => {
     if (
       pendingPushCount.current > 0 ||
-      Date.now() - lastLocalMutationAt.current < 4000
+      Date.now() - lastLocalMutationAt.current < 5000
     ) {
       return;
     }
@@ -340,7 +549,7 @@ export default function App() {
     if (
       pendingPushCount.current > 0 ||
       lastLocalMutationAt.current >= fetchStartedAt ||
-      Date.now() - lastLocalMutationAt.current < 4000
+      Date.now() - lastLocalMutationAt.current < 5000
     ) {
       return;
     }
@@ -367,8 +576,15 @@ export default function App() {
       if (Array.isArray(res.data.proctors) && res.data.proctors.length > 0) {
         setProctors(res.data.proctors);
       }
-      if (typeof res.data.activeToken === 'string' && res.data.activeToken) {
+      if (
+        typeof res.data.activeToken === 'string' &&
+        res.data.activeToken &&
+        res.data.activeToken !== activeTokenRef.current
+      ) {
+        activeTokenRef.current = res.data.activeToken;
+        tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
         setActiveToken(res.data.activeToken);
+        setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
       }
       if (Array.isArray(res.data.resultsHistory)) {
         setResultsHistory(res.data.resultsHistory);
@@ -416,7 +632,7 @@ export default function App() {
     return () => window.clearInterval(pollTimer);
   }, [syncFromVercelCloud]);
 
-  // Push changes to Vercel Storage (/api/storage) when modified locally
+  // Manual Force Sync from Admin Dashboard
   const pushToVercelCloud = useCallback(async () => {
     lastLocalMutationAt.current = Date.now();
     pendingPushCount.current += 1;
@@ -430,44 +646,19 @@ export default function App() {
         resultsHistory,
       });
       if (res.ok) {
-        setStorageEngine(res.engine);
-        setLastSyncedLabel(
-          new Date().toLocaleTimeString('id-ID', {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          })
-        );
+        markSyncedSuccess(res.engine);
       }
     } finally {
       pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
     }
   }, [
     activeToken,
+    markSyncedSuccess,
     packages,
     participants,
     proctors,
     resultsHistory,
     schedules,
-  ]);
-
-  useEffect(() => {
-    if (!isHydratedFromCloud.current || isApplyingRemoteUpdate.current) {
-      return;
-    }
-    lastLocalMutationAt.current = Date.now();
-    const debounce = window.setTimeout(() => {
-      pushToVercelCloud();
-    }, 250);
-    return () => window.clearTimeout(debounce);
-  }, [
-    packages,
-    schedules,
-    participants,
-    proctors,
-    activeToken,
-    resultsHistory,
-    pushToVercelCloud,
   ]);
 
   const selectedPackage =
@@ -558,7 +749,7 @@ export default function App() {
         second: '2-digit',
       });
 
-      setParticipants((prev) => {
+      handleUpdateParticipants((prev) => {
         const exists = prev.some(
           (row) =>
             row.username.toUpperCase() === participant.username.toUpperCase()
@@ -592,15 +783,6 @@ export default function App() {
               },
               ...prev,
             ];
-
-        try {
-          localStorage.setItem(
-            STORAGE_KEYS.PARTICIPANTS,
-            JSON.stringify(nextList)
-          );
-        } catch {
-          // ignore
-        }
         return nextList;
       });
 
@@ -612,11 +794,10 @@ export default function App() {
       });
       setStage('login');
     },
-    [participant.fullName, participant.username]
+    [handleUpdateParticipants, participant.fullName, participant.username]
   );
 
-  // Automatically enter fullscreen on laptop and mobile immediately when CBT is clicked / accessed
-  // and handle Esc key on laptop keyboard to exit CBT
+  // Automatically enter fullscreen on laptop and mobile when in active exam
   useEffect(() => {
     const updateFullscreenState = () => {
       const doc = document as Document & {
@@ -655,13 +836,11 @@ export default function App() {
 
     const handleActiveExamUserInteraction = () => {
       suppressIncomingNotifications();
-      // Hanya re-enforce layar penuh saat siswa sudah berada di halaman soal aktif
       if (stage === 'exam_running') {
         requestCbtFullscreen();
       }
     };
 
-    // Re-enforce saat sesi ujian aktif jika siswa mengklik di dalam ujian
     window.addEventListener('load', handleActiveExamUserInteraction, { passive: true });
     window.addEventListener('pageshow', handleActiveExamUserInteraction, { passive: true });
     document.addEventListener('pointerdown', handleActiveExamUserInteraction, { capture: true, passive: true });
@@ -672,8 +851,11 @@ export default function App() {
       if (e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) {
         exitCbtFullscreen();
 
-        // Hanya catat pelanggaran jika siswa sudah masuk ke halaman soal (exam_running)
-        if (stage === 'exam_running') {
+        // Hanya catat pelanggaran jika siswa sudah berada di halaman soal (exam_running)
+        if (
+          stage === 'exam_running' &&
+          Date.now() - examStartedAtRef.current > 3000
+        ) {
           lockStudentByViolation(
             'Keluar dari halaman soal ujian CBT (Menekan tombol Esc pada keyboard laptop)'
           );
@@ -683,7 +865,7 @@ export default function App() {
           stage === 'exam_result'
         ) {
           if (stage === 'confirm_participant' || stage === 'confirm_test') {
-            setParticipants((prev) =>
+            handleUpdateParticipants((prev) =>
               prev.map((row) =>
                 row.username.toUpperCase() === participant.username.toUpperCase() &&
                 row.loginState === 'Sedang Mengerjakan'
@@ -697,16 +879,8 @@ export default function App() {
       }
     };
 
-    // Handle native browser fullscreen change (e.g. browser Esc key)
     const handleFullscreenChange = () => {
-      const isFs = updateFullscreenState();
-      if (!isFs) {
-        if (stage === 'exam_running') {
-          lockStudentByViolation(
-            'Keluar dari halaman soal ujian CBT (Menekan tombol Esc / Keluar dari Fullscreen)'
-          );
-        }
-      }
+      updateFullscreenState();
     };
 
     window.addEventListener('keydown', handleKeyDown, { capture: true });
@@ -727,74 +901,62 @@ export default function App() {
     exitCbtFullscreen,
     stage,
     lockStudentByViolation,
+    handleUpdateParticipants,
     participant.username,
   ]);
 
   // Detect student exit violation ONLY when inside active question page (exam_running)
+  // and student genuinely hides the tab / switches application
   useEffect(() => {
-    const isStudentInActiveCbtSession = stage === 'exam_running';
-
-    if (!isStudentInActiveCbtSession) return;
+    if (stage !== 'exam_running') return;
 
     const handleVisibilityViolation = () => {
-      if (document.visibilityState === 'hidden') {
+      if (
+        document.visibilityState === 'hidden' &&
+        Date.now() - examStartedAtRef.current > 3000
+      ) {
         lockStudentByViolation(
           'Keluar dari halaman soal CBT / berpindah tab atau aplikasi saat ujian berlangsung'
         );
       }
     };
 
-    const handleWindowBlurViolation = () => {
-      lockStudentByViolation(
-        'Keluar dari fokus layar soal CBT / membuka jendela atau aplikasi lain saat ujian berlangsung'
-      );
-    };
-
-    const handlePageLeaveViolation = () => {
-      lockStudentByViolation(
-        'Menutup atau keluar dari halaman soal CBT saat ujian berlangsung'
-      );
-    };
-
     document.addEventListener('visibilitychange', handleVisibilityViolation);
-    window.addEventListener('blur', handleWindowBlurViolation);
-    window.addEventListener('pagehide', handlePageLeaveViolation);
-    window.addEventListener('beforeunload', handlePageLeaveViolation);
 
     return () => {
       document.removeEventListener(
         'visibilitychange',
         handleVisibilityViolation
       );
-      window.removeEventListener('blur', handleWindowBlurViolation);
-      window.removeEventListener('pagehide', handlePageLeaveViolation);
-      window.removeEventListener('beforeunload', handlePageLeaveViolation);
     };
   }, [stage, lockStudentByViolation]);
 
-  const handleRequestResetFromLogin = useCallback((username: string) => {
-    const cleanUser = username.trim().toUpperCase();
-    const timeStr = new Date().toLocaleTimeString('id-ID', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-    setParticipants((prev) =>
-      prev.map((row) =>
-        row.username.toUpperCase() === cleanUser
-          ? {
-              ...row,
-              loginState: 'Terkunci (Pelanggaran)',
-              requestReset: true,
-              violationReason:
-                row.violationReason ||
-                'Siswa mengajukan permintaan Reset Login ke Proktor/Administrator',
-              violationAt: row.violationAt || timeStr,
-            }
-          : row
-      )
-    );
-  }, []);
+  const handleRequestResetFromLogin = useCallback(
+    (username: string) => {
+      const cleanUser = username.trim().toUpperCase();
+      const timeStr = new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      handleUpdateParticipants((prev) =>
+        prev.map((row) =>
+          row.username.toUpperCase() === cleanUser
+            ? {
+                ...row,
+                loginState: 'Terkunci (Pelanggaran)',
+                requestReset: true,
+                violationReason:
+                  row.violationReason ||
+                  'Siswa mengajukan permintaan Reset Login ke Proktor/Administrator',
+                violationAt: row.violationAt || timeStr,
+              }
+            : row
+        )
+      );
+    },
+    [handleUpdateParticipants]
+  );
 
   const handleLoginSuccess = (username: string) => {
     const cleanUser = username.trim().toUpperCase();
@@ -818,15 +980,20 @@ export default function App() {
       matchedRow?.namaPeserta ||
       (isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : 'NADIA PUTRI PRATAMA');
 
-    // Update or register participant loginState in shared Vercel Storage
-    setParticipants((prev) => {
+    // Update or register participant in shared Vercel Storage (without locking or marking exam running yet)
+    handleUpdateParticipants((prev) => {
       const exists = prev.some(
         (row) => row.username.toUpperCase() === cleanUser
       );
       if (exists) {
         return prev.map((row) =>
           row.username.toUpperCase() === cleanUser
-            ? { ...row, loginState: 'Sedang Mengerjakan', requestReset: false }
+            ? {
+                ...row,
+                requestReset: false,
+                violationReason: undefined,
+                violationAt: undefined,
+              }
             : row
         );
       }
@@ -840,12 +1007,21 @@ export default function App() {
           namaPeserta: resolvedFullName,
           kelompok: '1',
           kelas: 'XII IPA',
-          loginState: 'Sedang Mengerjakan',
+          loginState: 'Belum Login',
           requestReset: false,
         },
         ...prev,
       ];
     });
+
+    const scheduledPkg =
+      activeSchedules.length > 0
+        ? packages.find(
+            (p) =>
+              p.title.trim().toLowerCase() ===
+              activeSchedules[0].mapel.trim().toLowerCase()
+          )
+        : undefined;
 
     setLastViolationInfo(null);
     setParticipant((prev) => ({
@@ -854,9 +1030,10 @@ export default function App() {
       nik: isSainsPreset ? '3174052209080004' : '3273011805080002',
       fullName: resolvedFullName,
       gender: isSainsPreset ? 'Laki-Laki' : 'Perempuan',
-      selectedPackageId: isSainsPreset
-        ? packages[1]?.id || packages[0].id
-        : packages[0].id,
+      selectedPackageId:
+        scheduledPkg?.id ||
+        (isSainsPreset ? packages[1]?.id || packages[0]?.id : packages[0]?.id) ||
+        '',
     }));
     setStage('confirm_participant');
   };
@@ -872,11 +1049,18 @@ export default function App() {
   };
 
   const handleStartExam = () => {
+    examStartedAtRef.current = Date.now();
     requestCbtFullscreen();
-    setParticipants((prev) =>
+    handleUpdateParticipants((prev) =>
       prev.map((row) =>
         row.username.toUpperCase() === participant.username.toUpperCase()
-          ? { ...row, loginState: 'Sedang Mengerjakan', requestReset: false }
+          ? {
+              ...row,
+              loginState: 'Sedang Mengerjakan',
+              requestReset: false,
+              violationReason: undefined,
+              violationAt: undefined,
+            }
           : row
       )
     );
@@ -941,17 +1125,29 @@ export default function App() {
         finalScore,
       };
 
-      setParticipants((prev) =>
+      handleUpdateParticipants((prev) =>
         prev.map((row) =>
           row.username.toUpperCase() === participant.username.toUpperCase()
-            ? { ...row, loginState: 'Selesai' }
+            ? {
+                ...row,
+                loginState: 'Selesai',
+                requestReset: false,
+                violationReason: undefined,
+                violationAt: undefined,
+              }
             : row
         )
       );
-      setResultsHistory((prev) => [summary, ...prev]);
+      handleUpdateResultsHistory((prev) => [summary, ...prev]);
       setStage('exam_result');
     },
-    [answers, participant, selectedPackage]
+    [
+      answers,
+      handleUpdateParticipants,
+      handleUpdateResultsHistory,
+      participant,
+      selectedPackage,
+    ]
   );
 
   const handleLogout = () => {
@@ -963,7 +1159,7 @@ export default function App() {
       return;
     }
     if (stage === 'confirm_participant' || stage === 'confirm_test') {
-      setParticipants((prev) =>
+      handleUpdateParticipants((prev) =>
         prev.map((row) =>
           row.username.toUpperCase() === participant.username.toUpperCase() &&
           row.loginState === 'Sedang Mengerjakan'
@@ -989,12 +1185,12 @@ export default function App() {
         isScheduleActive={isScheduleActive}
         activeSchedules={activeSchedules}
         participants={participants}
-        onUpdateParticipants={setParticipants}
+        onUpdateParticipants={handleUpdateParticipants}
         packages={packages}
         onUpdatePackages={handleUpdatePackages}
         onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
         resultsHistory={resultsHistory}
-        onClearHistory={() => setResultsHistory([])}
+        onClearHistory={() => handleUpdateResultsHistory([])}
         onLogoutProctor={() => setStage('login')}
       />
     );
@@ -1009,16 +1205,16 @@ export default function App() {
         tokenSecondsLeft={tokenSecondsLeft}
         onUpdateToken={handleUpdateToken}
         schedules={schedules}
-        onUpdateSchedules={setSchedules}
+        onUpdateSchedules={handleUpdateSchedules}
         participants={participants}
-        onUpdateParticipants={setParticipants}
+        onUpdateParticipants={handleUpdateParticipants}
         proctors={proctors}
-        onUpdateProctors={setProctors}
+        onUpdateProctors={handleUpdateProctors}
         packages={packages}
         onUpdatePackages={handleUpdatePackages}
         onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
         resultsHistory={resultsHistory}
-        onClearHistory={() => setResultsHistory([])}
+        onClearHistory={() => handleUpdateResultsHistory([])}
         storageEngine={storageEngine}
         lastSyncedLabel={lastSyncedLabel}
         onForceSyncStorage={pushToVercelCloud}

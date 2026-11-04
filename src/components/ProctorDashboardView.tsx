@@ -370,10 +370,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     showNotice('Data filter dan pilihan peserta telah di-reset.');
   };
 
-  const handleResetParticipantLogin = (id: string, name: string) => {
+  const handleResetParticipantLogin = (id: string, name: string, username?: string) => {
+    const cleanUser = (username || '').trim().toUpperCase();
     setParticipants((prev) =>
       prev.map((r) =>
-        r.id === id
+        r.id === id || (cleanUser && r.username.trim().toUpperCase() === cleanUser)
           ? {
               ...r,
               loginState: 'Belum Login',
@@ -2027,7 +2028,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                               <button
                                 type="button"
                                 onClick={() =>
-                                  handleResetParticipantLogin(p.id, p.namaPeserta)
+                                  handleResetParticipantLogin(
+                                    p.id,
+                                    p.namaPeserta,
+                                    p.username
+                                  )
                                 }
                                 className="px-3 py-1.5 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-[11px] font-semibold cursor-pointer"
                               >
