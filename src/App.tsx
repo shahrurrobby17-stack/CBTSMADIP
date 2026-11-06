@@ -48,6 +48,7 @@ import {
   fetchVercelStorage,
   saveVercelStorage,
 } from './utils/vercelStorage';
+import { Power } from 'lucide-react';
 
 type AppStage =
   | 'login'
@@ -899,6 +900,35 @@ export default function App() {
     }
   }, []);
 
+  const [showExitAppConfirmModal, setShowExitAppConfirmModal] = useState(false);
+
+  const handleExitApp = useCallback(() => {
+    setShowExitAppConfirmModal(true);
+  }, []);
+
+  const handleConfirmExitApp = useCallback(() => {
+    // 1. Keluar dari mode fullscreen
+    exitCbtFullscreen();
+
+    // 2. Coba tutup jendela browser (window.close)
+    try {
+      window.close();
+    } catch {
+      // Ignore
+    }
+
+    // 3. Fallback jika browser membatasi window.close: arahkan ke blank atau riwayat sebelumnya
+    try {
+      if (window.history.length > 1) {
+        window.history.back();
+      } else {
+        window.location.href = 'about:blank';
+      }
+    } catch {
+      // Ignore
+    }
+  }, [exitCbtFullscreen]);
+
   const lockStudentByViolation = useCallback(
     (reason: string) => {
       const nowTs = Date.now();
@@ -1423,6 +1453,7 @@ export default function App() {
         onOpenProctorModal={
           stage !== 'exam_running' ? () => setStage('proctor_login') : undefined
         }
+        onExitApp={stage === 'login' ? handleExitApp : undefined}
         compact={stage === 'exam_running'}
       />
 
@@ -1431,6 +1462,7 @@ export default function App() {
         <LoginView
           onLoginSuccess={handleLoginSuccess}
           onOpenProctorModal={() => setStage('proctor_login')}
+          onExitApp={handleExitApp}
           participants={participants}
           activeSchedules={activeSchedules}
           lastViolationInfo={lastViolationInfo}
@@ -1562,6 +1594,48 @@ export default function App() {
           onRetakeOrChangePackage={() => setStage('confirm_participant')}
           onLogout={handleLogout}
         />
+      )}
+
+      {/* Modal Konfirmasi Tutup / Keluar Aplikasi CBT */}
+      {showExitAppConfirmModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 text-center space-y-4 animate-cbt-slide-up">
+            <div className="w-12 h-12 mx-auto rounded-full bg-rose-100 flex items-center justify-center text-rose-600">
+              <Power className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-slate-800">
+                Tutup Aplikasi CBT?
+              </h3>
+              <p className="mt-1.5 text-xs text-slate-600 leading-relaxed">
+                Apakah Anda yakin ingin keluar dan menutup aplikasi CBT SMA Islam Diponegoro Wagir?
+              </p>
+            </div>
+            <div className="flex items-center gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowExitAppConfirmModal(false)}
+                className="flex-1 py-2 px-3 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExitAppConfirmModal(false);
+                  handleConfirmExitApp();
+                }}
+                className="flex-1 py-2 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 active:scale-[0.99] text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+              >
+                Ya, Keluar CBT
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

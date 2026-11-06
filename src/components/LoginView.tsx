@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Eye,
   EyeOff,
+  Power,
 } from 'lucide-react';
 import {
   ProctorParticipantRow,
@@ -27,11 +28,14 @@ interface LoginViewProps {
   activeSchedules?: AdminScheduleItem[];
   lastViolationInfo?: ViolationAlertInfo | null;
   onRequestResetLogin?: (username: string) => void;
+  onExitApp?: () => void;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({
   onLoginSuccess,
   participants = [],
+  onOpenProctorModal,
+  onExitApp,
 }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -242,6 +246,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Tombol Keluar CBT Mobile & Tablet (dibawah card login jika di layar kecil) */}
+      {onExitApp && (
+        <div className="md:hidden mt-4 w-full max-w-[425px] flex justify-center">
+          <button
+            type="button"
+            onClick={onExitApp}
+            className="w-full py-2.5 px-4 rounded-xl bg-rose-600/90 hover:bg-rose-700 active:scale-[0.99] text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+          >
+            <Power className="w-4 h-4 text-rose-200" />
+            <span>Keluar CBT</span>
+          </button>
+        </div>
+      )}
 
       {/* Copyright Footer */}
       <div className="mt-4 flex flex-wrap items-center justify-center text-xs text-slate-500 font-medium text-center">

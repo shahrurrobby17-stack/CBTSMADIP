@@ -2078,8 +2078,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const wordQuestionInputRef = React.useRef<HTMLInputElement | null>(null);
 
-  const triggerUploadWordFile = () => {
-    // Pastikan browser tetap / kembali ke mode fullscreen saat jendela file eksplorer dibuka
+  const ensureFullscreenMode = () => {
     try {
       const doc = document as Document & {
         webkitFullscreenElement?: Element | null;
@@ -2088,7 +2087,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       const docEl = document.documentElement as HTMLElement & {
         webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
       };
-      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement && !doc.msFullscreenElement) {
         if (docEl.requestFullscreen) {
           docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
         } else if (docEl.webkitRequestFullscreen) {
@@ -2098,6 +2097,22 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     } catch {
       // Ignore
     }
+  };
+
+  const triggerUploadWordFile = () => {
+    ensureFullscreenMode();
+
+    // Ketika jendela file eksplorer ditutup (baik via Open/OK maupun Cancel), kembalikan fullscreen saat window kembali fokus
+    const handleReturnFocus = () => {
+      window.removeEventListener('focus', handleReturnFocus);
+      setTimeout(() => {
+        ensureFullscreenMode();
+      }, 100);
+      setTimeout(() => {
+        ensureFullscreenMode();
+      }, 500);
+    };
+    window.addEventListener('focus', handleReturnFocus, { once: true });
 
     if (wordQuestionInputRef.current) {
       wordQuestionInputRef.current.value = '';
@@ -2116,24 +2131,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const handleUploadWordQuestions = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
-    // Pastikan fullscreen tetap aktif setelah pengguna memilih file dari file eksplorer
-    try {
-      const doc = document as Document & {
-        webkitFullscreenElement?: Element | null;
-      };
-      const docEl = document.documentElement as HTMLElement & {
-        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
-      };
-      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
-        if (docEl.requestFullscreen) {
-          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
-        } else if (docEl.webkitRequestFullscreen) {
-          docEl.webkitRequestFullscreen();
-        }
-      }
-    } catch {
-      // Ignore
-    }
+    // Pastikan fullscreen kembali aktif seketika setelah pengguna memilih file dan klik Open/OK
+    ensureFullscreenMode();
+    setTimeout(() => {
+      ensureFullscreenMode();
+    }, 150);
+    setTimeout(() => {
+      ensureFullscreenMode();
+    }, 450);
 
     const file = e.target.files?.[0];
     if (!file || !selectedPackage) return;
@@ -2196,6 +2201,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       if (wordQuestionInputRef.current) {
         wordQuestionInputRef.current.value = '';
       }
+      ensureFullscreenMode();
+      setTimeout(() => {
+        ensureFullscreenMode();
+      }, 200);
     }
   };
 

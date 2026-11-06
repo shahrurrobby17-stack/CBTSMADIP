@@ -1,5 +1,5 @@
 import React from 'react';
-import { LogOut, ShieldCheck, User, UserCog } from 'lucide-react';
+import { LogOut, Power, ShieldCheck, User, UserCog } from 'lucide-react';
 
 interface PusmendikHeaderProps {
   participantName?: string;
@@ -7,6 +7,7 @@ interface PusmendikHeaderProps {
   onLogout?: () => void;
   onOpenProctorModal?: () => void;
   onOpenAdminLogin?: () => void;
+  onExitApp?: () => void;
   compact?: boolean;
 }
 
@@ -26,6 +27,7 @@ export const PusmendikHeader: React.FC<PusmendikHeaderProps> = ({
   onLogout,
   onOpenProctorModal,
   onOpenAdminLogin,
+  onExitApp,
   compact = false,
 }) => {
   return (
@@ -86,7 +88,7 @@ export const PusmendikHeader: React.FC<PusmendikHeaderProps> = ({
 
         {/* Right Zone: Login Administrator above Login Proktor + Participant Info */}
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
-          {(onOpenAdminLogin || onOpenProctorModal) && (
+          {(onOpenAdminLogin || onOpenProctorModal || onExitApp) && (
             <div className="hidden md:flex flex-col items-stretch gap-1.5">
               {onOpenAdminLogin && (
                 <button
@@ -109,6 +111,18 @@ export const PusmendikHeader: React.FC<PusmendikHeaderProps> = ({
                 >
                   <ShieldCheck className="w-3.5 h-3.5 text-sky-200" />
                   <span>Login Proktor</span>
+                </button>
+              )}
+
+              {onExitApp && (
+                <button
+                  type="button"
+                  onClick={onExitApp}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-rose-600/90 hover:bg-rose-700 border border-rose-400/40 text-xs font-semibold text-white transition-colors cursor-pointer whitespace-nowrap shadow-xs"
+                  title="Tutup / Keluar dari Aplikasi CBT"
+                >
+                  <Power className="w-3.5 h-3.5 text-rose-200" />
+                  <span>Keluar CBT</span>
                 </button>
               )}
             </div>
