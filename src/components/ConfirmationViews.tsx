@@ -1,10 +1,72 @@
-import React, { useState, useEffect } from 'react';
-import { Copy, Play, RefreshCw, CheckCircle2, Clock, FileText, AlertCircle, Lock } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Play, Clock, FileText, AlertCircle } from 'lucide-react';
 import { AdminScheduleItem, ExamPackage, ParticipantProfile } from '../types/cbt';
+import {
+  ProctorParticipantRow,
+  doesKelasMatch,
+  normalizeKelasCode,
+} from './ProctorDashboardView';
+import { getPkgClass } from './AdminViews';
+
+export function resolvePackageForSchedule(
+  sch: AdminScheduleItem | undefined,
+  packages: ExamPackage[]
+): ExamPackage | undefined {
+  if (packages.length === 0) return undefined;
+  if (!sch) return packages[0];
+
+  const targetMapelLower = (sch.mapel || '').trim().toLowerCase();
+  const parsedDuration = parseInt(String(sch.durasi || ''), 10);
+
+  // 1. Exact title + class match
+  let matched = packages.find(
+    (pkg) =>
+      pkg.title.trim().toLowerCase() === targetMapelLower &&
+      doesKelasMatch(getPkgClass(pkg), sch.kelas)
+  );
+
+  // 2. Exact title match
+  if (!matched && targetMapelLower) {
+    matched = packages.find(
+      (pkg) => pkg.title.trim().toLowerCase() === targetMapelLower
+    );
+  }
+
+  // 3. Partial title + class match
+  if (!matched && targetMapelLower) {
+    matched = packages.find(
+      (pkg) =>
+        doesKelasMatch(getPkgClass(pkg), sch.kelas) &&
+        (pkg.title.trim().toLowerCase().includes(targetMapelLower) ||
+          targetMapelLower.includes(pkg.title.trim().toLowerCase()))
+    );
+  }
+
+  // 4. Class match
+  if (!matched && sch.kelas) {
+    matched = packages.find((pkg) =>
+      doesKelasMatch(getPkgClass(pkg), sch.kelas)
+    );
+  }
+
+  const basePkg = matched || packages[0];
+  const normKelas = normalizeKelasCode(sch.kelas) || sch.kelas;
+
+  return {
+    ...basePkg,
+    title: sch.mapel.trim() || basePkg.title,
+    targetClass: normKelas ? `Kelas ${normKelas}` : basePkg.targetClass,
+    durationMinutes:
+      !isNaN(parsedDuration) && parsedDuration > 0
+        ? parsedDuration
+        : basePkg.durationMinutes,
+  };
+}
 
 interface ParticipantConfirmationProps {
   initialProfile: ParticipantProfile;
   packages: ExamPackage[];
+  participants?: ProctorParticipantRow[];
   activeToken: string;
   isScheduleActive: boolean;
   activeSchedules: AdminScheduleItem[];
@@ -12,126 +74,127 @@ interface ParticipantConfirmationProps {
   onSubmitProfile: (profile: ParticipantProfile) => void;
 }
 
-const MONTHS = [
-  { value: '01', label: 'Januari' },
-  { value: '02', label: 'Februari' },
-  { value: '03', label: 'Maret' },
-  { value: '04', label: 'April' },
-  { value: '05', label: 'Mei' },
-  { value: '06', label: 'Juni' },
-  { value: '07', label: 'Juli' },
-  { value: '08', label: 'Agustus' },
-  { value: '09', label: 'September' },
-  { value: '10', label: 'Oktober' },
-  { value: '11', label: 'November' },
-  { value: '12', label: 'Desember' },
-];
-
 export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps> = ({
   initialProfile,
   packages,
+  participants = [],
   activeToken,
-  isScheduleActive,
   activeSchedules,
-  onRefreshToken,
   onSubmitProfile,
 }) => {
-  const [fullName, setFullName] = useState(initialProfile.fullName);
-  const [gender, setGender] = useState<'Laki-Laki' | 'Perempuan'>(initialProfile.gender);
-  const nonTkaPackages = packages.filter(
-    (pkg) =>
-      !pkg.title.toLowerCase().includes('simulasi tka') &&
-      !pkg.code.toUpperCase().startsWith('TKA-')
+  // Resolve the logged-in student's registered name and class (read-only)
+  const matchedParticipant = useMemo(() => {
+    const cleanUsername = initialProfile.username.trim().toUpperCase();
+    return participants.find(
+      (p) =>
+        p.username.trim().toUpperCase() === cleanUsername ||
+        p.namaPeserta.trim().toUpperCase() === cleanUsername
+    );
+  }, [initialProfile.username, participants]);
+
+  const resolvedFullName =
+    matchedParticipant?.namaPeserta ||
+    initialProfile.fullName ||
+    initialProfile.username;
+
+  const studentKelas = useMemo(() => {
+    const rawKelas =
+      matchedParticipant?.kelas || initialProfile.kelas || 'X';
+    return normalizeKelasCode(rawKelas) || 'X';
+  }, [initialProfile.kelas, matchedParticipant]);
+
+  // Filter active schedules strictly to those matching the student's class
+  const studentActiveSchedules = useMemo(
+    () =>
+      activeSchedules.filter((sch) => doesKelasMatch(studentKelas, sch.kelas)),
+    [activeSchedules, studentKelas]
+  );
+
+  const isStudentScheduleActive = studentActiveSchedules.length > 0;
+
+  const [selectedScheduleId, setSelectedScheduleId] = useState<string>(
+    studentActiveSchedules[0]?.id || ''
+  );
+
+  useEffect(() => {
+    if (studentActiveSchedules.length === 0) {
+      setSelectedScheduleId('');
+      return;
+    }
+    const stillExists = studentActiveSchedules.some(
+      (s) => s.id === selectedScheduleId
+    );
+    if (!stillExists) {
+      setSelectedScheduleId(studentActiveSchedules[0].id);
+    }
+  }, [studentActiveSchedules, selectedScheduleId]);
+
+  const selectedSchedule = useMemo(
+    () =>
+      studentActiveSchedules.find((s) => s.id === selectedScheduleId) ||
+      studentActiveSchedules[0],
+    [studentActiveSchedules, selectedScheduleId]
+  );
+
+  const nonTkaPackages = useMemo(
+    () =>
+      packages.filter(
+        (pkg) =>
+          !pkg.title.toLowerCase().includes('simulasi tka') &&
+          !pkg.code.toUpperCase().startsWith('TKA-')
+      ),
+    [packages]
   );
   const availablePackages = nonTkaPackages.length > 0 ? nonTkaPackages : packages;
 
-  const resolveActivePackage = (): ExamPackage | undefined => {
-    if (activeSchedules.length > 0) {
-      for (const sch of activeSchedules) {
-        const matched = availablePackages.find(
-          (pkg) =>
-            pkg.title.trim().toLowerCase() === sch.mapel.trim().toLowerCase()
-        );
-        if (matched) return matched;
-      }
-    }
-    return (
-      availablePackages.find((pkg) => pkg.id === initialProfile.selectedPackageId) ||
-      availablePackages[0]
-    );
-  };
+  const activePackage = useMemo(
+    () => resolvePackageForSchedule(selectedSchedule, availablePackages),
+    [selectedSchedule, availablePackages]
+  );
 
-  const activePackage = resolveActivePackage();
-  const [selectedPackageId, setSelectedPackageId] = useState(
-    activePackage?.id || initialProfile.selectedPackageId || availablePackages[0]?.id || ''
-  );
-  const [birthDay, setBirthDay] = useState(initialProfile.birthDay);
-  const [birthMonth, setBirthMonth] = useState(initialProfile.birthMonth);
-  const [birthYear, setBirthYear] = useState(initialProfile.birthYear);
-  const [enteredToken, setEnteredToken] = useState(
-    isScheduleActive ? activeToken : ''
-  );
+  const [enteredToken, setEnteredToken] = useState('');
   const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    const resolved = resolveActivePackage();
-    if (resolved && resolved.id !== selectedPackageId) {
-      setSelectedPackageId(resolved.id);
-    }
-  }, [activeSchedules, packages]);
-
-  useEffect(() => {
-    if (!isScheduleActive) {
+    if (!isStudentScheduleActive) {
       setEnteredToken('');
     }
-  }, [isScheduleActive]);
-
-  const handleCopyAndFillToken = () => {
-    if (!isScheduleActive) {
-      setError(
-        'Token ujian belum keluar karena mata pelajaran pada menu Jadwal belum diaktifkan oleh Administrator.'
-      );
-      return;
-    }
-    setEnteredToken(activeToken);
-    setCopied(true);
-    setError('');
-    setTimeout(() => setCopied(false), 1800);
-  };
+  }, [isStudentScheduleActive]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isScheduleActive) {
+    if (!isStudentScheduleActive || !selectedSchedule) {
       setError(
-        'Anda belum dapat mengerjakan ujian. Mata pelajaran pada menu Jadwal belum diaktifkan oleh Administrator sehingga token belum keluar.'
+        `Anda belum dapat mengerjakan ujian. Mata pelajaran untuk Kelas ${studentKelas} pada menu Jadwal belum diaktifkan oleh Administrator.`
       );
       return;
     }
-    if (!fullName.trim()) {
-      setError('Silakan ketikkan Nama Peserta terlebih dahulu.');
+    if (!enteredToken.trim()) {
+      setError('Silakan masukkan Token ujian terlebih dahulu.');
       return;
     }
     if (enteredToken.trim().toUpperCase() !== activeToken.toUpperCase()) {
-      setError(`Token tidak sesuai. Token aktif saat ini adalah: ${activeToken}`);
+      setError('Token yang Anda masukkan tidak sesuai dengan token ujian aktif saat ini.');
       return;
     }
     setError('');
     onSubmitProfile({
       ...initialProfile,
-      fullName: fullName.trim(),
-      gender,
-      selectedPackageId: activePackage?.id || selectedPackageId,
-      birthDay,
-      birthMonth,
-      birthYear,
+      fullName: resolvedFullName,
+      kelas: studentKelas,
+      activeSubjectTitle: selectedSchedule.mapel,
+      selectedPackageId:
+        activePackage?.id ||
+        initialProfile.selectedPackageId ||
+        availablePackages[0]?.id ||
+        '',
       enteredToken: enteredToken.trim().toUpperCase(),
     });
   };
 
   const activeSubjectLabel =
-    isScheduleActive && activeSchedules.length > 0
-      ? activeSchedules[0].mapel || activePackage?.title || '-'
+    isStudentScheduleActive && selectedSchedule
+      ? selectedSchedule.mapel || activePackage?.title || '-'
       : '-';
 
   return (
@@ -142,7 +205,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
           Konfirmasi Data Peserta
         </h1>
         <p className="text-xs text-slate-500 mt-1">
-          Pastikan identitas peserta dan mata pelajaran di bawah ini sudah sesuai sebelum memulai ujian.
+          Pastikan identitas peserta, kelas, dan mata pelajaran di bawah ini sudah sesuai, lalu masukkan token untuk memulai ujian.
         </p>
 
         {error && (
@@ -158,57 +221,58 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             <label className="text-xs font-semibold text-slate-500">
               Satuan Pendidikan
             </label>
-            <div className="sm:col-span-2 text-sm font-medium text-slate-800">
+            <div className="sm:col-span-2 text-sm font-medium text-slate-900">
               {initialProfile.schoolName}
             </div>
           </div>
 
-          {/* Mata Pelajaran (Otomatis sesuai jadwal aktif tanpa dropdown Simulasi TKA) */}
+          {/* Kelas Peserta (Warna Hitam) */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
+            <label className="text-xs font-semibold text-slate-500">
+              Kelas Peserta
+            </label>
+            <div className="sm:col-span-2 text-sm font-bold text-slate-900">
+              Kelas {studentKelas}
+            </div>
+          </div>
+
+          {/* Mata Pelajaran (Hanya menampilkan mata pelajaran yang aktif sesuai kelas siswa) */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
             <label className="text-xs font-semibold text-slate-500">
               Mata Pelajaran
             </label>
-            <div className="sm:col-span-2 text-sm font-bold text-slate-800">
-              {activeSubjectLabel}
-            </div>
-          </div>
-
-          {/* Jenis Kelamin */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5">
-            <label htmlFor="genderSelect" className="text-xs font-semibold text-slate-600">
-              Jenis Kelamin
-            </label>
             <div className="sm:col-span-2">
-              <select
-                id="genderSelect"
-                value={gender}
-                onChange={(e) => setGender(e.target.value as 'Laki-Laki' | 'Perempuan')}
-                className="w-full px-3.5 py-2 text-sm text-slate-800 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white transition-colors"
-              >
-                <option value="Laki-Laki">Laki-Laki</option>
-                <option value="Perempuan">Perempuan</option>
-              </select>
+              {studentActiveSchedules.length > 1 ? (
+                <select
+                  value={selectedSchedule?.id || ''}
+                  onChange={(e) => setSelectedScheduleId(e.target.value)}
+                  className="w-full px-3.5 py-2 text-sm font-bold text-slate-900 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white transition-colors"
+                >
+                  {studentActiveSchedules.map((sch) => (
+                    <option key={sch.id} value={sch.id}>
+                      {sch.mapel}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="text-sm font-bold text-slate-900">
+                  {activeSubjectLabel}
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Ketikkan Nama Peserta */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5">
-            <label htmlFor="participantName" className="text-xs font-semibold text-slate-600">
+          {/* Nama Peserta (Tidak dapat diedit oleh siswa) */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
+            <label className="text-xs font-semibold text-slate-500">
               Nama Peserta
             </label>
-            <div className="sm:col-span-2">
-              <input
-                id="participantName"
-                type="text"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                placeholder="Ketikkan Nama Peserta"
-                className="w-full px-3.5 py-2 text-sm text-slate-800 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white transition-colors"
-              />
+            <div className="sm:col-span-2 text-sm font-bold text-slate-900">
+              {resolvedFullName}
             </div>
           </div>
 
-          {/* Token Input */}
+          {/* Token Input (Satu-satunya kolom yang diisi oleh siswa) */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5">
             <label htmlFor="tokenInput" className="text-xs font-semibold text-slate-600">
               Token
@@ -217,17 +281,20 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               <input
                 id="tokenInput"
                 type="text"
-                disabled={!isScheduleActive}
+                disabled={!isStudentScheduleActive}
                 value={enteredToken}
-                onChange={(e) => setEnteredToken(e.target.value.toUpperCase())}
+                onChange={(e) => {
+                  setEnteredToken(e.target.value.toUpperCase());
+                  setError('');
+                }}
                 placeholder={
-                  isScheduleActive
+                  isStudentScheduleActive
                     ? 'Ketikkan token di sini'
-                    : 'Token belum keluar (Mapel belum aktif)'
+                    : `Token belum keluar (Mapel Kelas ${studentKelas} belum aktif)`
                 }
                 className={`w-full px-3.5 py-2 font-mono text-sm font-bold tracking-widest uppercase border rounded-lg focus:outline-none transition-colors ${
-                  isScheduleActive
-                    ? 'text-slate-800 bg-slate-50 border-slate-200 focus:border-blue-600 focus:bg-white'
+                  isStudentScheduleActive
+                    ? 'text-slate-900 bg-slate-50 border-slate-200 focus:border-blue-600 focus:bg-white'
                     : 'text-slate-400 bg-slate-100 border-slate-200 cursor-not-allowed'
                 }`}
               />
@@ -237,16 +304,16 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
           <div className="pt-4">
             <button
               type="submit"
-              disabled={!isScheduleActive}
+              disabled={!isStudentScheduleActive}
               className={`w-full py-2.5 px-6 rounded-full text-sm font-semibold transition-all ${
-                isScheduleActive
+                isStudentScheduleActive
                   ? 'bg-[#0066ff] hover:bg-[#0052cc] text-white shadow-[0_6px_16px_rgba(0,102,255,0.28)] cursor-pointer'
                   : 'bg-slate-200 text-slate-500 cursor-not-allowed'
               }`}
             >
-              {isScheduleActive
+              {isStudentScheduleActive
                 ? 'Submit'
-                : 'Tidak Dapat Mengerjakan (Mapel Belum Diaktifkan Admin)'}
+                : `Tidak Dapat Mengerjakan (Mapel Kelas ${studentKelas} Belum Diaktifkan)`}
             </button>
           </div>
         </form>
@@ -288,8 +355,8 @@ export const TestConfirmationView: React.FC<TestConfirmationViewProps> = ({
           <div className="mt-6 divide-y divide-slate-100">
             <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
               <span className="text-xs font-semibold text-slate-500">Nama Peserta</span>
-              <span className="text-sm font-bold text-slate-800">
-                {profile.fullName} ({profile.gender})
+              <span className="text-sm font-bold text-slate-900">
+                {profile.fullName}
               </span>
             </div>
 

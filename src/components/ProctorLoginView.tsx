@@ -59,17 +59,10 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
     onProctorLoginSuccess(cleanName.toUpperCase(), cleanEnc.toUpperCase());
   };
 
-  const handleFillDefaultProctor = () => {
-    setProctorName('K05060108-KB6K');
-    setPassword('SMADIP2026*');
-    setEncryptionCode('GLDTKASMA');
-    setErrorMsg('');
-  };
-
   return (
     <main className="flex-1 flex flex-col items-center justify-center px-4 py-10 min-h-[calc(100vh-10rem)]">
       {/* Proctor Login Card matching the CBT aesthetic */}
-      <div className="w-full max-w-[445px] bg-white rounded-[14px] px-9 sm:px-11 py-10 shadow-[0_24px_60px_-12px_rgba(15,23,42,0.16)] border border-slate-100/80">
+      <div className="w-full max-w-[445px] bg-white rounded-[14px] px-9 sm:px-11 py-10 shadow-[0_24px_60px_-12px_rgba(15,23,42,0.16)] border border-slate-100/80 animate-cbt-slide-up">
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-[18px] font-bold text-[#1e293b] tracking-tight">
             Login Proktor
@@ -103,7 +96,7 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
                 onChange={(e) => setProctorName(e.target.value)}
                 placeholder="Nama Proktor"
                 aria-label="Nama Proktor"
-                autoComplete="username"
+                autoComplete="off"
                 className="w-full pb-2 pt-1 text-[14px] text-slate-800 placeholder:text-slate-400 bg-transparent border-b border-slate-200 focus:border-[#0066ff] focus:outline-none transition-colors"
               />
             </div>
@@ -121,7 +114,7 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Kata Sandi"
                 aria-label="Kata Sandi"
-                autoComplete="current-password"
+                autoComplete="new-password"
                 className="w-full pb-2 pt-1 pr-8 text-[14px] text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-none"
               />
               <button
@@ -170,16 +163,6 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
 
           {/* Action Buttons */}
           <div className="pt-2 space-y-2.5">
-            {onGoToAdminLogin && (
-              <button
-                type="button"
-                onClick={onGoToAdminLogin}
-                className="w-full py-2.5 px-6 rounded-full bg-slate-800 hover:bg-slate-900 active:scale-[0.99] text-white text-[13.5px] font-semibold transition-all cursor-pointer"
-              >
-                Login Administrator
-              </button>
-            )}
-
             <button
               type="submit"
               className="w-full py-2.5 px-6 rounded-full bg-[#0066ff] hover:bg-[#0052cc] active:scale-[0.99] text-white text-[14px] font-semibold shadow-[0_6px_16px_rgba(0,102,255,0.28)] transition-all cursor-pointer"
@@ -197,29 +180,6 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
             </button>
           </div>
         </form>
-      </div>
-
-      {/* Quick-Fill & Direct Instant Login Helper below card */}
-      <div className="mt-5 w-full max-w-[445px] bg-white/85 backdrop-blur-xs rounded-xl p-3.5 border border-slate-200/80 shadow-xs space-y-2.5">
-        <div className="text-center text-[11px] font-bold uppercase tracking-wider text-slate-500">
-          Akses Masuk Cepat (Langsung Masuk Dashboard)
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => onProctorLoginSuccess('K05060108-KB6K', 'GLDTKASMA')}
-            className="py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-          >
-            ⚡ Masuk Cepat Proktor
-          </button>
-          <button
-            type="button"
-            onClick={handleFillDefaultProctor}
-            className="py-2 px-3 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#0066ff] border border-blue-200 text-xs font-semibold transition-colors cursor-pointer"
-          >
-            Isi Kolom Otomatis
-          </button>
-        </div>
       </div>
     </main>
   );

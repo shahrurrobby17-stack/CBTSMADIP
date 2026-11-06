@@ -97,6 +97,8 @@ export interface ParticipantProfile {
   nik: string;
   fullName: string;
   schoolName: string;
+  kelas?: string;
+  activeSubjectTitle?: string;
   gender: 'Laki-Laki' | 'Perempuan';
   birthDay: string;
   birthMonth: string;

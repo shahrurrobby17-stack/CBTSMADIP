@@ -110,6 +110,17 @@ function writeToFileAndMemory(payload: Record<string, unknown>): void {
 
 function sanitizeParticipantsList(rawList: unknown, existingList?: unknown): unknown {
   if (!Array.isArray(rawList)) return rawList;
+  const hasExcelRows = rawList.some(
+    (item) => item && typeof item === 'object' && String((item as any).id || '').startsWith('excel_')
+  );
+  const baseList = hasExcelRows
+    ? rawList.filter((item) => {
+        if (!item || typeof item !== 'object') return true;
+        const u = String((item as any).username || '').trim().toUpperCase();
+        return u !== 'P130100240' && u !== 'K020500118';
+      })
+    : rawList;
+
   const existingMap = new Map<string, Record<string, any>>();
   if (Array.isArray(existingList)) {
     for (const item of existingList) {
@@ -119,7 +130,7 @@ function sanitizeParticipantsList(rawList: unknown, existingList?: unknown): unk
     }
   }
 
-  return rawList.map((item) => {
+  return baseList.map((item) => {
     if (!item || typeof item !== 'object') return item;
     const row = { ...(item as Record<string, any>) };
     const cleanUser = typeof row.username === 'string' ? row.username.trim().toUpperCase() : '';

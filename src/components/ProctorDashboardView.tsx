@@ -25,6 +25,7 @@ import {
   GraduationCap,
   Upload,
   FileText,
+  Eye,
 } from 'lucide-react';
 import { TutWuriLogo } from './PusmendikHeader';
 import {
@@ -40,8 +41,13 @@ import {
   getTargetClassFromMapel,
   DEFAULT_MAPEL_LIST,
   STATUS_TES_CLASS_GROUPS,
+  QuestionPreviewModal,
 } from './AdminViews';
 import { generateParticipantCardsPDF } from '../utils/pdfParticipantCard';
+import {
+  generateExamReportPDF,
+  resolveResultClass,
+} from '../utils/pdfExamReport';
 import {
   parseWordQuestions,
   downloadWordQuestionTemplate,
@@ -70,6 +76,51 @@ export interface ProctorParticipantRow {
   lastResetAt?: number;
 }
 
+export function normalizeKelasCode(raw?: string): string {
+  if (!raw) return '';
+  const s = raw
+    .replace(/^kelas\s+/i, '')
+    .replace(/\s*\(.*?\)\s*/g, ' ')
+    .replace(/[-_]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+  if (!s) return '';
+  if (/^XII\b/.test(s)) {
+    if (s.includes('IPS')) return 'XII IPS';
+    if (s.includes('IPA') || s.includes('MIPA')) return 'XII IPA';
+    return s;
+  }
+  if (/^XI\b/.test(s)) {
+    if (s.includes('IPS')) return 'XI IPS';
+    if (s.includes('IPA') || s.includes('MIPA')) return 'XI IPA';
+    return s;
+  }
+  if (/^X\b/.test(s)) {
+    return 'X';
+  }
+  return s;
+}
+
+export function doesKelasMatch(
+  studentKelas?: string,
+  scheduleKelas?: string
+): boolean {
+  const rawA = (studentKelas || '')
+    .replace(/^kelas\s+/i, '')
+    .trim()
+    .toUpperCase();
+  const rawB = (scheduleKelas || '')
+    .replace(/^kelas\s+/i, '')
+    .trim()
+    .toUpperCase();
+  if (!rawA || !rawB) return false;
+  if (rawA === rawB) return true;
+  const normA = normalizeKelasCode(studentKelas);
+  const normB = normalizeKelasCode(scheduleKelas);
+  return Boolean(normA && normB && normA === normB);
+}
+
 export function isParticipantLockedByViolation(
   p: ProctorParticipantRow
 ): boolean {
@@ -83,26 +134,100 @@ export function isParticipantLockedByViolation(
   );
 }
 
+const FALLBACK_KELAS_CYCLE = ['X', 'XI IPA', 'XI IPS', 'XII IPA', 'XII IPS'] as const;
+
+const LEGACY_USERNAME_MAP: Record<string, string> = {
+  TK0506010801547: 'SA20264821',
+  TK1547: 'SA20264821',
+  TK0506010801556: 'SA20267394',
+  TK1556: 'SA20267394',
+  TK0506010801565: 'SA20262918',
+  TK1565: 'SA20262918',
+  TK0506010801574: 'SA20268563',
+  TK1574: 'SA20268563',
+  TK0506010801583: 'SA20265147',
+  TK1583: 'SA20265147',
+  TK0506010801592: 'SA20269302',
+  TK1592: 'SA20269302',
+  P130100240: 'SA20266475',
+  TK1601: 'SA20266475',
+  K020500118: 'SA20261839',
+  TK1610: 'SA20261839',
+};
+
+export function shortenStudentUsername(raw?: string): string {
+  if (!raw) return '';
+  const clean = raw.trim().toUpperCase();
+  if (LEGACY_USERNAME_MAP[clean]) {
+    return LEGACY_USERNAME_MAP[clean];
+  }
+  const longMatch = clean.match(/^TK(?:050601080)?(\d{4,})$/);
+  if (longMatch) {
+    return `SA2026${longMatch[1].slice(-4)}`;
+  }
+  return clean;
+}
+
 export function sanitizeParticipantRows(
   rows: ProctorParticipantRow[]
 ): ProctorParticipantRow[] {
   if (!Array.isArray(rows)) return [];
+  const hasUploadedExcelRows = rows.some((r) =>
+    String(r?.id || '').startsWith('excel_')
+  );
   let changed = false;
-  const next = rows.map((row) => {
+  const filtered = hasUploadedExcelRows
+    ? rows.filter((r) => {
+        const u = String(r?.username || '').trim().toUpperCase();
+        const isLegacyPreset =
+          u === 'P130100240' ||
+          u === 'K020500118' ||
+          u === 'TK1601' ||
+          u === 'TK1610' ||
+          u === 'SA20266475' ||
+          u === 'SA20261839';
+        if (isLegacyPreset && (r.id === 'p7' || r.id === 'p8')) {
+          changed = true;
+          return false;
+        }
+        return true;
+      })
+    : rows;
+
+  const next = filtered.map((row, idx) => {
     const validLock = isParticipantLockedByViolation(row);
-    if (!validLock && (row.requestReset || row.loginState === 'Terkunci (Pelanggaran)')) {
+    const resolvedKelas =
+      row.kelas && row.kelas.trim()
+        ? row.kelas.trim()
+        : FALLBACK_KELAS_CYCLE[idx % FALLBACK_KELAS_CYCLE.length];
+    const resolvedKodeTes =
+      !row.kodeTes || row.kodeTes === 'GLDTKA25MAH2'
+        ? 'SAS26SMADIP1'
+        : row.kodeTes;
+    const resolvedUsername = shortenStudentUsername(row.username);
+    const needsKelasFill = row.kelas !== resolvedKelas;
+    const needsKodeTesFix = row.kodeTes !== resolvedKodeTes;
+    const needsUsernameFix = row.username !== resolvedUsername;
+    const needsUnlock =
+      !validLock &&
+      (row.requestReset || row.loginState === 'Terkunci (Pelanggaran)');
+
+    if (needsUnlock || needsKelasFill || needsKodeTesFix || needsUsernameFix) {
       changed = true;
       return {
         ...row,
+        username: resolvedUsername,
+        kodeTes: resolvedKodeTes,
+        kelas: resolvedKelas,
         loginState:
-          row.loginState === 'Terkunci (Pelanggaran)'
+          needsUnlock && row.loginState === 'Terkunci (Pelanggaran)'
             ? ('Belum Login' as const)
             : row.loginState,
-        requestReset: false,
-        violationReason: undefined,
-        violationAt: undefined,
-        violationSchema: undefined,
-        violationTimestamp: undefined,
+        requestReset: needsUnlock ? false : row.requestReset,
+        violationReason: needsUnlock ? undefined : row.violationReason,
+        violationAt: needsUnlock ? undefined : row.violationAt,
+        violationSchema: needsUnlock ? undefined : row.violationSchema,
+        violationTimestamp: needsUnlock ? undefined : row.violationTimestamp,
       };
     }
     return row;
@@ -115,10 +240,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p1',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801547',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20264821',
     namaPeserta: 'ANDRIAN FAJARICO PRASETYA',
     kelompok: '1',
+    kelas: 'X',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -126,10 +252,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p2',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801556',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20267394',
     namaPeserta: 'AHMAD RIZKI NOVANSYAH',
     kelompok: '1',
+    kelas: 'XI IPA',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -137,10 +264,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p3',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801565',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20262918',
     namaPeserta: 'ARYA RESTU KUSUMA',
     kelompok: '1',
+    kelas: 'XI IPS',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -148,10 +276,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p4',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801574',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20268563',
     namaPeserta: 'AUREL RIZKY ADI PRATAMA',
     kelompok: '1',
+    kelas: 'XII IPA',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -159,10 +288,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p5',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801583',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20265147',
     namaPeserta: 'AHMAD DENY FIKRUDIN',
     kelompok: '1',
+    kelas: 'XII IPS',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -170,10 +300,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p6',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801592',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20269302',
     namaPeserta: 'ALDISA FRANDIKA LIAN PRATAMA',
     kelompok: '1',
+    kelas: 'X',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -181,10 +312,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p7',
     selected: false,
     status: 'Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'P130100240',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20266475',
     namaPeserta: 'NADIA PUTRI PRATAMA',
     kelompok: '1',
+    kelas: 'XI IPA',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -192,10 +324,11 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     id: 'p8',
     selected: false,
     status: 'Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'K020500118',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20261839',
     namaPeserta: 'BAGAS ADITYA NUGRAHA',
     kelompok: '2',
+    kelas: 'XII IPA',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -266,12 +399,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   // Filter states for Kelompok Tes (matching 1, 2, 3, 4 in screenshot)
   const [filterStatus, setFilterStatus] = useState<string>('Non Aktif');
-  const [filterKodeTes, setFilterKodeTes] = useState<string>('GLDTKA25MAH2');
+  const [filterKodeTes, setFilterKodeTes] = useState<string>('SAS26SMADIP1');
   const [filterKelompok, setFilterKelompok] = useState<string>('1');
 
   // Applied filters when clicking "Apply"
   const [appliedStatus, setAppliedStatus] = useState<string>('Non Aktif');
-  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('GLDTKA25MAH2');
+  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('SAS26SMADIP1');
   const [appliedKelompok, setAppliedKelompok] = useState<string>('1');
 
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -282,6 +415,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   const [selectedPkgId, setSelectedPkgId] = useState(packages[0]?.id || '');
   const [statusTesKelas, setStatusTesKelas] = useState('Semua Kelas');
   const [statusTesTipeSoal, setStatusTesTipeSoal] = useState('Semua Tipe Soal');
+  const [showQuestionPreviewModal, setShowQuestionPreviewModal] = useState(false);
+  const [previewQuestionIdx, setPreviewQuestionIdx] = useState(0);
   const tokenMinutes = String(Math.floor(tokenSecondsLeft / 60)).padStart(2, '0');
   const tokenSeconds = String(tokenSecondsLeft % 60).padStart(2, '0');
   const tokenCountdownLabel = `${tokenMinutes}:${tokenSeconds}`;
@@ -414,10 +549,10 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const handleResetFiltersAndSelection = () => {
     setFilterStatus('Non Aktif');
-    setFilterKodeTes('GLDTKA25MAH2');
+    setFilterKodeTes('SAS26SMADIP1');
     setFilterKelompok('1');
     setAppliedStatus('Non Aktif');
-    setAppliedKodeTes('GLDTKA25MAH2');
+    setAppliedKodeTes('SAS26SMADIP1');
     setAppliedKelompok('1');
     setSearchQuery('');
     setParticipants(INITIAL_PARTICIPANT_ROWS);
@@ -486,15 +621,25 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
     currentMapelList.forEach((mapel: any) => {
       const cleanKode = (mapel.kode || '').trim().toUpperCase();
-      const cleanNama = (mapel.nama || '').trim().toLowerCase();
+      const cleanNama = (mapel.nama || '')
+        .replace(/^Simulasi TKA\s*-\s*/i, '')
+        .trim()
+        .toLowerCase();
       const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
       const existing = packages.find((p) => {
+        if (processedPkgIds.has(p.id)) return false;
         if (p.id === newPkgId) return true;
         const pCode = (p.code || '').trim().toUpperCase();
-        const pTitle = (p.title || '').trim().toLowerCase();
+        const pTitle = (p.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
         return (
-          (cleanKode.length > 0 && pCode === cleanKode) ||
+          (cleanKode.length > 0 &&
+            (pCode === cleanKode ||
+              pCode.startsWith(cleanKode + '-') ||
+              cleanKode.startsWith(pCode + '-'))) ||
           (cleanNama.length > 0 && pTitle === cleanNama)
         );
       });
@@ -503,6 +648,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
       if (existing && !processedPkgIds.has(existing.id)) {
         processedPkgIds.add(existing.id);
+        const cleanedQuestions = Array.isArray(existing.questions)
+          ? existing.questions.filter(
+              (q) => !String(q?.id || '').startsWith('q_default_')
+            )
+          : [];
         result.push({
           ...existing,
           code: mapel.kode || existing.code,
@@ -510,6 +660,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
           durationMinutes: mapel.alokasiMenit || existing.durationMinutes,
           subtest: mapel.kategori || existing.subtest,
           targetClass: targetClass,
+          questions: cleanedQuestions,
         });
       } else if (!processedPkgIds.has(newPkgId)) {
         processedPkgIds.add(newPkgId);
@@ -521,27 +672,22 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
           subtest: mapel.kategori || 'Wajib Umum',
           durationMinutes: mapel.alokasiMenit || 90,
           targetClass: targetClass,
-          questions: [
-            {
-              id: `q_default_${cleanKode}_1`,
-              number: 1,
-              type: 'pilihan_ganda',
-              category: mapel.kategori || 'Materi Utama',
-              stimulusTitle: `Soal Latihan ${mapel.nama}`,
-              stimulusText: `Berikut adalah contoh butir soal untuk mata pelajaran ${mapel.nama} (${mapel.kode}).`,
-              questionText: `Manakah pernyataan yang paling tepat terkait pokok bahasan ${mapel.nama}?`,
-              instructionText: 'Pilih satu jawaban yang benar!',
-              options: [
-                { id: 'A', text: 'Pilihan A merupakan konsep utama yang tepat.' },
-                { id: 'B', text: 'Pilihan B merupakan konsep pendukung.' },
-                { id: 'C', text: 'Pilihan C merupakan contoh penerapan.' },
-                { id: 'D', text: 'Pilihan D merupakan evaluasi teori.' },
-              ],
-              correctOptionId: 'A',
-              points: 25,
-              explanation: 'Penjelasan kunci jawaban contoh soal.',
-            },
-          ],
+          questions: [],
+        });
+      }
+    });
+
+    packages.forEach((pkg) => {
+      if (!processedPkgIds.has(pkg.id)) {
+        processedPkgIds.add(pkg.id);
+        const cleanedQuestions = Array.isArray(pkg.questions)
+          ? pkg.questions.filter(
+              (q) => !String(q?.id || '').startsWith('q_default_')
+            )
+          : [];
+        result.push({
+          ...pkg,
+          questions: cleanedQuestions,
         });
       }
     });
@@ -549,8 +695,19 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     return result;
   }, [packages]);
 
+  const visiblePackagesForKelas = useMemo(() => {
+    if (statusTesKelas === 'Semua Kelas') return displayPackages;
+    const filtered = displayPackages.filter(
+      (p) => getPkgClass(p) === statusTesKelas
+    );
+    return filtered.length > 0 ? filtered : displayPackages;
+  }, [displayPackages, statusTesKelas]);
+
   const selectedPackage =
-    displayPackages.find((p) => p.id === selectedPkgId) || displayPackages[0];
+    visiblePackagesForKelas.find((p) => p.id === selectedPkgId) ||
+    displayPackages.find((p) => p.id === selectedPkgId) ||
+    visiblePackagesForKelas[0] ||
+    displayPackages[0];
 
   const [lastUploadedWordFile, setLastUploadedWordFile] = useState<string>('');
 
@@ -565,7 +722,10 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
       questions: renumbered,
     };
     const cleanSelectedKode = (selectedPackage.code || '').trim().toUpperCase();
-    const cleanSelectedNama = (selectedPackage.title || '').trim().toLowerCase();
+    const cleanSelectedNama = (selectedPackage.title || '')
+      .replace(/^Simulasi TKA\s*-\s*/i, '')
+      .trim()
+      .toLowerCase();
 
     onUpdatePackages((prevPackages) => {
       const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
@@ -574,10 +734,16 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
       baseList.forEach((pkg) => {
         const pCode = (pkg.code || '').trim().toUpperCase();
-        const pTitle = (pkg.title || '').trim().toLowerCase();
+        const pTitle = (pkg.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
         const isMatch =
           pkg.id === selectedPackage.id ||
-          (cleanSelectedKode.length > 0 && pCode === cleanSelectedKode) ||
+          (cleanSelectedKode.length > 0 &&
+            (pCode === cleanSelectedKode ||
+              pCode.startsWith(cleanSelectedKode + '-') ||
+              cleanSelectedKode.startsWith(pCode + '-'))) ||
           (cleanSelectedNama.length > 0 && pTitle === cleanSelectedNama);
 
         if (isMatch) {
@@ -705,9 +871,63 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const wordQuestionInputRef = React.useRef<HTMLInputElement | null>(null);
 
+  const triggerUploadWordFile = () => {
+    // Pastikan browser tetap / kembali ke mode fullscreen saat jendela file eksplorer dibuka
+    try {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+        msFullscreenElement?: Element | null;
+      };
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+      };
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+        } else if (docEl.webkitRequestFullscreen) {
+          docEl.webkitRequestFullscreen();
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    if (wordQuestionInputRef.current) {
+      wordQuestionInputRef.current.value = '';
+      if (typeof wordQuestionInputRef.current.showPicker === 'function') {
+        try {
+          wordQuestionInputRef.current.showPicker();
+          return;
+        } catch {
+          // Fallback to click()
+        }
+      }
+      wordQuestionInputRef.current.click();
+    }
+  };
+
   const handleUploadWordQuestions = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
+    // Pastikan fullscreen tetap aktif setelah memilih file dari eksplorer
+    try {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+      };
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+        } else if (docEl.webkitRequestFullscreen) {
+          docEl.webkitRequestFullscreen();
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
     const file = e.target.files?.[0];
     if (!file || !selectedPackage) return;
 
@@ -722,11 +942,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         questions: importedQuestions,
         redDetectedCount,
         tableCount,
+        typeBreakdown,
       } = await parseWordQuestions(file, newQuestionType, startNum, defaultCat);
 
       if (importedQuestions.length === 0) {
         showNotice(
-          'Tidak ditemukan format soal dan pilihan jawaban (A, B, C, D, E) atau tabel soal yang valid pada file Word tersebut.'
+          'Tidak ditemukan butir soal yang valid pada file yang diunggah. Pastikan file berisi daftar pertanyaan atau tabel soal.'
         );
         return;
       }
@@ -738,6 +959,13 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
       syncSelectedPackageQuestions(combinedQuestions);
       setLastUploadedWordFile(file.name);
+      setStatusTesTipeSoal('Semua Tipe Soal');
+
+      const detectedTypes = Object.keys(typeBreakdown) as QuestionType[];
+      if (detectedTypes.length === 1) {
+        setNewQuestionType(detectedTypes[0]);
+      }
+
       setNewQuestionText('');
       setOptA('');
       setOptB('');
@@ -745,14 +973,17 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
       setOptD('');
       setOptE('');
 
+      const breakdownSummary = detectedTypes
+        .map((t) => `${typeBreakdown[t]} ${getQuestionTypeLabel(t)}`)
+        .join(', ');
       const tableInfo =
         tableCount > 0 ? `, termasuk ${tableCount} tabel soal` : '';
       showNotice(
-        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} butir soal ditambahkan (${redDetectedCount} kunci jawaban teks merah${tableInfo}). Kolom pertanyaan & jawaban manual tidak perlu diisi.`
+        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} soal dikenali otomatis (${breakdownSummary}; ${redDetectedCount} kunci jawaban${tableInfo}).`
       );
     } catch {
       showNotice(
-        'Gagal membaca file Word. Pastikan file berformat .docx atau .doc dan beri warna merah pada teks jawaban yang benar.'
+        'Gagal membaca file soal. Pastikan file berformat .docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, atau .json yang valid.'
       );
     } finally {
       if (wordQuestionInputRef.current) {
@@ -761,9 +992,30 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     }
   };
 
-  const handleDeleteQuestion = (_pkgId: string, qId: string) => {
+  const handleDeleteQuestion = (
+    _pkgId: string,
+    qId: string,
+    qNumber?: number,
+    targetQuestion?: Question
+  ) => {
     if (!selectedPackage) return;
-    const filtered = selectedPackage.questions.filter((q) => q.id !== qId);
+    let deletedOne = false;
+    const filtered = selectedPackage.questions.filter((item) => {
+      if (deletedOne) return true;
+      if (targetQuestion && item === targetQuestion) {
+        deletedOne = true;
+        return false;
+      }
+      if (qId && item.id === qId) {
+        deletedOne = true;
+        return false;
+      }
+      if (qNumber !== undefined && item.number === qNumber) {
+        deletedOne = true;
+        return false;
+      }
+      return true;
+    });
     syncSelectedPackageQuestions(filtered);
     if (filtered.length === 0) {
       setLastUploadedWordFile('');
@@ -922,19 +1174,63 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
           </div>
 
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-3 text-right">
-              <div className="leading-tight">
-                <div className="text-xs font-medium text-slate-500">
-                  Hi, {proctorName || 'K05060108-KB6K'}
+            {(() => {
+              const proctorDirectory = [
+                {
+                  proctorId: 'K05060108-KB6K',
+                  fullName: 'DRS. H. AHMAD FAUZI, M.PD.',
+                  encryptionCode: 'GLDTKASMA',
+                },
+                {
+                  proctorId: 'K05060108-KB7L',
+                  fullName: 'SITI NURHALIZA, S.KOM.',
+                  encryptionCode: 'ENC-8842-WGR',
+                },
+                {
+                  proctorId: 'K05060108-KB8M',
+                  fullName: 'MOCHAMAD RIZALDI, S.PD.',
+                  encryptionCode: 'ENC-9910-WGR',
+                },
+              ];
+              const cleanInput = (proctorName || '').trim().toUpperCase();
+              const cleanEnc = (encryptionCode || '').trim().toUpperCase();
+              const matched =
+                proctorDirectory.find(
+                  (p) =>
+                    p.proctorId.toUpperCase() === cleanInput ||
+                    p.fullName.toUpperCase() === cleanInput
+                ) ||
+                proctorDirectory.find(
+                  (p) => p.encryptionCode.toUpperCase() === cleanEnc
+                );
+
+              const displayFullName = matched
+                ? matched.fullName
+                : cleanInput && !cleanInput.startsWith('K05060108')
+                  ? proctorName
+                  : 'DRS. H. AHMAD FAUZI, M.PD.';
+              const displayProctorId = matched
+                ? matched.proctorId
+                : cleanInput.startsWith('K05060108')
+                  ? cleanInput
+                  : 'K05060108-KB6K';
+
+              return (
+                <div className="flex items-center gap-3 text-right">
+                  <div className="leading-tight">
+                    <div className="text-xs font-bold text-slate-800">
+                      {displayFullName}
+                    </div>
+                    <div className="text-[11px] font-mono font-semibold text-slate-500">
+                      {displayProctorId}
+                    </div>
+                  </div>
+                  <div className="w-9 h-9 rounded-lg bg-[#0095ff] text-white font-bold text-sm flex items-center justify-center shadow-xs">
+                    {displayFullName.charAt(0).toUpperCase()}
+                  </div>
                 </div>
-                <div className="text-xs font-bold text-slate-700">
-                  {encryptionCode || 'GLDTKASMA'}
-                </div>
-              </div>
-              <div className="w-9 h-9 rounded-lg bg-[#0095ff] text-white font-bold text-sm flex items-center justify-center shadow-xs">
-                {(proctorName || 'K').charAt(0).toUpperCase()}
-              </div>
-            </div>
+              );
+            })()}
 
             <button
               type="button"
@@ -1019,7 +1315,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       onChange={(e) => setFilterKodeTes(e.target.value)}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
-                      <option value="GLDTKA25MAH2">GLDTKA25MAH2</option>
+                      <option value="SAS26SMADIP1">SAS26SMADIP1</option>
                       <option value="SEMUA">Semua Kode Tes</option>
                     </select>
                   </div>
@@ -1134,19 +1430,13 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                             <ArrowUpDown className="w-3 h-3 text-slate-400" />
                           </div>
                         </th>
-                        <th className="py-3.5 px-4 text-center">
-                          <div className="inline-flex items-center justify-center gap-1.5">
-                            <span>Kelompok</span>
-                            <ArrowUpDown className="w-3 h-3 text-slate-400" />
-                          </div>
-                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-xs">
                       {filteredRows.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={6}
+                            colSpan={5}
                             className="py-10 text-center text-slate-400"
                           >
                             Tidak ada data peserta yang sesuai dengan filter. Klik tombol Reset atau ubah Status menjadi Semua Status.
@@ -1190,9 +1480,6 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                             </td>
                             <td className="py-4 px-4 font-medium text-slate-700">
                               {row.namaPeserta}
-                            </td>
-                            <td className="py-4 px-4 text-center font-mono text-slate-600">
-                              {row.kelompok}
                             </td>
                           </tr>
                         ))
@@ -1489,22 +1776,22 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2.5 text-xs">
-                    {/* Input File Word Tersembunyi */}
+                    {/* Input File Soal Tersembunyi (Mendukung Semua Format & Semua Tipe Soal) */}
                     <input
                       ref={wordQuestionInputRef}
                       type="file"
-                      accept=".docx,.doc"
+                      accept=".docx,.doc,.xlsx,.xls,.csv,.txt,.rtf,.json,.html,.htm"
                       onChange={handleUploadWordQuestions}
                       className="hidden"
                     />
                     <button
                       type="button"
-                      onClick={() => wordQuestionInputRef.current?.click()}
+                      onClick={triggerUploadWordFile}
                       className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
-                      title="Upload file Word (.docx / .doc) dengan teks berwarna merah sebagai kunci jawaban yang benar"
+                      title="Upload file soal (.docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, .json) — otomatis mengenali semua jenis/tipe soal"
                     >
                       <Upload className="w-3.5 h-3.5" />
-                      Upload Word (Teks Merah = Jawaban Benar)
+                      Upload Word / File Soal (Otomatis Kenali Tipe Soal)
                     </button>
                     <button
                       type="button"
@@ -1518,20 +1805,36 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       Template Word
                     </button>
 
-                    {/* Dropdown Tipe Soal */}
-                    <div className="flex items-center gap-1.5">
-                      <label className="font-semibold text-slate-700 whitespace-nowrap">
-                        Tipe Soal:
-                      </label>
-                      <select
-                        value={newQuestionType}
-                        onChange={(e) => setNewQuestionType(e.target.value as QuestionType)}
-                        className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                    {/* Dropdown Tipe Soal + Tombol Pratinjau Soal di bawahnya */}
+                    <div className="flex flex-col items-start gap-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <label className="font-semibold text-slate-700 whitespace-nowrap">
+                          Tipe Soal:
+                        </label>
+                        <select
+                          value={newQuestionType}
+                          onChange={(e) => setNewQuestionType(e.target.value as QuestionType)}
+                          className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                        >
+                          <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
+                          <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
+                          <option value="benar_salah">Benar / Salah</option>
+                          <option value="menjodohkan">Menjodohkan</option>
+                          <option value="isian_singkat">Isian Singkat / Uraian</option>
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewQuestionIdx(0);
+                          setShowQuestionPreviewModal(true);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-[#001a6e] hover:bg-[#00124d] text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
+                        title="Lihat tampilan pratinjau soal seperti pada layar ujian siswa"
                       >
-                        <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
-                        <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
-                        <option value="benar_salah">Benar / Salah</option>
-                      </select>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Pratinjau Soal ({selectedPackage.questions.length})</span>
+                      </button>
                     </div>
 
                     <div className="flex items-center gap-1.5">
@@ -1857,21 +2160,46 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       </select>
                     </div>
 
-                    {/* Dropdown Tipe Soal (PG, PG Kompleks, Benar/Salah) */}
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <label className="font-semibold text-slate-700 whitespace-nowrap">
-                        Tipe Soal:
-                      </label>
-                      <select
-                        value={statusTesTipeSoal}
-                        onChange={(e) => setStatusTesTipeSoal(e.target.value)}
-                        className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                    {/* Dropdown Tipe Soal (Semua Tipe Soal) + Tombol Pratinjau Soal di bawahnya */}
+                    <div className="flex flex-col items-start gap-1.5 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <label className="font-semibold text-slate-700 whitespace-nowrap">
+                          Tipe Soal:
+                        </label>
+                        <select
+                          value={statusTesTipeSoal}
+                          onChange={(e) => setStatusTesTipeSoal(e.target.value)}
+                          className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                        >
+                          <option value="Semua Tipe Soal">Semua Tipe Soal</option>
+                          <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
+                          <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
+                          <option value="benar_salah">Benar / Salah</option>
+                          <option value="menjodohkan">Menjodohkan</option>
+                          <option value="isian_singkat">Isian Singkat / Uraian</option>
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewQuestionIdx(0);
+                          setShowQuestionPreviewModal(true);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-[#001a6e] text-[#001a6e] hover:text-white border border-blue-200 hover:border-[#001a6e] text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors shadow-2xs"
+                        title="Pratinjau butir soal pada mata pelajaran ini"
                       >
-                        <option value="Semua Tipe Soal">Semua Tipe Soal</option>
-                        <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
-                        <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
-                        <option value="benar_salah">Benar / Salah</option>
-                      </select>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>
+                          Pratinjau Soal (
+                          {
+                            selectedPackage.questions.filter((q) => {
+                              if (statusTesTipeSoal === 'Semua Tipe Soal') return true;
+                              return q.type === statusTesTipeSoal;
+                            }).length
+                          }
+                          )
+                        </span>
+                      </button>
                     </div>
 
                     {selectedPackage.questions.length > 0 && (
@@ -1895,7 +2223,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                     return q.type === statusTesTipeSoal;
                   }).length === 0 ? (
                     <div className="p-6 text-center text-xs text-slate-400 italic">
-                      Belum ada butir soal pada mata pelajaran ini. Silakan klik tombol <strong>Upload Word</strong> atau tambahkan soal baru di atas.
+                      Belum ada butir soal pada mata pelajaran ini. Silakan klik tombol <strong>Upload Word / File Soal</strong> atau tambahkan soal baru di atas.
                     </div>
                   ) : (
                     selectedPackage.questions
@@ -1925,6 +2253,21 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                             {q.correctOptionIds && q.correctOptionIds.length > 0 && (
                               <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
                                 Kunci: {q.correctOptionIds.join(', ')}
+                              </span>
+                            )}
+                            {q.statements && q.statements.length > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
+                                Kunci B/S: {q.statements.map((s) => s.correctValue).join(', ')}
+                              </span>
+                            )}
+                            {q.premises && q.premises.length > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
+                                {q.premises.length} Pasangan Menjodohkan
+                              </span>
+                            )}
+                            {q.correctShortAnswers && q.correctShortAnswers.length > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
+                                Kunci: {q.correctShortAnswers.join(' / ')}
                               </span>
                             )}
                           </div>
@@ -1959,7 +2302,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                         <button
                           type="button"
                           onClick={() =>
-                            handleDeleteQuestion(selectedPackage.id, q.id)
+                            handleDeleteQuestion(
+                              selectedPackage.id,
+                              q.id,
+                              q.number,
+                              q
+                            )
                           }
                           title="Hapus soal ini"
                           className="p-1.5 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer shrink-0"
@@ -2163,71 +2511,201 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
           {/* VIEW 5: LAPORAN PENGOLAHAN (Rekap Nilai Hasil Ujian) */}
           {activeMenu === 'laporan_pengolahan' && (
-            <div className="bg-white rounded-xl p-6 shadow-xs border border-slate-100 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-800">
-                    Laporan Pengolahan Nilai Sumatif Akhir Semester
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    Rekapitulasi nilai peserta yang telah menyelesaikan ujian pada sesi ini.
-                  </p>
+            <div className="space-y-6">
+              {/* Header Kop & Tombol Unduh Semua Kelas */}
+              <div className="bg-white rounded-xl p-6 shadow-xs border border-slate-200 space-y-4">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-4 border-b border-slate-100">
+                  <div>
+                    <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-md bg-blue-50 text-[#001a6e] border border-blue-200 mb-1.5">
+                      Dokumen Resmi PDF Setiap Kelas
+                    </span>
+                    <h3 className="text-base font-extrabold text-slate-900">
+                      LAPORAN NILAI HASIL UJIAN — SMA ISLAM DIPONEGORO WAGIR
+                    </h3>
+                    <p className="text-xs font-semibold text-slate-600 mt-0.5">
+                      TAHUN AJARAN 2026/2027 • SEMESTER 1
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        generateExamReportPDF(
+                          'ALL',
+                          resultsHistory,
+                          participants
+                        )
+                      }
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#001a6e] hover:bg-[#00124d] text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Unduh Laporan Semua Kelas (PDF)</span>
+                    </button>
+                    {resultsHistory.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={onClearHistory}
+                        className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-700 transition-colors cursor-pointer"
+                      >
+                        Bersihkan Riwayat
+                      </button>
+                    )}
+                  </div>
                 </div>
-                {resultsHistory.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={onClearHistory}
-                    className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
-                  >
-                    Bersihkan Riwayat
-                  </button>
-                )}
+
+                {/* Daftar Kartu Unduh Cepat Setiap Kelas */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  {STATUS_TES_CLASS_GROUPS.map((cls) => {
+                    const classResults = resultsHistory.filter((r) =>
+                      doesKelasMatch(
+                        resolveResultClass(r, participants),
+                        cls
+                      )
+                    );
+                    const classStudents = participants.filter((p) =>
+                      doesKelasMatch(p.kelas, cls)
+                    );
+                    return (
+                      <div
+                        key={cls}
+                        className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-3"
+                      >
+                        <div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-extrabold text-slate-900">
+                              Kelas {cls}
+                            </span>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">
+                              {classResults.length} Nilai
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-1">
+                            Terdaftar: {classStudents.length} Peserta
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            generateExamReportPDF(
+                              cls,
+                              resultsHistory,
+                              participants
+                            )
+                          }
+                          className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-[#0066ff] hover:bg-[#0052cc] text-white text-[11px] font-bold shadow-2xs transition-colors cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5 shrink-0" />
+                          <span>Unduh Laporan Hasil Ujian</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
-              {resultsHistory.length === 0 ? (
-                <div className="py-12 text-center rounded-xl bg-slate-50 border border-slate-100 text-xs text-slate-500">
-                  Belum ada data hasil ujian peserta yang masuk. Silakan kerjakan simulasi melalui halaman Login Peserta untuk melihat hasil pengolahan nilai.
-                </div>
-              ) : (
-                <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold">
-                        <th className="py-3 px-4">Username</th>
-                        <th className="py-3 px-4">Nama Peserta</th>
-                        <th className="py-3 px-4">Mata Ujian</th>
-                        <th className="py-3 px-4">Jawaban Benar</th>
-                        <th className="py-3 px-4">Nilai Akhir</th>
-                        <th className="py-3 px-4">Waktu Selesai</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {resultsHistory.map((r) => (
-                        <tr key={r.id}>
-                          <td className="py-3 px-4 font-mono">
-                            {r.participant.username}
-                          </td>
-                          <td className="py-3 px-4 font-semibold text-slate-800">
-                            {r.participant.fullName}
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">
-                            {r.packageTitle}
-                          </td>
-                          <td className="py-3 px-4 font-mono">
-                            {r.correctCount} / {r.totalQuestions}
-                          </td>
-                          <td className="py-3 px-4 font-mono font-bold text-[#0095ff]">
-                            {r.finalScore}
-                          </td>
-                          <td className="py-3 px-4 text-slate-500">
-                            {r.completedAt}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {/* Tabel Laporan Nilai Hasil Ujian Per Kelas */}
+              {STATUS_TES_CLASS_GROUPS.map((cls) => {
+                const classResults = resultsHistory.filter((r) =>
+                  doesKelasMatch(resolveResultClass(r, participants), cls)
+                );
+                const classStudents = participants.filter((p) =>
+                  doesKelasMatch(p.kelas, cls)
+                );
+
+                return (
+                  <div
+                    key={cls}
+                    className="bg-white rounded-xl p-6 shadow-xs border border-slate-200 space-y-4"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-100">
+                      <div>
+                        <h4 className="text-sm font-extrabold text-slate-900">
+                          Laporan Pengolahan Nilai — Kelas {cls}
+                        </h4>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {classResults.length} hasil ujian selesai dari{' '}
+                          {classStudents.length} peserta terdaftar di Kelas{' '}
+                          {cls}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          generateExamReportPDF(
+                            cls,
+                            resultsHistory,
+                            participants
+                          )
+                        }
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#0066ff] hover:bg-[#0052cc] text-white text-xs font-bold shadow-xs transition-colors cursor-pointer shrink-0"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>
+                          Unduh Laporan Hasil Ujian Kelas {cls} (PDF)
+                        </span>
+                      </button>
+                    </div>
+
+                    {classResults.length === 0 ? (
+                      <div className="py-8 text-center rounded-xl bg-slate-50 border border-slate-100 text-xs text-slate-500">
+                        Belum ada peserta Kelas {cls} yang menyelesaikan ujian.
+                        Klik tombol{' '}
+                        <strong className="text-slate-700">
+                          Unduh Laporan Hasil Ujian Kelas {cls} (PDF)
+                        </strong>{' '}
+                        di atas untuk mengunduh rekap daftar peserta Kelas {cls}.
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold">
+                              <th className="py-3 px-4 w-12">No</th>
+                              <th className="py-3 px-4">Username</th>
+                              <th className="py-3 px-4">Nama Peserta</th>
+                              <th className="py-3 px-4">Kelas</th>
+                              <th className="py-3 px-4">Mata Ujian</th>
+                              <th className="py-3 px-4">Jawaban Benar</th>
+                              <th className="py-3 px-4">Nilai Akhir</th>
+                              <th className="py-3 px-4">Waktu Selesai</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {classResults.map((r, idx) => (
+                              <tr key={r.id} className="hover:bg-slate-50/80">
+                                <td className="py-3 px-4 font-mono text-slate-500">
+                                  {idx + 1}
+                                </td>
+                                <td className="py-3 px-4 font-mono font-semibold text-slate-800">
+                                  {r.participant.username}
+                                </td>
+                                <td className="py-3 px-4 font-semibold text-slate-800">
+                                  {r.participant.fullName}
+                                </td>
+                                <td className="py-3 px-4 font-semibold text-slate-700">
+                                  Kelas {cls}
+                                </td>
+                                <td className="py-3 px-4 text-slate-600">
+                                  {r.packageTitle}
+                                </td>
+                                <td className="py-3 px-4 font-mono">
+                                  {r.correctCount} / {r.totalQuestions}
+                                </td>
+                                <td className="py-3 px-4 font-mono font-bold text-[#0066ff]">
+                                  {r.finalScore}
+                                </td>
+                                <td className="py-3 px-4 text-slate-500">
+                                  {r.completedAt}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </main>
@@ -2303,6 +2781,19 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal Pratinjau Soal CBT */}
+      {showQuestionPreviewModal && selectedPackage && (
+        <QuestionPreviewModal
+          pkg={selectedPackage}
+          filterType={statusTesTipeSoal}
+          initialIndex={previewQuestionIdx}
+          onClose={() => setShowQuestionPreviewModal(false)}
+          onDeleteQuestion={(q) =>
+            handleDeleteQuestion(selectedPackage.id, q.id, q.number, q)
+          }
+        />
       )}
     </div>
   );

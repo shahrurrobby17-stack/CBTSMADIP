@@ -1,8 +1,11 @@
+import * as XLSX from 'xlsx';
 import {
   Question,
   QuestionType,
   OptionItem,
   StatementItem,
+  MatchingPremise,
+  MatchingResponse,
   QuestionTableData,
 } from '../types/cbt';
 
@@ -1225,24 +1228,157 @@ interface ParagraphRecord {
 
 interface DraftQuestion {
   explicitNumber?: number;
+  detectedType?: QuestionType;
   questionLines: string[];
   unprefixedParagraphs: ParsedParagraph[];
   allParagraphs?: ParagraphRecord[];
   options: { id: string; text: string; isRed: boolean }[];
   explicitKeys: string[];
+  explicitTextAnswers?: string[];
+  explicitStatements?: StatementItem[];
+  explicitMatchingPairs?: { premise: string; response: string }[];
   stimulusTable?: QuestionTableData;
+}
+
+/**
+ * Detects a QuestionType from a section header, label, or instruction text.
+ */
+export function detectQuestionTypeFromText(
+  rawText: string
+): QuestionType | null {
+  const t = rawText.trim().toLowerCase();
+  if (!t) return null;
+
+  if (
+    /\b(pilihan\s+ganda\s+kompleks|pg\s+kompleks|pgk|mcma|multiple\s+response|pilih(?:lah)?\s+lebih\s+dari\s+satu|jawaban\s+benar\s+lebih\s+dari\s+satu|pilih(?:lah)?\s+(?:2|3|dua|tiga)\s+jawaban)\b/i.test(
+      t
+    )
+  ) {
+    return 'pilihan_ganda_kompleks';
+  }
+
+  if (
+    /\b(benar\s*[\/\-]\s*salah|benar\s+atau\s+salah|benar\s+salah|tentukan\s+benar\s+atau\s+salah|sesuai\s*[\/\-]\s*tidak\s+sesuai|sesuai\s+atau\s+tidak\s+sesuai|kategori\s+benar\s+salah|b\s*\/\s*s)\b/i.test(
+      t
+    )
+  ) {
+    return 'benar_salah';
+  }
+
+  if (
+    /\b(menjodohkan|soal\s+jodohkan|pasangkan(?:lah)?|jodohkan(?:lah)?|matching)\b/i.test(
+      t
+    )
+  ) {
+    return 'menjodohkan';
+  }
+
+  if (
+    /\b(isian\s+singkat|soal\s+isian|jawaban\s+singkat|uraian\s+singkat|soal\s+uraian|soal\s+essay|soal\s+esai|uraian|essay|esai|short\s+answer)\b/i.test(
+      t
+    )
+  ) {
+    return 'isian_singkat';
+  }
+
+  if (
+    /\b(pilihan\s+ganda|soal\s+pg|multiple\s+choice)\b/i.test(t) ||
+    /^(?:pg|pilihan\s+ganda)$/i.test(t)
+  ) {
+    return 'pilihan_ganda';
+  }
+
+  return null;
+}
+
+/**
+ * Checks if a paragraph is a standalone section header for a question type
+ * (e.g., "I. PILIHAN GANDA", "BAGIAN B: BENAR / SALAH", "II. PILIHAN GANDA KOMPLEKS", "III. ISIAN SINGKAT")
+ */
+function matchSectionTypeHeader(text: string): QuestionType | null {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 110) return null;
+  // Must not look like a full question sentence ending with '?' or '...'
+  if (/\?|\.\.\./.test(trimmed)) return null;
+
+  const cleaned = trimmed
+    .replace(
+      /^(?:bagian|section|romawi|tipe|jenis|kelompok)?\s*(?:[ivx]+|[a-e]|\d+)?\s*[\.\)\-:]?\s*/i,
+      ''
+    )
+    .trim();
+
+  if (
+    /^(?:soal\s+)?(?:pilihan\s+ganda\s+kompleks|pg\s+kompleks|pgk|mcma)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+      cleaned
+    )
+  ) {
+    return 'pilihan_ganda_kompleks';
+  }
+  if (
+    /^(?:soal\s+)?(?:benar\s*[\/\-]?\s*salah|benar\s+atau\s+salah|sesuai\s*[\/\-]\s*tidak\s+sesuai|b\s*\/\s*s)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+      cleaned
+    )
+  ) {
+    return 'benar_salah';
+  }
+  if (
+    /^(?:soal\s+)?(?:menjodohkan|pasangkan|jodohkan)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+      cleaned
+    )
+  ) {
+    return 'menjodohkan';
+  }
+  if (
+    /^(?:soal\s+)?(?:isian\s+singkat|isian|uraian\s+singkat|uraian|essay|esai)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+      cleaned
+    )
+  ) {
+    return 'isian_singkat';
+  }
+  if (
+    /^(?:soal\s+)?(?:pilihan\s+ganda|pg)(?:\s*\(pg\))?\s*[:\-]?$/i.test(cleaned)
+  ) {
+    return 'pilihan_ganda';
+  }
+
+  return null;
 }
 
 /**
  * Regex helpers for options and numbered questions
  */
 const OPTION_LINE_REGEX =
-  /^(?:[•\-\*▪▫◦☐☑✓✔]\s*)?(?:\(\s*([A-Ea-e])\s*\)|\[\s*([A-Ea-e])\s*\]|([A-Ea-e])\s*[\.\)\-:])\s*(.*)$/;
-const OPTION_TAB_REGEX = /^([A-Ea-e])(?:\t+|\s{2,})(.+)$/;
+  /^(?:([\*✓✔☑]|\[[xvXV✓✔]\])\s*)?(?:[•\-\*▪▫◦☐]\s*)?(?:\(\s*([A-Ea-e])\s*\)|\[\s*([A-Ea-e])\s*\]|([A-Ea-e])\s*([\*✓✔☑])?\s*[\.\)\-:])\s*(.*)$/;
+const OPTION_TAB_REGEX = /^([\*✓✔☑])?\s*([A-Ea-e])(?:\t+|\s{2,})(.+)$/;
 const NUMBERED_QUESTION_REGEX =
   /^(?:soal\s*(?:no\.?|nomor)?\s*|no\.?\s*)?(\d+)\s*[\.\)\-:]\s*(.+)$/i;
-const EXPLICIT_KEY_REGEX =
-  /^(?:kunci(?:\s*jawaban)?|jawaban(?:\s*benar)?|kunci)\s*[:=]\s*([A-Ea-e](?:\s*[,\/]\s*[A-Ea-e])*)/i;
+const EXPLICIT_KEY_LINE_REGEX =
+  /^(?:kunci(?:\s*jawaban)?|jawaban(?:\s*benar)?|answer(?:\s*key)?|kunci)\s*[:=]\s*(.+)$/i;
+
+function extractTrailingCorrectMarker(rawText: string): {
+  cleanedText: string;
+  isMarkedCorrect: boolean;
+} {
+  let cleaned = rawText.trim();
+  let isMarked = false;
+
+  if (
+    /(?:\s*[\(\[](?:benar|kunci|jawaban\s*benar|correct|✓|✔|v|x)[\)\]]|\s+[✓✔☑])$/i.test(
+      cleaned
+    )
+  ) {
+    isMarked = true;
+    cleaned = cleaned
+      .replace(
+        /(?:\s*[\(\[](?:benar|kunci|jawaban\s*benar|correct|✓|✔|v|x)[\)\]]|\s+[✓✔☑])+$/i,
+        ''
+      )
+      .trim();
+  }
+
+  return { cleanedText: cleaned, isMarkedCorrect: isMarked };
+}
 
 function matchOptionLine(
   para: ParsedParagraph
@@ -1250,29 +1386,40 @@ function matchOptionLine(
   const trimmed = para.fullText.trim();
   const m = trimmed.match(OPTION_LINE_REGEX);
   if (m) {
-    const letter = (m[1] || m[2] || m[3] || 'A').toUpperCase();
-    const optText = (m[4] || '').trim() || `Pilihan ${letter}`;
+    const leadingMark = Boolean(m[1]);
+    const letter = (m[2] || m[3] || m[4] || 'A').toUpperCase();
+    const afterLetterMark = Boolean(m[5]);
+    const rawBody = (m[6] || '').trim();
+    const { cleanedText, isMarkedCorrect } =
+      extractTrailingCorrectMarker(rawBody);
+    const optText = cleanedText || `Pilihan ${letter}`;
     return {
       letter,
       text: optText,
-      isRed: para.hasRed,
+      isRed: para.hasRed || leadingMark || afterLetterMark || isMarkedCorrect,
     };
   }
   const tabM = trimmed.match(OPTION_TAB_REGEX);
   if (tabM) {
-    const letter = tabM[1].toUpperCase();
-    const optText = tabM[2].trim() || `Pilihan ${letter}`;
+    const leadingMark = Boolean(tabM[1]);
+    const letter = tabM[2].toUpperCase();
+    const { cleanedText, isMarkedCorrect } = extractTrailingCorrectMarker(
+      tabM[3]
+    );
+    const optText = cleanedText || `Pilihan ${letter}`;
     return {
       letter,
       text: optText,
-      isRed: para.hasRed,
+      isRed: para.hasRed || leadingMark || isMarkedCorrect,
     };
   }
   if (para.autoOptionLetter) {
+    const { cleanedText, isMarkedCorrect } =
+      extractTrailingCorrectMarker(trimmed);
     return {
       letter: para.autoOptionLetter,
-      text: trimmed,
-      isRed: para.hasRed,
+      text: cleanedText || trimmed,
+      isRed: para.hasRed || isMarkedCorrect,
     };
   }
   return null;
@@ -1440,24 +1587,178 @@ function finalizeDraftQuestion(draft: DraftQuestion | null): DraftQuestion | nul
     return draft;
   }
 
-  // Case B: Explicitly numbered question (e.g. 1..35) that was an essay/uraian with only 1 paragraph
-  if (draft.explicitNumber !== undefined && draft.questionLines.length > 0) {
-    const redPara = draft.unprefixedParagraphs.find((p) => p.hasRed);
-    draft.options = [
-      {
-        id: 'A',
-        text: redPara ? redPara.fullText : 'Benar / Sesuai Kunci',
-        isRed: true,
-      },
-      { id: 'B', text: 'Pilihan B', isRed: false },
-      { id: 'C', text: 'Pilihan C', isRed: false },
-      { id: 'D', text: 'Pilihan D', isRed: false },
-      { id: 'E', text: 'Pilihan E', isRed: false },
-    ];
+  // Case B: Explicitly numbered question (e.g. 1..35) or question with explicit statements/pairs/short-answers
+  if (
+    (draft.explicitStatements && draft.explicitStatements.length > 0) ||
+    (draft.explicitMatchingPairs && draft.explicitMatchingPairs.length > 0) ||
+    (draft.explicitTextAnswers && draft.explicitTextAnswers.length > 0) ||
+    (draft.explicitNumber !== undefined && draft.questionLines.length > 0) ||
+    (draft.detectedType === 'isian_singkat' && draft.questionLines.length > 0)
+  ) {
+    const redParas = draft.unprefixedParagraphs.filter((p) => p.hasRed);
+    if (
+      redParas.length > 0 &&
+      (!draft.explicitTextAnswers || draft.explicitTextAnswers.length === 0)
+    ) {
+      // If a subsequent line in the unprefixed paragraphs was colored red, treat it as the short answer key
+      const nonStemRed = redParas.filter(
+        (rp) => rp.fullText.trim() !== draft.questionLines[0]?.trim()
+      );
+      if (nonStemRed.length > 0) {
+        draft.explicitTextAnswers = nonStemRed.map((rp) => rp.fullText.trim());
+        const redSet = new Set(draft.explicitTextAnswers);
+        draft.questionLines = draft.questionLines.filter(
+          (l) => !redSet.has(l.trim())
+        );
+      }
+    }
+    if (!draft.detectedType && draft.options.length === 0) {
+      draft.detectedType = 'isian_singkat';
+    }
     return draft;
   }
 
   return null;
+}
+
+/**
+ * Checks if a table is a Benar/Salah (or Sesuai/Tidak Sesuai) statement table for a question.
+ */
+function tryExtractBenarSalahFromTable(
+  table: ParsedTable
+): StatementItem[] | null {
+  const rows = table.rows.filter((r) =>
+    r.some((c) => c.fullText.trim().length > 0)
+  );
+  if (rows.length < 2) return null;
+
+  const headers = rows[0].map((c) => c.fullText.trim().toLowerCase());
+  const stmtCol = headers.findIndex(
+    (h) =>
+      h.includes('pernyataan') ||
+      h.includes('statement') ||
+      h.includes('kalimat') ||
+      h.includes('uraian')
+  );
+  const benarCol = headers.findIndex(
+    (h) => h === 'benar' || h === 'b' || h === 'sesuai' || h === 'true'
+  );
+  const salahCol = headers.findIndex(
+    (h) =>
+      h === 'salah' || h === 's' || h === 'tidak sesuai' || h === 'false'
+  );
+  const keyCol = headers.findIndex(
+    (h) =>
+      h.includes('kunci') ||
+      h.includes('jawaban') ||
+      h === 'b/s' ||
+      h === 'benar/salah' ||
+      h === 'status'
+  );
+
+  if (stmtCol === -1 && benarCol === -1 && keyCol === -1) {
+    return null;
+  }
+
+  const effectiveStmtCol =
+    stmtCol !== -1
+      ? stmtCol
+      : headers[0] === 'no' || headers[0] === 'no.'
+      ? 1
+      : 0;
+
+  if (benarCol === -1 && keyCol === -1) return null;
+
+  const statements: StatementItem[] = [];
+  for (let rIdx = 1; rIdx < rows.length; rIdx++) {
+    const r = rows[rIdx];
+    const stmtCell = r[effectiveStmtCol];
+    if (!stmtCell || !stmtCell.fullText.trim()) continue;
+
+    let isBenar = stmtCell.hasRed;
+
+    if (benarCol !== -1 && r[benarCol]) {
+      const bTxt = r[benarCol].fullText.trim().toLowerCase();
+      if (
+        r[benarCol].hasRed ||
+        /^(✓|✔|☑|v|x|1|ya|benar|b|sesuai|true)$/i.test(bTxt)
+      ) {
+        isBenar = true;
+      }
+    }
+    if (salahCol !== -1 && r[salahCol]) {
+      const sTxt = r[salahCol].fullText.trim().toLowerCase();
+      if (
+        r[salahCol].hasRed ||
+        /^(✓|✔|☑|v|x|1|ya|salah|s|tidak\s*sesuai|false)$/i.test(sTxt)
+      ) {
+        isBenar = false;
+      }
+    }
+    if (keyCol !== -1 && r[keyCol]) {
+      const kTxt = r[keyCol].fullText.trim().toLowerCase();
+      if (/^(benar|b|sesuai|true|ya|1)$/i.test(kTxt)) {
+        isBenar = true;
+      } else if (/^(salah|s|tidak\s*sesuai|false|tidak|0)$/i.test(kTxt)) {
+        isBenar = false;
+      }
+    }
+
+    statements.push({
+      id: `st${statements.length + 1}`,
+      statement: stmtCell.fullText.replace(/^\d+[\.\)\-:]\s*/, '').trim(),
+      correctValue: isBenar ? 'Benar' : 'Salah',
+    });
+  }
+
+  return statements.length >= 2 ? statements : null;
+}
+
+/**
+ * Checks if a table is a Menjodohkan (Premis -> Respon) table for a question.
+ */
+function tryExtractMenjodohkanFromTable(
+  table: ParsedTable
+): { premise: string; response: string }[] | null {
+  const rows = table.rows.filter((r) =>
+    r.some((c) => c.fullText.trim().length > 0)
+  );
+  if (rows.length < 2) return null;
+
+  const headers = rows[0].map((c) => c.fullText.trim().toLowerCase());
+  const premCol = headers.findIndex(
+    (h) =>
+      h.includes('premis') ||
+      h.includes('pernyataan') ||
+      h.includes('kolom a') ||
+      h.includes('bagian a') ||
+      h.includes('kiri')
+  );
+  const respCol = headers.findIndex(
+    (h) =>
+      h.includes('respon') ||
+      h.includes('pasangan') ||
+      h.includes('jawaban') ||
+      h.includes('kolom b') ||
+      h.includes('bagian b') ||
+      h.includes('kanan')
+  );
+
+  if (premCol === -1 || respCol === -1 || premCol === respCol) return null;
+
+  const pairs: { premise: string; response: string }[] = [];
+  for (let rIdx = 1; rIdx < rows.length; rIdx++) {
+    const r = rows[rIdx];
+    const pText = r[premCol]?.fullText.replace(/^\d+[\.\)\-:]\s*/, '').trim();
+    const rText = r[respCol]?.fullText
+      .replace(/^[A-Za-z0-9]+[\.\)\-:]\s*/, '')
+      .trim();
+    if (pText && rText) {
+      pairs.push({ premise: pText, response: rText });
+    }
+  }
+
+  return pairs.length >= 2 ? pairs : null;
 }
 
 /**
@@ -1578,36 +1879,58 @@ function tryExtractQuestionsFromBankSoalTable(
 
   const firstRowTexts = rows[0].map((c) => c.fullText.trim().toLowerCase());
 
-  // CASE 1: Horizontal Table (e.g. No | Pertanyaan/Soal | Opsi A | Opsi B | Opsi C | Opsi D | Opsi E | Kunci)
+  // CASE 1: Horizontal Table (e.g. No | Tipe Soal | Pertanyaan/Soal | Opsi A..E | Kunci)
   const hasSoalHeader = firstRowTexts.some(
     (t) =>
       t.includes('soal') ||
       t.includes('pertanyaan') ||
       t.includes('butir') ||
-      t === 'question'
+      t.includes('pokok') ||
+      t === 'question' ||
+      t === 'stem'
   );
   const hasExplicitOptionHeaders =
     firstRowTexts.filter((t) =>
       /^(?:opsi\s+|pilihan\s+|jawaban\s+)[a-e]$/i.test(t)
     ).length >= 2;
 
-  if ((hasSoalHeader && rows[0].length >= 4) || hasExplicitOptionHeaders) {
+  if ((hasSoalHeader && rows[0].length >= 2) || hasExplicitOptionHeaders) {
     const drafts: DraftQuestion[] = [];
-    let qCol = firstRowTexts.findIndex(
+    let typeCol = firstRowTexts.findIndex(
       (t) =>
-        t.includes('soal') ||
-        t.includes('pertanyaan') ||
-        t.includes('butir') ||
-        t === 'question'
+        t.includes('tipe') ||
+        t.includes('jenis') ||
+        t === 'type' ||
+        t === 'bentuk soal'
+    );
+    let qCol = firstRowTexts.findIndex(
+      (t, idx) =>
+        idx !== typeCol &&
+        (t.includes('soal') ||
+          t.includes('pertanyaan') ||
+          t.includes('butir') ||
+          t.includes('pokok') ||
+          t === 'question' ||
+          t === 'stem')
     );
     const optCols: { letter: string; idx: number }[] = [];
+    const stmtCols: number[] = [];
     let keyCol = -1;
 
     firstRowTexts.forEach((t, idx) => {
+      if (idx === qCol || idx === typeCol) return;
       const m = t.match(/^(?:opsi\s*|pilihan\s*|jawaban\s*)?([a-e])$/i);
-      if (m && idx !== qCol) {
+      if (m) {
         optCols.push({ letter: m[1].toUpperCase(), idx });
-      } else if (t.includes('kunci') || t === 'jawaban benar' || t === 'key') {
+      } else if (/^(?:pernyataan|statement)\s*\d*$/i.test(t)) {
+        stmtCols.push(idx);
+      } else if (
+        t.includes('kunci') ||
+        t === 'jawaban benar' ||
+        t === 'jawaban' ||
+        t === 'key' ||
+        t === 'answer'
+      ) {
         keyCol = idx;
       }
     });
@@ -1620,10 +1943,14 @@ function tryExtractQuestionsFromBankSoalTable(
           ? 1
           : 0;
     }
-    if (optCols.length < 2 && rows[0].length >= qCol + 3) {
+    if (
+      optCols.length < 2 &&
+      stmtCols.length === 0 &&
+      rows[0].length >= qCol + 4
+    ) {
       const letters = ['A', 'B', 'C', 'D', 'E'];
       for (let c = qCol + 1; c < rows[0].length && optCols.length < 5; c++) {
-        if (c === keyCol) continue;
+        if (c === keyCol || c === typeCol) continue;
         optCols.push({ letter: letters[optCols.length], idx: c });
       }
     }
@@ -1633,35 +1960,124 @@ function tryExtractQuestionsFromBankSoalTable(
       const qCell = r[qCol];
       if (!qCell || !qCell.fullText.trim()) continue;
 
+      const rawTypeStr =
+        typeCol !== -1 && r[typeCol] ? r[typeCol].fullText.trim() : '';
+      const rowDetectedType =
+        detectQuestionTypeFromText(rawTypeStr) ||
+        detectQuestionTypeFromText(qCell.fullText) ||
+        undefined;
+
       const options: { id: string; text: string; isRed: boolean }[] = [];
       optCols.forEach(({ letter, idx }) => {
         const cell = r[idx];
         if (cell && cell.fullText.trim()) {
+          const { cleanedText, isMarkedCorrect } = extractTrailingCorrectMarker(
+            cell.fullText.replace(/^[A-Ea-e][\.\)\-:]\s*/, '').trim()
+          );
           options.push({
             id: letter,
-            text: cell.fullText.replace(/^[A-Ea-e][\.\)\-:]\s*/, '').trim(),
-            isRed: cell.hasRed,
+            text: cleanedText,
+            isRed: cell.hasRed || isMarkedCorrect,
           });
         }
       });
 
-      const explicitKeys: string[] = [];
-      if (keyCol !== -1 && r[keyCol]?.fullText.trim()) {
-        const kMatches = r[keyCol].fullText.toUpperCase().match(/[A-E]/g);
-        if (kMatches) explicitKeys.push(...kMatches);
+      const explicitStatements: StatementItem[] = [];
+      if (stmtCols.length > 0) {
+        stmtCols.forEach((sIdx, i) => {
+          const cell = r[sIdx];
+          if (cell && cell.fullText.trim()) {
+            const rawSt = cell.fullText.trim();
+            const isBenar =
+              cell.hasRed ||
+              /\((?:benar|b|sesuai)\)\s*$/i.test(rawSt) ||
+              !/\((?:salah|s|tidak\s*sesuai)\)\s*$/i.test(rawSt);
+            explicitStatements.push({
+              id: `st${i + 1}`,
+              statement: rawSt
+                .replace(/\s*\((?:benar|salah|b|s|sesuai|tidak\s*sesuai)\)\s*$/i, '')
+                .trim(),
+              correctValue: isBenar ? 'Benar' : 'Salah',
+            });
+          }
+        });
       }
 
-      if (options.length >= 2) {
-        const stimulusTable =
-          qCell.nestedTables.length > 0
-            ? convertParsedTableToQuestionTableData(qCell.nestedTables[0])
-            : undefined;
+      const explicitKeys: string[] = [];
+      const explicitTextAnswers: string[] = [];
+      if (keyCol !== -1 && r[keyCol]?.fullText.trim()) {
+        const rawKey = r[keyCol].fullText.trim();
+        const isSingleOrMultiOptionKey =
+          /^[A-Ea-e](?:\s*[,\/&\s]\s*[A-Ea-e])*$/i.test(rawKey) ||
+          /^(?:opsi\s*)?[A-Ea-e]$/i.test(rawKey);
+        if (isSingleOrMultiOptionKey && options.length >= 2) {
+          const kMatches = rawKey.toUpperCase().match(/[A-E]/g);
+          if (kMatches) explicitKeys.push(...kMatches);
+        } else if (
+          /^(?:benar|salah|b|s)(?:\s*[,\/]\s*(?:benar|salah|b|s))+$/i.test(
+            rawKey
+          )
+        ) {
+          const bsTokens = rawKey
+            .split(/[,\/]/)
+            .map((x) => x.trim().toLowerCase())
+            .filter(Boolean);
+          if (explicitStatements.length > 0) {
+            bsTokens.forEach((tok, idx) => {
+              if (explicitStatements[idx]) {
+                explicitStatements[idx].correctValue =
+                  tok === 'benar' || tok === 'b' ? 'Benar' : 'Salah';
+              }
+            });
+          } else if (options.length > 0) {
+            options.forEach((opt, idx) => {
+              const tok = bsTokens[idx];
+              if (tok) {
+                opt.isRed = tok === 'benar' || tok === 'b';
+              }
+            });
+          }
+        } else {
+          explicitTextAnswers.push(
+            ...rawKey
+              .split(/\s*[\/|;]\s*/)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          );
+          const kMatches = rawKey.toUpperCase().match(/^[A-E]$/);
+          if (kMatches) explicitKeys.push(kMatches[0]);
+        }
+      }
+
+      const stimulusTable =
+        qCell.nestedTables.length > 0
+          ? convertParsedTableToQuestionTableData(qCell.nestedTables[0])
+          : undefined;
+
+      if (
+        options.length >= 2 ||
+        explicitStatements.length > 0 ||
+        explicitTextAnswers.length > 0 ||
+        rowDetectedType === 'isian_singkat' ||
+        qCell.fullText.trim().length > 5
+      ) {
         drafts.push({
           explicitNumber: rIdx,
+          detectedType:
+            rowDetectedType ||
+            (explicitStatements.length > 0
+              ? 'benar_salah'
+              : options.length === 0
+              ? 'isian_singkat'
+              : undefined),
           questionLines: [qCell.fullText.replace(/^\d+[\.\)\-:]\s*/, '').trim()],
           unprefixedParagraphs: [],
           options,
           explicitKeys,
+          explicitTextAnswers:
+            explicitTextAnswers.length > 0 ? explicitTextAnswers : undefined,
+          explicitStatements:
+            explicitStatements.length > 0 ? explicitStatements : undefined,
           stimulusTable,
         });
       }
@@ -1957,12 +2373,16 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
   }
 
   let currentDraft: DraftQuestion | null = null;
+  let currentSectionType: QuestionType | undefined = undefined;
   let inInternalNumberedList = false;
   let internalListCounter = 0;
+  let inAnswerKeySection = false;
+  const answerKeyByNumber: Record<number, string> = {};
   const drafts: DraftQuestion[] = [];
 
   const createEmptyDraft = (explicitNumber?: number): DraftQuestion => ({
     explicitNumber,
+    detectedType: currentSectionType,
     questionLines: [],
     unprefixedParagraphs: [],
     allParagraphs: [],
@@ -2001,7 +2421,11 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         }
         const qM = matchNumberedQuestionLine(p);
         if (qM) {
-          if (expectedNextNum === undefined || qM.qNum === expectedNextNum || optionCount >= 2) {
+          if (
+            expectedNextNum === undefined ||
+            qM.qNum === expectedNextNum ||
+            optionCount >= 2
+          ) {
             break;
           }
         }
@@ -2019,6 +2443,30 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
           ? currentDraft.explicitNumber + 1
           : undefined;
       const upcoming = inspectBeforeNextQuestion(i + 1, expectedNextNum);
+
+      // 0A. Check if this table is a Benar/Salah Statement Table for the current question!
+      const bsStatements = tryExtractBenarSalahFromTable(block.table);
+      if (bsStatements && bsStatements.length >= 2) {
+        if (!currentDraft) {
+          currentDraft = createEmptyDraft();
+        }
+        currentDraft.detectedType = 'benar_salah';
+        currentDraft.explicitStatements = bsStatements;
+        flushDraft();
+        continue;
+      }
+
+      // 0B. Check if this table is a Menjodohkan Table for the current question!
+      const matchPairs = tryExtractMenjodohkanFromTable(block.table);
+      if (matchPairs && matchPairs.length >= 2) {
+        if (!currentDraft) {
+          currentDraft = createEmptyDraft();
+        }
+        currentDraft.detectedType = 'menjodohkan';
+        currentDraft.explicitMatchingPairs = matchPairs;
+        flushDraft();
+        continue;
+      }
 
       // If option paragraphs (A..E) already follow this table for the current question,
       // then this table is 100% a Stimulus/Data Table for the current question!
@@ -2053,7 +2501,9 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       }
 
       // 2. Check if this table is a Bank Soal Table containing full questions + options
-      const tableQuestionDrafts = tryExtractQuestionsFromBankSoalTable(block.table);
+      const tableQuestionDrafts = tryExtractQuestionsFromBankSoalTable(
+        block.table
+      );
       if (tableQuestionDrafts && tableQuestionDrafts.length > 0) {
         flushDraft();
         drafts.push(...tableQuestionDrafts);
@@ -2077,6 +2527,47 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
     const para = block.paragraph;
     const text = para.fullText.trim();
 
+    // Check if we entered a document-end "KUNCI JAWABAN" section
+    if (
+      /^(?:daftar\s+)?kunci\s+jawaban(?:\s+ujian|\s+soal)?\s*[:\-]?$/i.test(
+        text
+      )
+    ) {
+      flushDraft();
+      inAnswerKeySection = true;
+      continue;
+    }
+
+    if (inAnswerKeySection) {
+      // Parse lines like "1. B", "2. A, C", "3. Benar, Salah, Benar", or inline "1. A   2. C   3. D"
+      const inlineKeyPairs = Array.from(
+        text.matchAll(
+          /(\d+)\s*[\.\)\-:]\s*([A-Ea-e](?:\s*,\s*[A-Ea-e])*|Benar|Salah)/gi
+        )
+      );
+      if (inlineKeyPairs.length >= 2) {
+        inlineKeyPairs.forEach((m) => {
+          answerKeyByNumber[parseInt(m[1], 10)] = m[2].trim();
+        });
+        continue;
+      }
+      const singleKeyLine = text.match(/^(\d+)\s*[\.\)\-:]\s*(.+)$/);
+      if (singleKeyLine) {
+        answerKeyByNumber[parseInt(singleKeyLine[1], 10)] =
+          singleKeyLine[2].trim();
+        continue;
+      }
+    }
+
+    // Check if paragraph is a section header for a specific QuestionType
+    const sectionHeaderType = matchSectionTypeHeader(text);
+    if (sectionHeaderType) {
+      flushDraft();
+      currentSectionType = sectionHeaderType;
+      inAnswerKeySection = false;
+      continue;
+    }
+
     // Ignore standalone table number headers like "1" or "1." if followed immediately by a numbered question
     if (/^\d+[\.\)]?$/.test(text)) {
       const numVal = parseInt(text, 10);
@@ -2093,15 +2584,49 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       continue;
     }
 
-    // 1. Check if line is an explicit "Kunci Jawaban: A" line
-    const keyMatch = text.match(EXPLICIT_KEY_REGEX);
+    // 1. Check if line is an explicit "Kunci Jawaban: ..." line
+    const keyMatch = text.match(EXPLICIT_KEY_LINE_REGEX);
     if (keyMatch && currentDraft) {
-      const keys = keyMatch[1]
-        .toUpperCase()
-        .split(/[,\/]/)
-        .map((k) => k.trim())
-        .filter(Boolean);
-      currentDraft.explicitKeys.push(...keys);
+      const rawKeyVal = keyMatch[1].trim();
+      const isOptionLettersOnly =
+        /^[A-Ea-e](?:\s*(?:[,\/&]|dan)\s*[A-Ea-e])*$/i.test(rawKeyVal) ||
+        /^(?:opsi\s*)?[A-Ea-e]$/i.test(rawKeyVal);
+      if (isOptionLettersOnly) {
+        const keys = rawKeyVal.toUpperCase().match(/[A-E]/g) || [];
+        currentDraft.explicitKeys.push(...keys);
+        if (keys.length > 1) {
+          currentDraft.detectedType = 'pilihan_ganda_kompleks';
+        }
+      } else if (
+        /^(?:benar|salah|b|s|sesuai|tidak\s*sesuai)(?:\s*[,\/\-]\s*(?:benar|salah|b|s|sesuai|tidak\s*sesuai))+$/i.test(
+          rawKeyVal
+        )
+      ) {
+        currentDraft.detectedType = 'benar_salah';
+        const bsVals = rawKeyVal
+          .split(/[,\/\-]/)
+          .map((v) => v.trim().toLowerCase())
+          .filter(Boolean);
+        currentDraft.explicitKeys.push(
+          ...bsVals.map((v) =>
+            v === 'benar' || v === 'b' || v === 'sesuai' ? 'BENAR' : 'SALAH'
+          )
+        );
+      } else {
+        if (!currentDraft.explicitTextAnswers) {
+          currentDraft.explicitTextAnswers = [];
+        }
+        currentDraft.explicitTextAnswers.push(
+          ...rawKeyVal
+            .split(/\s*[\/|;]\s*/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        );
+        const singleLetter = rawKeyVal.toUpperCase().match(/^[A-E]$/);
+        if (singleLetter) {
+          currentDraft.explicitKeys.push(singleLetter[0]);
+        }
+      }
       continue;
     }
 
@@ -2120,8 +2645,6 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         currentDraft.options.some((o) => o.id === 'A') &&
         currentDraft.options.length >= 2
       ) {
-        // If currentDraft is an explicitly numbered question (e.g. No. 31) and has < 5 options (e.g. a, b, c, d statements),
-        // check if the next numbered question is still ahead — if so, the earlier a..d were statements in the question stem!
         const expectedNext =
           currentDraft.explicitNumber !== undefined
             ? currentDraft.explicitNumber + 1
@@ -2167,6 +2690,8 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
 
       if (!currentDraft) {
         currentDraft = createEmptyDraft(qNum);
+        const inlineType = detectQuestionTypeFromText(qText);
+        if (inlineType) currentDraft.detectedType = inlineType;
         currentDraft.questionLines.push(qText);
         const cleanPara = { ...para, fullText: qText };
         currentDraft.unprefixedParagraphs.push(cleanPara);
@@ -2193,8 +2718,6 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         qNum === internalListCounter + 1 &&
         qNum !== expectedNextQNum;
 
-      // Also guard: if currentDraft is a higher-numbered question (e.g. No. 31) with 0 options so far,
-      // and qNum is a small number (1..6) nowhere near expectedNextQNum (32), it is an internal list item!
       const isSmallNumberInsideHigherQuestion =
         currentDraft.options.length === 0 &&
         currentDraft.explicitNumber !== undefined &&
@@ -2202,7 +2725,10 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         qNum <= 6 &&
         (currentDraft.allParagraphs?.length ?? 0) <= 6;
 
-      if (isInternalListStart || (isSmallNumberInsideHigherQuestion && !inInternalNumberedList)) {
+      if (
+        isInternalListStart ||
+        (isSmallNumberInsideHigherQuestion && !inInternalNumberedList)
+      ) {
         inInternalNumberedList = true;
         internalListCounter = qNum;
         const lineWithNum = /^\d+/.test(text) ? text : `${qNum}. ${qText}`;
@@ -2224,6 +2750,8 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       // Otherwise, this is a NEW question! Flush the previous question first!
       flushDraft();
       currentDraft = createEmptyDraft(qNum);
+      const inlineType = detectQuestionTypeFromText(qText);
+      if (inlineType) currentDraft.detectedType = inlineType;
       currentDraft.questionLines.push(qText);
       const cleanPara = { ...para, fullText: qText };
       currentDraft.unprefixedParagraphs.push(cleanPara);
@@ -2232,6 +2760,11 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
     }
 
     // 4. Non-option, non-numbered paragraph:
+    const inlineTypeInPara = detectQuestionTypeFromText(text);
+    if (inlineTypeInPara && currentDraft && !currentDraft.detectedType) {
+      currentDraft.detectedType = inlineTypeInPara;
+    }
+
     if (currentDraft && currentDraft.options.length >= 1) {
       const expectedNext =
         currentDraft.explicitNumber !== undefined
@@ -2239,8 +2772,6 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
           : undefined;
       const upcoming = inspectBeforeNextQuestion(i + 1, expectedNext);
 
-      // Case 4A: If the next option before the next question is 'B', 'C', 'D', or 'E' (NOT 'A'),
-      // then we are still in the middle of currentDraft's options (this paragraph is an unprefixed option or wrapped line)!
       if (
         upcoming.firstOptionLetter &&
         upcoming.firstOptionLetter !== 'A'
@@ -2250,8 +2781,6 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         continue;
       }
 
-      // Case 4B: If upcoming has a new 'A' option set AND currentDraft is an explicitly numbered question
-      // whose earlier options were actually a..d statements in the stem, fold them into questionLines!
       if (
         upcoming.firstOptionLetter === 'A' &&
         upcoming.optionCount >= 2 &&
@@ -2272,9 +2801,6 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         continue;
       }
 
-      // Case 4C: If there are NO more option paragraphs before the next numbered question
-      // and currentDraft has < 5 options (e.g. Option E or C..E lost their A..E prefix!),
-      // keep this paragraph inside currentDraft so finalizeDraftQuestion recovers it as the missing option!
       if (
         upcoming.optionCount === 0 &&
         currentDraft.options.length < 5 &&
@@ -2292,6 +2818,7 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
 
     if (!currentDraft) {
       currentDraft = createEmptyDraft();
+      if (inlineTypeInPara) currentDraft.detectedType = inlineTypeInPara;
       currentDraft.questionLines.push(text);
       currentDraft.unprefixedParagraphs.push(para);
       currentDraft.allParagraphs?.push({ para });
@@ -2303,16 +2830,162 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
   }
 
   flushDraft();
+
+  // Apply any keys found in a document-end KUNCI JAWABAN section
+  if (Object.keys(answerKeyByNumber).length > 0) {
+    drafts.forEach((d, idx) => {
+      const num = d.explicitNumber ?? idx + 1;
+      const rawKey = answerKeyByNumber[num];
+      if (!rawKey) return;
+      if (/^[A-Ea-e](?:\s*,\s*[A-Ea-e])*$/i.test(rawKey)) {
+        const letters = rawKey.toUpperCase().match(/[A-E]/g) || [];
+        d.explicitKeys = letters;
+        if (letters.length > 1) {
+          d.detectedType = 'pilihan_ganda_kompleks';
+        }
+      } else if (/^(?:benar|salah)/i.test(rawKey)) {
+        d.detectedType = 'benar_salah';
+        const bs = rawKey
+          .split(/[,\/]/)
+          .map((x) =>
+            /benar|^b$/i.test(x.trim()) ? 'BENAR' : 'SALAH'
+          );
+        d.explicitKeys = bs;
+      } else {
+        d.explicitTextAnswers = [rawKey];
+      }
+    });
+  }
+
   return drafts;
 }
 
 /**
+ * Helper to check if a draft's options or lines represent matching pairs (Menjodohkan),
+ * e.g., "A. Kaktus -> Daun berbentuk duri" or "1. Mitokondria = Respirasi sel"
+ */
+function tryExtractMatchingPairsFromDraft(
+  draft: DraftQuestion
+): { premise: string; response: string }[] | null {
+  if (draft.explicitMatchingPairs && draft.explicitMatchingPairs.length >= 2) {
+    return draft.explicitMatchingPairs;
+  }
+
+  const pairRegex = /^(.+?)\s*(?:->|=>|<->|↔|—|--|=)\s*(.+)$/;
+  const candidateStrings =
+    draft.options.length >= 2
+      ? draft.options.map((o) => o.text)
+      : draft.questionLines.slice(1);
+
+  const pairs: { premise: string; response: string }[] = [];
+  for (const line of candidateStrings) {
+    const cleaned = line.replace(/^[A-Za-z0-9]+[\.\)\-:]\s*/, '').trim();
+    const m = cleaned.match(pairRegex);
+    if (m && m[1].trim() && m[2].trim()) {
+      pairs.push({ premise: m[1].trim(), response: m[2].trim() });
+    }
+  }
+
+  if (
+    pairs.length >= 2 &&
+    (draft.detectedType === 'menjodohkan' ||
+      pairs.length === candidateStrings.length)
+  ) {
+    return pairs;
+  }
+
+  return null;
+}
+
+/**
+ * Helper to check if a draft's options or statements have explicit Benar/Salah suffixes
+ * e.g. "Pernyataan 1 (Benar)" / "Pernyataan 2 (Salah)" or options are literally ["Benar", "Salah"].
+ */
+function tryExtractBenarSalahFromDraft(
+  draft: DraftQuestion
+): StatementItem[] | null {
+  if (draft.explicitStatements && draft.explicitStatements.length > 0) {
+    return draft.explicitStatements;
+  }
+
+  const bsSuffixRegex =
+    /^(.*?)[\s\-:]+[\(\[]?(benar|salah|sesuai|tidak\s+sesuai)[\)\]]?\s*$/i;
+
+  if (draft.options.length >= 2) {
+    const matchedSuffixCount = draft.options.filter((o) =>
+      bsSuffixRegex.test(o.text.trim())
+    ).length;
+
+    if (matchedSuffixCount >= 2) {
+      return draft.options.map((o, idx) => {
+        const m = o.text.trim().match(bsSuffixRegex);
+        const stText = m ? m[1].trim() : o.text.trim();
+        const valRaw = m ? m[2].toLowerCase() : '';
+        const isBenar =
+          valRaw === 'benar' ||
+          valRaw === 'sesuai' ||
+          (!valRaw && o.isRed);
+        return {
+          id: `st${idx + 1}`,
+          statement: stText,
+          correctValue: isBenar ? 'Benar' : 'Salah',
+        };
+      });
+    }
+
+    // Check if the 2 options are literally "Benar" and "Salah" (True/False single statement question)
+    if (
+      draft.options.length === 2 &&
+      /^(benar|true|sesuai)$/i.test(draft.options[0].text.trim()) &&
+      /^(salah|false|tidak\s+sesuai)$/i.test(draft.options[1].text.trim())
+    ) {
+      const isFirstCorrect =
+        draft.options[0].isRed ||
+        draft.explicitKeys.includes('A') ||
+        draft.explicitKeys.includes('BENAR');
+      const stemText =
+        draft.questionLines.join(' ').trim() || 'Pernyataan soal';
+      return [
+        {
+          id: 'st1',
+          statement: stemText,
+          correctValue: isFirstCorrect ? 'Benar' : 'Salah',
+        },
+      ];
+    }
+  }
+
+  if (
+    draft.detectedType === 'benar_salah' &&
+    draft.options.length >= 2
+  ) {
+    return draft.options.slice(0, 6).map((o, idx) => {
+      const explicitVal = draft.explicitKeys[idx];
+      const isBenar =
+        explicitVal === 'BENAR'
+          ? true
+          : explicitVal === 'SALAH'
+          ? false
+          : o.isRed;
+      return {
+        id: `st${idx + 1}`,
+        statement: o.text,
+        correctValue: isBenar ? 'Benar' : 'Salah',
+      };
+    });
+  }
+
+  return null;
+}
+
+/**
  * Converts extracted DocumentBlocks (paragraphs and tables with red text metadata) into CBT Question objects.
- * Any option colored in red is automatically set as the correct answer!
+ * Automatically recognizes the question type (Pilihan Ganda, PG Kompleks, Benar/Salah, Menjodohkan, Isian Singkat)
+ * directly from the uploaded file's structure and content!
  */
 function buildQuestionsFromBlocks(
   blocks: DocumentBlock[],
-  defaultQuestionType: QuestionType,
+  _defaultQuestionType: QuestionType,
   startingNumber: number,
   defaultCategory: string
 ): Question[] {
@@ -2322,9 +2995,102 @@ function buildQuestionsFromBlocks(
 
   drafts.forEach((draft, idx) => {
     const qNum = startingNumber + idx;
-    const questionText =
+    const rawQuestionText =
       draft.questionLines.join(' ').trim() || `Pertanyaan Soal No. ${qNum}`;
+    const stemDetectedType =
+      draft.detectedType || detectQuestionTypeFromText(rawQuestionText);
 
+    // 1. Check Menjodohkan (Matching)
+    const matchingPairs = tryExtractMatchingPairsFromDraft(draft);
+    if (matchingPairs && matchingPairs.length >= 2) {
+      const premises: MatchingPremise[] = [];
+      const responses: MatchingResponse[] = [];
+      const correctPairs: Record<string, string> = {};
+
+      matchingPairs.forEach((pair, pIdx) => {
+        const pId = `p${pIdx + 1}`;
+        const rId = `r${pIdx + 1}`;
+        premises.push({ id: pId, text: pair.premise });
+        responses.push({ id: rId, text: pair.response });
+        correctPairs[pId] = rId;
+      });
+
+      const stemOnly =
+        draft.options.length >= 2
+          ? rawQuestionText
+          : draft.questionLines[0] ||
+            'Pasangkan pernyataan pada kolom Premis dengan jawaban yang sesuai pada kolom Respon!';
+
+      questions.push({
+        id: `word_q_${nowTs}_${idx}`,
+        number: qNum,
+        type: 'menjodohkan',
+        category: defaultCategory,
+        questionText: stemOnly,
+        stimulusTable: draft.stimulusTable,
+        instructionText:
+          'Pasangkan setiap pernyataan di sebelah kiri dengan pasangan yang tepat di sebelah kanan!',
+        premises,
+        responses,
+        correctPairs,
+        points: 10,
+        explanation: `Pasangan jawaban yang benar telah diatur sesuai dokumen soal.`,
+      });
+      return;
+    }
+
+    // 2. Check Benar / Salah
+    const bsStatements = tryExtractBenarSalahFromDraft(draft);
+    if (bsStatements && bsStatements.length >= 1) {
+      questions.push({
+        id: `word_q_${nowTs}_${idx}`,
+        number: qNum,
+        type: 'benar_salah',
+        category: defaultCategory,
+        questionText: rawQuestionText,
+        stimulusTable: draft.stimulusTable,
+        instructionText: 'Tentukan Benar atau Salah untuk setiap pernyataan!',
+        statements: bsStatements,
+        trueLabel: 'Benar',
+        falseLabel: 'Salah',
+        points: 10,
+        explanation: `Kunci Benar/Salah: ${bsStatements
+          .map((s, sIdx) => `(${sIdx + 1}) ${s.correctValue}`)
+          .join(', ')}.`,
+      });
+      return;
+    }
+
+    // 3. Check Isian Singkat / Uraian (when no options A..E exist or explicitly tagged as isian/uraian without options)
+    if (
+      draft.options.length < 2 ||
+      (stemDetectedType === 'isian_singkat' && draft.options.length === 0)
+    ) {
+      const shortAnswers =
+        draft.explicitTextAnswers && draft.explicitTextAnswers.length > 0
+          ? draft.explicitTextAnswers
+          : draft.explicitKeys.length > 0
+          ? draft.explicitKeys
+          : ['Sesuai Kunci Guru'];
+
+      questions.push({
+        id: `word_q_${nowTs}_${idx}`,
+        number: qNum,
+        type: 'isian_singkat',
+        category: defaultCategory,
+        questionText: rawQuestionText,
+        stimulusTable: draft.stimulusTable,
+        instructionText:
+          'Ketiklah jawaban singkat atau uraian dengan tepat pada kolom yang tersedia!',
+        correctShortAnswers: shortAnswers,
+        placeholder: 'Ketik jawaban Anda di sini...',
+        points: 10,
+        explanation: `Kunci jawaban: ${shortAnswers.join(' / ')}.`,
+      });
+      return;
+    }
+
+    // 4. Pilihan Ganda or Pilihan Ganda Kompleks
     const normalizedOptions: OptionItem[] = draft.options
       .slice(0, 5)
       .map((o, oIdx) => ({
@@ -2339,45 +3105,28 @@ function buildQuestionsFromBlocks(
       )
       .filter((id): id is string => Boolean(id));
 
+    const validExplicitOptionKeys = draft.explicitKeys.filter((k) =>
+      ['A', 'B', 'C', 'D', 'E'].includes(k)
+    );
+
     const effectiveCorrectIds =
       redOptionIds.length > 0
         ? redOptionIds
-        : draft.explicitKeys.length > 0
-        ? draft.explicitKeys
+        : validExplicitOptionKeys.length > 0
+        ? validExplicitOptionKeys
         : ['A'];
 
-    if (defaultQuestionType === 'benar_salah') {
-      const statements: StatementItem[] = draft.options
-        .slice(0, 5)
-        .map((o, sIdx) => ({
-          id: `st${sIdx + 1}`,
-          statement: o.text,
-          correctValue: o.isRed ? 'Benar' : 'Salah',
-        }));
-      questions.push({
-        id: `word_q_${nowTs}_${idx}`,
-        number: qNum,
-        type: 'benar_salah',
-        category: defaultCategory,
-        questionText,
-        stimulusTable: draft.stimulusTable,
-        instructionText: 'Tentukan Benar atau Salah untuk setiap pernyataan!',
-        statements,
-        trueLabel: 'Benar',
-        falseLabel: 'Salah',
-        points: 10,
-        explanation: `Pernyataan bertanda merah bernilai Benar.`,
-      });
-    } else if (
-      defaultQuestionType === 'pilihan_ganda_kompleks' ||
-      redOptionIds.length > 1
-    ) {
+    const isComplex =
+      stemDetectedType === 'pilihan_ganda_kompleks' ||
+      effectiveCorrectIds.length > 1;
+
+    if (isComplex) {
       questions.push({
         id: `word_q_${nowTs}_${idx}`,
         number: qNum,
         type: 'pilihan_ganda_kompleks',
         category: defaultCategory,
-        questionText,
+        questionText: rawQuestionText,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Pilihlah lebih dari satu jawaban yang benar!',
         options: normalizedOptions,
@@ -2392,7 +3141,7 @@ function buildQuestionsFromBlocks(
         number: qNum,
         type: 'pilihan_ganda',
         category: defaultCategory,
-        questionText,
+        questionText: rawQuestionText,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Pilih satu jawaban yang paling tepat!',
         options: normalizedOptions,
@@ -2407,42 +3156,264 @@ function buildQuestionsFromBlocks(
 }
 
 /**
- * Main entry point to parse a Word (.docx or .doc) file into CBT Question items.
- * Options colored in red are automatically set as the correct answer(s), and tables are supported.
+ * Converts an Excel/CSV workbook into DocumentBlocks so any spreadsheet layout
+ * (table bank soal, vertical list, or multi-sheet) is seamlessly parsed into CBT questions.
+ */
+function parseSpreadsheetBlocks(buffer: ArrayBuffer): DocumentBlock[] {
+  const workbook = XLSX.read(buffer, { type: 'array' });
+  const blocks: DocumentBlock[] = [];
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+
+    const sheetType = detectQuestionTypeFromText(sheetName);
+    if (sheetType) {
+      blocks.push({
+        kind: 'paragraph',
+        paragraph: {
+          fullText: sheetName,
+          hasRed: false,
+          segments: [{ text: sheetName, isRed: false }],
+        },
+      });
+    }
+
+    const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+      header: 1,
+      defval: '',
+    });
+
+    const nonEmptyRows = rawRows.filter(
+      (r) =>
+        Array.isArray(r) &&
+        r.some((cell) => String(cell ?? '').trim().length > 0)
+    );
+    if (nonEmptyRows.length === 0) continue;
+
+    // Check if the sheet is a 1-column list of paragraphs or a multi-column table
+    const maxNonEmptyCols = Math.max(
+      ...nonEmptyRows.map(
+        (r) => r.filter((c) => String(c ?? '').trim().length > 0).length
+      )
+    );
+
+    if (maxNonEmptyCols <= 1) {
+      nonEmptyRows.forEach((r) => {
+        const txt = r
+          .map((c) => String(c ?? '').trim())
+          .find((s) => s.length > 0);
+        if (txt) {
+          blocks.push({
+            kind: 'paragraph',
+            paragraph: {
+              fullText: txt,
+              hasRed: false,
+              segments: [{ text: txt, isRed: false }],
+            },
+          });
+        }
+      });
+    } else {
+      const parsedRows: ParsedTableCell[][] = nonEmptyRows.map((r) =>
+        r.map((c) => {
+          const txt = String(c ?? '').trim();
+          const para: ParsedParagraph = {
+            fullText: txt,
+            hasRed: false,
+            segments: txt ? [{ text: txt, isRed: false }] : [],
+          };
+          return {
+            fullText: txt,
+            hasRed: false,
+            paragraphs: txt ? [para] : [],
+            nestedTables: [],
+          };
+        })
+      );
+      blocks.push({ kind: 'table', table: { rows: parsedRows } });
+    }
+  }
+
+  return blocks;
+}
+
+/**
+ * Strips RTF control sequences while preserving line breaks and detecting red color entries in \colortbl.
+ */
+function parseRtfBlocks(rawRtf: string): DocumentBlock[] {
+  const redCfIndices = new Set<number>();
+  const colorTblMatch = rawRtf.match(/\{\\colortbl;([^}]*)\}/i);
+  if (colorTblMatch) {
+    const entries = colorTblMatch[1].split(';');
+    entries.forEach((entry, idx) => {
+      const rM = entry.match(/\\red(\d+)/i);
+      const gM = entry.match(/\\green(\d+)/i);
+      const bM = entry.match(/\\blue(\d+)/i);
+      if (rM && gM && bM) {
+        const r = parseInt(rM[1], 10);
+        const g = parseInt(gM[1], 10);
+        const b = parseInt(bM[1], 10);
+        if (r >= 130 && g <= 100 && b <= 100) {
+          redCfIndices.add(idx + 1);
+        }
+      }
+    });
+  }
+
+  const normalized = rawRtf
+    .replace(/\\par\b|\\line\b/gi, '\n')
+    .replace(/\\tab\b/gi, '\t');
+
+  const lines = normalized.split(/\r?\n/);
+  const blocks: DocumentBlock[] = [];
+
+  for (const rawLine of lines) {
+    let hasRed = false;
+    redCfIndices.forEach((cfIdx) => {
+      if (new RegExp(`\\\\cf${cfIdx}\\b`).test(rawLine)) {
+        hasRed = true;
+      }
+    });
+
+    const cleaned = rawLine
+      .replace(/\{\\(?:fonttbl|colortbl|stylesheet|info)[^}]*\}/gi, '')
+      .replace(/\\'[0-9a-fA-F]{2}/g, (m) =>
+        String.fromCharCode(parseInt(m.slice(2), 16))
+      )
+      .replace(/\\[a-zA-Z]+-?\d*\s?/g, '')
+      .replace(/[{}]/g, '')
+      .trim();
+
+    if (cleaned) {
+      blocks.push({
+        kind: 'paragraph',
+        paragraph: {
+          fullText: cleaned,
+          hasRed,
+          segments: [{ text: cleaned, isRed: hasRed }],
+        },
+      });
+    }
+  }
+
+  return blocks;
+}
+
+/**
+ * Main entry point to parse any uploaded question file (.docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, .json, .html)
+ * into CBT Question items, automatically recognizing each question's type according to the file content.
  */
 export async function parseWordQuestions(
   file: File,
   defaultQuestionType: QuestionType,
   startingNumber: number,
   defaultCategory: string = 'Sumatif Akhir Semester'
-): Promise<{ questions: Question[]; redDetectedCount: number; tableCount: number }> {
+): Promise<{
+  questions: Question[];
+  redDetectedCount: number;
+  tableCount: number;
+  typeBreakdown: Record<string, number>;
+}> {
+  const fileNameLower = file.name.trim().toLowerCase();
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
-  const isZipDocx =
+  // 1. Handle JSON file directly if uploaded
+  if (fileNameLower.endsWith('.json')) {
+    const rawJson = new TextDecoder('utf-8').decode(bytes);
+    const parsed = JSON.parse(rawJson);
+    const arr = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.questions)
+      ? parsed.questions
+      : [];
+    if (arr.length > 0) {
+      const nowTs = Date.now();
+      const questions: Question[] = arr.map((item: Partial<Question>, idx: number) => ({
+        id: `word_q_${nowTs}_${idx}`,
+        number: startingNumber + idx,
+        type: item.type || 'pilihan_ganda',
+        category: item.category || defaultCategory,
+        questionText: item.questionText || `Pertanyaan No. ${startingNumber + idx}`,
+        instructionText: item.instructionText || 'Pilih jawaban yang tepat!',
+        options: item.options,
+        correctOptionId: item.correctOptionId,
+        correctOptionIds: item.correctOptionIds,
+        statements: item.statements,
+        trueLabel: item.trueLabel || 'Benar',
+        falseLabel: item.falseLabel || 'Salah',
+        premises: item.premises,
+        responses: item.responses,
+        correctPairs: item.correctPairs,
+        correctShortAnswers: item.correctShortAnswers,
+        stimulusTable: item.stimulusTable,
+        points: item.points || 10,
+        explanation: item.explanation || 'Sesuai kunci jawaban pada file.',
+      }));
+      const typeBreakdown: Record<string, number> = {};
+      questions.forEach((q) => {
+        typeBreakdown[q.type] = (typeBreakdown[q.type] || 0) + 1;
+      });
+      return {
+        questions,
+        redDetectedCount: questions.length,
+        tableCount: questions.filter((q) => Boolean(q.stimulusTable)).length,
+        typeBreakdown,
+      };
+    }
+  }
+
+  const isZipContainer =
     bytes.length > 4 &&
     bytes[0] === 0x50 &&
     bytes[1] === 0x4b &&
     bytes[2] === 0x03 &&
     bytes[3] === 0x04;
 
+  const isSpreadsheetExt =
+    fileNameLower.endsWith('.xlsx') ||
+    fileNameLower.endsWith('.xls') ||
+    fileNameLower.endsWith('.csv');
+
   let blocks: DocumentBlock[] = [];
 
-  if (isZipDocx) {
+  if (isZipContainer && !isSpreadsheetExt) {
     const zipFiles = await extractZipFiles(buffer);
     const documentXml = zipFiles['word/document.xml'];
-    if (!documentXml) {
-      throw new Error('File .docx tidak memiliki struktur word/document.xml yang valid.');
+    if (documentXml) {
+      blocks = parseDocxDocumentBlocks(
+        documentXml,
+        zipFiles['word/numbering.xml'],
+        zipFiles['word/styles.xml']
+      );
+    } else {
+      // ZIP container without word/document.xml (e.g. .xlsx renamed or spreadsheet)
+      blocks = parseSpreadsheetBlocks(buffer);
     }
-    blocks = parseDocxDocumentBlocks(
-      documentXml,
-      zipFiles['word/numbering.xml'],
-      zipFiles['word/styles.xml']
-    );
+  } else if (isSpreadsheetExt) {
+    blocks = parseSpreadsheetBlocks(buffer);
   } else {
     const textDecoder = new TextDecoder('utf-8');
     const rawText = textDecoder.decode(bytes);
-    blocks = parseHtmlOrTextDocBlocks(rawText);
+    if (fileNameLower.endsWith('.rtf') || rawText.trimStart().startsWith('{\\rtf')) {
+      blocks = parseRtfBlocks(rawText);
+    } else {
+      blocks = parseHtmlOrTextDocBlocks(rawText);
+    }
+  }
+
+  // Also check if the filename itself hints at a specific question type (e.g. "Soal_Benar_Salah.docx")
+  const fileNameTypeHint = detectQuestionTypeFromText(file.name);
+  if (fileNameTypeHint && blocks.length > 0) {
+    blocks.unshift({
+      kind: 'paragraph',
+      paragraph: {
+        fullText: file.name.replace(/\.[^.]+$/, ''),
+        hasRed: false,
+        segments: [{ text: file.name, isRed: false }],
+      },
+    });
   }
 
   const questions = buildQuestionsFromBlocks(
@@ -2455,12 +3426,18 @@ export async function parseWordQuestions(
   const redDetectedCount = questions.filter(
     (q) =>
       q.explanation.includes('teks warna merah') ||
-      q.explanation.includes('bertanda merah')
+      q.explanation.includes('Kunci') ||
+      q.explanation.includes('Pasangan')
   ).length;
 
   const tableCount = questions.filter((q) => Boolean(q.stimulusTable)).length;
 
-  return { questions, redDetectedCount, tableCount };
+  const typeBreakdown: Record<string, number> = {};
+  questions.forEach((q) => {
+    typeBreakdown[q.type] = (typeBreakdown[q.type] || 0) + 1;
+  });
+
+  return { questions, redDetectedCount, tableCount, typeBreakdown };
 }
 
 /**

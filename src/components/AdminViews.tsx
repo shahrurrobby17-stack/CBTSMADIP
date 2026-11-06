@@ -52,11 +52,16 @@ import {
 import { getQuestionTypeLabel } from '../data/cbtData';
 import {
   ProctorParticipantRow,
+  doesKelasMatch,
   isParticipantLockedByViolation,
   sanitizeParticipantRows,
 } from './ProctorDashboardView';
 import { generateProctorCardsPDF } from '../utils/pdfProctorCard';
 import { generateParticipantCardsPDF } from '../utils/pdfParticipantCard';
+import {
+  generateExamReportPDF,
+  resolveResultClass,
+} from '../utils/pdfExamReport';
 import {
   parseWordQuestions,
   downloadWordQuestionTemplate,
@@ -73,19 +78,121 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
   onBackToStudentLogin,
   onGoToProctorLogin,
 }) => {
-  const [adminUsername, setAdminUsername] = useState('K05060108-KB6K');
-  const [password, setPassword] = useState('ADMIN2026*');
-  const [tenant, setTenant] = useState('GLDTKASMA');
+  const [usernameInput, setUsernameInput] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
+  // Resolve ID Administrator secara otomatis ketika Username dimasukkan dengan benar
+  const resolvedAdminId = useMemo(() => {
+    const clean = usernameInput.trim().toUpperCase();
+    if (!clean) return '';
+
+    let primaryAdminId = 'K05060108-KB6K';
+    try {
+      const saved = localStorage.getItem('cbt_admin_settings');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed.adminId === 'string' && parsed.adminId.trim()) {
+          primaryAdminId = parsed.adminId.trim().toUpperCase();
+        }
+        if (
+          typeof parsed.adminUsername === 'string' &&
+          parsed.adminUsername.trim().toUpperCase() === clean
+        ) {
+          return primaryAdminId;
+        }
+        if (
+          typeof parsed.adminNama === 'string' &&
+          parsed.adminNama.trim().toUpperCase() === clean
+        ) {
+          return primaryAdminId;
+        }
+        if (Array.isArray(parsed.adminList)) {
+          const matchedFromList = parsed.adminList.find((adm: any) => {
+            const uName = String(adm?.username || '').trim().toUpperCase();
+            const fullName = String(adm?.namaLengkap || '').trim().toUpperCase();
+            const aId = String(adm?.adminId || '').trim().toUpperCase();
+            const email = String(adm?.email || '').trim().toUpperCase();
+            return (
+              (uName && uName === clean) ||
+              (fullName && fullName === clean) ||
+              (aId && aId === clean) ||
+              (email && email === clean)
+            );
+          });
+          if (matchedFromList?.adminId) {
+            return String(matchedFromList.adminId).trim().toUpperCase();
+          }
+        }
+      }
+    } catch {
+      // Ignore storage error
+    }
+
+    const validPrimaryUsernames = new Set([
+      'SHAHRUR ROBBY, S.PD.',
+      'SHAHRUR ROBBY, S.PD',
+      'SHAHRUR ROBBY',
+      'SHAHRUR',
+      'ROBBY',
+      'SHAHRURROBBY17',
+      'SHAHRURROBBY17@GMAIL.COM',
+      'ADMIN',
+      'ADMINISTRATOR',
+      'ADMIN_SMADIP',
+      'ADMINSMADIP',
+      'ADMIN_CBT',
+      'ADMINCBT',
+      'SMADIP',
+      'SMADIPONEGORO',
+      'K05060108',
+      'K05060108-KB6K',
+      primaryAdminId,
+    ]);
+
+    if (validPrimaryUsernames.has(clean)) {
+      return primaryAdminId;
+    }
+
+    const validTechUsernames = new Set([
+      'TIM_TEKNIS',
+      'TIM TEKNIS',
+      'ADMIN_TEKNIS',
+      'TIM TEKNIS CBT SMA ISLAM DIPONEGORO',
+    ]);
+
+    if (validTechUsernames.has(clean)) {
+      return 'ADMIN_SMADIP';
+    }
+
+    return '';
+  }, [usernameInput]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanUser = adminUsername.trim();
+    const cleanUsername = usernameInput.trim();
     const cleanPass = password.trim();
 
-    if (!cleanUser || !cleanPass) {
-      setErrorMsg('ID Administrator dan Password wajib diisi.');
+    if (!cleanUsername) {
+      setErrorMsg('Username Administrator wajib diisi terlebih dahulu.');
+      return;
+    }
+
+    if (!resolvedAdminId) {
+      setErrorMsg(
+        'Username Administrator tidak terdaftar. Masukkan Username yang benar agar ID Administrator muncul otomatis.'
+      );
+      return;
+    }
+
+    if (!cleanPass) {
+      setErrorMsg('Password wajib diisi.');
+      return;
+    }
+
+    if (cleanPass.toUpperCase() !== 'SAS2026') {
+      setErrorMsg('Password Administrator yang Anda masukkan salah.');
       return;
     }
 
@@ -110,19 +217,12 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
       // Ignore
     }
 
-    onAdminLoginSuccess(cleanUser.toUpperCase());
-  };
-
-  const handleFillDefaultAdmin = () => {
-    setAdminUsername('K05060108-KB6K');
-    setPassword('ADMIN2026*');
-    setTenant('GLDTKASMA');
-    setErrorMsg('');
+    onAdminLoginSuccess(resolvedAdminId);
   };
 
   return (
     <main className="flex-1 flex flex-col items-center justify-center px-4 py-10 min-h-[calc(100vh-10rem)]">
-      <div className="w-full max-w-[440px] bg-white rounded-[14px] px-9 sm:px-11 py-10 shadow-[0_24px_60px_-12px_rgba(15,23,42,0.16)] border border-slate-100/80">
+      <div className="w-full max-w-[440px] bg-white rounded-[14px] px-9 sm:px-11 py-10 shadow-[0_24px_60px_-12px_rgba(15,23,42,0.16)] border border-slate-100/80 animate-cbt-slide-up">
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-[18px] font-bold text-[#1e293b] tracking-tight">
             Login Administrator
@@ -134,7 +234,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
         </div>
 
         <p className="mt-1.5 text-[13.5px] leading-[1.55] text-[#475569]">
-          Masukkan ID Administrator dan kata sandi Anda untuk mengakses dashboard pengelolaan ujian.
+          Masukkan Username dan kata sandi Anda untuk mengakses dashboard pengelolaan ujian.
         </p>
 
         {errorMsg && (
@@ -144,21 +244,67 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
         )}
 
         <form onSubmit={handleSubmit} className="mt-7 space-y-5">
-          {/* ID Administrator */}
+          {/* Username Administrator */}
           <div className="space-y-1.5">
             <label className="block text-xs font-semibold text-slate-600">
-              ID Administrator
+              Username
             </label>
             <div className="flex items-center gap-3 px-3.5 py-2.5 rounded-lg border border-slate-200 focus-within:border-[#0066ff] bg-slate-50/50">
-              <UserCog className="w-4 h-4 text-slate-500 shrink-0" />
+              <User className="w-4 h-4 text-slate-500 shrink-0" />
               <input
                 type="text"
-                value={adminUsername}
-                onChange={(e) => setAdminUsername(e.target.value)}
-                placeholder="Masukkan ID Administrator"
-                aria-label="ID Administrator"
+                value={usernameInput}
+                onChange={(e) => {
+                  setUsernameInput(e.target.value);
+                  if (errorMsg) setErrorMsg('');
+                }}
+                placeholder="Masukkan Username"
+                aria-label="Username Administrator"
+                autoComplete="off"
                 className="w-full text-sm text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-none"
               />
+            </div>
+          </div>
+
+          {/* ID Administrator (Muncul Otomatis & Tidak Bisa Diedit) */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-semibold text-slate-600">
+                ID Administrator
+              </label>
+              <span className="text-[11px] font-medium text-slate-400">
+                Otomatis (Terkunci)
+              </span>
+            </div>
+            <div
+              className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg border transition-colors ${
+                resolvedAdminId
+                  ? 'border-emerald-300 bg-emerald-50/60'
+                  : 'border-slate-200 bg-slate-100/80'
+              }`}
+            >
+              <UserCog
+                className={`w-4 h-4 shrink-0 ${
+                  resolvedAdminId ? 'text-emerald-600' : 'text-slate-400'
+                }`}
+              />
+              <input
+                type="text"
+                value={resolvedAdminId}
+                readOnly
+                disabled
+                tabIndex={-1}
+                placeholder="Muncul otomatis saat Username benar"
+                aria-label="ID Administrator"
+                className={`w-full text-sm font-mono font-bold bg-transparent focus:outline-none cursor-not-allowed select-none ${
+                  resolvedAdminId
+                    ? 'text-slate-900'
+                    : 'text-slate-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400'
+                }`}
+              />
+              {resolvedAdminId && (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              )}
             </div>
           </div>
 
@@ -192,20 +338,6 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
             </div>
           </div>
 
-          {/* Tenant */}
-          <div className="space-y-1.5">
-            <label className="block text-xs font-semibold text-slate-600">
-              Tenant :
-            </label>
-            <input
-              type="text"
-              value={tenant}
-              onChange={(e) => setTenant(e.target.value.toUpperCase())}
-              placeholder="Kode Tenant (misal: GLDTKASMA)"
-              className="w-full px-3.5 py-2 rounded-lg border border-slate-200 focus:border-[#0066ff] bg-slate-50/50 text-xs font-mono font-semibold text-slate-700 focus:outline-none"
-            />
-          </div>
-
           {/* Action Buttons */}
           <div className="pt-2 space-y-2.5">
             <button
@@ -234,28 +366,6 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
           </div>
         </form>
       </div>
-
-      <div className="mt-5 w-full max-w-[440px] bg-white/85 backdrop-blur-xs rounded-xl p-3.5 border border-slate-200/80 shadow-xs space-y-2.5">
-        <div className="text-center text-[11px] font-bold uppercase tracking-wider text-slate-500">
-          Akses Masuk Cepat (Langsung Masuk Dashboard)
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => onAdminLoginSuccess('K05060108-KB6K')}
-            className="py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-          >
-            ⚡ Masuk Cepat Administrator
-          </button>
-          <button
-            type="button"
-            onClick={handleFillDefaultAdmin}
-            className="py-2 px-3 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#0066ff] border border-blue-200 text-xs font-semibold transition-colors cursor-pointer"
-          >
-            Isi Kolom Otomatis
-          </button>
-        </div>
-      </div>
     </main>
   );
 };
@@ -267,8 +377,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'ap1',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801547',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20264821',
     password: 'SMADIP1547*',
     namaPeserta: 'ANDRIAN FAJARICO PRASETYA',
     kelompok: '1',
@@ -280,8 +390,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'ap2',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801556',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20267394',
     password: 'SMADIP1556*',
     namaPeserta: 'AHMAD RIZKI NOVANSYAH',
     kelompok: '1',
@@ -293,8 +403,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'ap3',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801565',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20262918',
     password: 'SMADIP1565*',
     namaPeserta: 'ARYA RESTU KUSUMA',
     kelompok: '1',
@@ -306,8 +416,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'ap4',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801574',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20268563',
     password: 'SMADIP1574*',
     namaPeserta: 'AUREL RIZKY ADI PRATAMA',
     kelompok: '1',
@@ -319,8 +429,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'ap5',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801583',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20265147',
     password: 'SMADIP1583*',
     namaPeserta: 'AHMAD DENY FIKRUDIN',
     kelompok: '1',
@@ -332,8 +442,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'ap6',
     selected: true,
     status: 'Non Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'TK0506010801592',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20269302',
     password: 'SMADIP1592*',
     namaPeserta: 'ALDISA FRANDIKA LIAN PRATAMA',
     kelompok: '1',
@@ -345,12 +455,12 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'p7',
     selected: false,
     status: 'Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'P130100240',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20266475',
     password: 'ANBKTKA26*',
     namaPeserta: 'NADIA PUTRI PRATAMA',
     kelompok: '1',
-    kelas: 'XII IPA',
+    kelas: 'XI IPA',
     loginState: 'Belum Login',
     requestReset: false,
   },
@@ -358,8 +468,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     id: 'p8',
     selected: false,
     status: 'Active',
-    kodeTes: 'GLDTKA25MAH2',
-    username: 'K020500118',
+    kodeTes: 'SAS26SMADIP1',
+    username: 'SA20261839',
     password: 'SAINSTKA*',
     namaPeserta: 'BAGAS ADITYA NUGRAHA',
     kelompok: '2',
@@ -783,11 +893,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   // Filter controls (1: Status, 2: Kode Tes, 3: Kelompok, 4: Apply)
   const [filterStatus, setFilterStatus] = useState<string>('Non Aktif');
-  const [filterKodeTes, setFilterKodeTes] = useState<string>('GLDTKA25MAH2');
+  const [filterKodeTes, setFilterKodeTes] = useState<string>('SAS26SMADIP1');
   const [filterKelompok, setFilterKelompok] = useState<string>('1');
 
   const [appliedStatus, setAppliedStatus] = useState<string>('Non Aktif');
-  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('GLDTKA25MAH2');
+  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('SAS26SMADIP1');
   const [appliedKelompok, setAppliedKelompok] = useState<string>('1');
 
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -798,6 +908,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [selectedPkgId, setSelectedPkgId] = useState(packages[0]?.id || '');
   const [statusTesKelas, setStatusTesKelas] = useState('Semua Kelas');
   const [statusTesTipeSoal, setStatusTesTipeSoal] = useState('Semua Tipe Soal');
+  const [showQuestionPreviewModal, setShowQuestionPreviewModal] = useState(false);
+  const [previewQuestionIdx, setPreviewQuestionIdx] = useState(0);
   const [customTokenInput, setCustomTokenInput] = useState(activeToken);
 
   useEffect(() => {
@@ -861,21 +973,19 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   );
   const isAnyScheduleActive = activeSchedules.length > 0;
 
-  // Auto-generated Username & Password for next participant in Daftar Peserta
+  // Auto-generated Username (SA2026 + Angka Acak) & Password for next participant in Daftar Peserta
   const nextAutoSequence = useMemo(() => {
-    let maxSeq = 1538;
-    participants.forEach((p) => {
-      const match = p.username.match(/(\d{4,})$/);
-      if (match) {
-        const val = parseInt(match[1], 10);
-        if (!isNaN(val) && val >= 1547 && val < 99999 && val > maxSeq) {
-          maxSeq = val;
-        }
-      }
-    });
-    return Math.max(1547 + participants.length * 9, maxSeq + 9);
+    const usedUsernames = new Set(
+      participants.map((p) => p.username.trim().toUpperCase())
+    );
+    let seed = (participants.length + 1) * 379 + 1423;
+    let candidate = 1000 + (seed % 9000);
+    while (usedUsernames.has(`SA2026${candidate}`)) {
+      candidate = 1000 + ((candidate + 437) % 9000);
+    }
+    return candidate;
   }, [participants]);
-  const autoGeneratedUsername = `TK050601080${nextAutoSequence}`;
+  const autoGeneratedUsername = `SA2026${nextAutoSequence}`;
   const autoGeneratedPassword = `SMADIP${nextAutoSequence}*`;
 
   // Auto-generated ID / Username Proktor & Kode Enkripsi in Daftar Proktor
@@ -902,9 +1012,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     {
       id: 'adm_1',
       adminId: 'K05060108-KB6K',
-      namaLengkap: 'ROMEO GALISTRA, S.Pd.',
+      namaLengkap: 'SHAHRUR ROBBY, S.Pd.',
       nip: '-',
-      email: 'romeo.galistra@smadiponegorowagir.sch.id',
+      email: 'shahrurrobby17@gmail.com',
       noHp: '0812-3456-7890',
       role: 'Penanggung Jawab / Super Admin',
       status: 'Aktif',
@@ -931,10 +1041,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     ruangDefault: 'LAB KOMPUTER',
     tingkatKelas: 'Semua Tingkat (Kelas X, XI, XII)',
     daftarKelas: 'X-1, X-2, XI-IPA, XI-IPS, XII-IPA, XII-IPS',
-    adminNama: 'ROMEO GALISTRA, S.Pd.',
+    adminNama: 'SHAHRUR ROBBY, S.Pd.',
     adminId: 'K05060108-KB6K',
     adminNip: '-',
-    adminEmail: 'admin.cbt@smadiponegorowagir.sch.id',
+    adminEmail: 'shahrurrobby17@gmail.com',
     adminNoHp: '0812-3456-7890',
     adminRole: 'Super Administrator CBT',
     adminList: defaultAdminList,
@@ -966,13 +1076,30 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           tingkat: getTargetClassFromMapel(m),
         }));
 
+        const migratedAdminNama =
+          !parsed.adminNama || parsed.adminNama === 'ROMEO GALISTRA, S.Pd.'
+            ? 'SHAHRUR ROBBY, S.Pd.'
+            : parsed.adminNama;
+
+        const migratedAdminList =
+          Array.isArray(parsed.adminList) && parsed.adminList.length > 0
+            ? parsed.adminList.map((adm: any) =>
+                adm.adminId === 'K05060108-KB6K' &&
+                adm.namaLengkap === 'ROMEO GALISTRA, S.Pd.'
+                  ? {
+                      ...adm,
+                      namaLengkap: 'SHAHRUR ROBBY, S.Pd.',
+                      email: 'shahrurrobby17@gmail.com',
+                    }
+                  : adm
+              )
+            : defaultAdminList;
+
         return {
           ...defaultAdminConfig,
           ...parsed,
-          adminList:
-            Array.isArray(parsed.adminList) && parsed.adminList.length > 0
-              ? parsed.adminList
-              : defaultAdminList,
+          adminNama: migratedAdminNama,
+          adminList: migratedAdminList,
           kelasList:
             Array.isArray(parsed.kelasList) && parsed.kelasList.length > 0
               ? parsed.kelasList
@@ -1342,10 +1469,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const handleResetAll = () => {
     setFilterStatus('Non Aktif');
-    setFilterKodeTes('GLDTKA25MAH2');
+    setFilterKodeTes('SAS26SMADIP1');
     setFilterKelompok('1');
     setAppliedStatus('Non Aktif');
-    setAppliedKodeTes('GLDTKA25MAH2');
+    setAppliedKodeTes('SAS26SMADIP1');
     setAppliedKelompok('1');
     setSearchQuery('');
     setParticipants(INITIAL_ADMIN_PARTICIPANTS);
@@ -1359,7 +1486,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       id: `ap_${Date.now()}`,
       selected: true,
       status: 'Non Active',
-      kodeTes: 'GLDTKA25MAH2',
+      kodeTes: 'SAS26SMADIP1',
       username: autoGeneratedUsername,
       password: autoGeneratedPassword,
       namaPeserta: newParticipantName.trim().toUpperCase(),
@@ -1539,31 +1666,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           ? []
           : participants.filter((p) => !initialDefaultIds.has(p.id));
 
-        // Hitung nomor urut username/password lanjutan agar tidak bentrok dengan kelas sebelumnya
-        let maxExistingSeq = 1538;
+        // Hasilkan angka acak unik untuk format username SA2026(ANGKA ACAK)
+        const usedUsernames = new Set<string>(
+          baseParticipants.map((p) => p.username.trim().toUpperCase())
+        );
         const existingKeys = new Set<string>();
         baseParticipants.forEach((p) => {
-          const match = p.username.match(/(\d{4,})$/);
-          if (match) {
-            const val = parseInt(match[1], 10);
-            if (
-              !isNaN(val) &&
-              val >= 1547 &&
-              val < 99999 &&
-              val > maxExistingSeq
-            ) {
-              maxExistingSeq = val;
-            }
-          }
           existingKeys.add(
             `${p.namaPeserta.trim().toUpperCase()}__${(p.kelas || '').trim().toUpperCase()}`
           );
         });
-
-        const startSeq = Math.max(
-          1547 + baseParticipants.length * 9,
-          maxExistingSeq + 9
-        );
 
         const nowTs = Date.now();
         const appendedParticipants: ProctorParticipantRow[] = [];
@@ -1575,14 +1687,20 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           }
           existingKeys.add(compositeKey);
 
-          const seq = startSeq + appendedParticipants.length * 9;
+          let randCode = Math.floor(1000 + Math.random() * 9000);
+          while (usedUsernames.has(`SA2026${randCode}`)) {
+            randCode = 1000 + ((randCode + 317) % 9000);
+          }
+          const newUsername = `SA2026${randCode}`;
+          usedUsernames.add(newUsername);
+
           appendedParticipants.push({
             id: `excel_${nowTs}_${idx}`,
             selected: true,
             status: 'Non Active',
-            kodeTes: 'GLDTKA25MAH2',
-            username: `TK050601080${seq}`,
-            password: `SMADIP${seq}*`,
+            kodeTes: 'SAS26SMADIP1',
+            username: newUsername,
+            password: `SMADIP${randCode}*`,
             namaPeserta: entry.namaPeserta,
             kelompok: '1',
             kelas: entry.kelas,
@@ -1661,15 +1779,25 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
     currentMapelList.forEach((mapel: any) => {
       const cleanKode = (mapel.kode || '').trim().toUpperCase();
-      const cleanNama = (mapel.nama || '').trim().toLowerCase();
+      const cleanNama = (mapel.nama || '')
+        .replace(/^Simulasi TKA\s*-\s*/i, '')
+        .trim()
+        .toLowerCase();
       const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
       const existing = packages.find((p) => {
+        if (processedPkgIds.has(p.id)) return false;
         if (p.id === newPkgId) return true;
         const pCode = (p.code || '').trim().toUpperCase();
-        const pTitle = (p.title || '').trim().toLowerCase();
+        const pTitle = (p.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
         return (
-          (cleanKode.length > 0 && pCode === cleanKode) ||
+          (cleanKode.length > 0 &&
+            (pCode === cleanKode ||
+              pCode.startsWith(cleanKode + '-') ||
+              cleanKode.startsWith(pCode + '-'))) ||
           (cleanNama.length > 0 && pTitle === cleanNama)
         );
       });
@@ -1678,6 +1806,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       if (existing && !processedPkgIds.has(existing.id)) {
         processedPkgIds.add(existing.id);
+        const cleanedQuestions = Array.isArray(existing.questions)
+          ? existing.questions.filter(
+              (q) => !String(q?.id || '').startsWith('q_default_')
+            )
+          : [];
         result.push({
           ...existing,
           code: mapel.kode || existing.code,
@@ -1685,6 +1818,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           durationMinutes: mapel.alokasiMenit || existing.durationMinutes,
           subtest: mapel.kategori || existing.subtest,
           targetClass: targetClass,
+          questions: cleanedQuestions,
         });
       } else if (!processedPkgIds.has(newPkgId)) {
         processedPkgIds.add(newPkgId);
@@ -1696,27 +1830,22 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           subtest: mapel.kategori || 'Wajib Umum',
           durationMinutes: mapel.alokasiMenit || 90,
           targetClass: targetClass,
-          questions: [
-            {
-              id: `q_default_${cleanKode}_1`,
-              number: 1,
-              type: 'pilihan_ganda',
-              category: mapel.kategori || 'Materi Utama',
-              stimulusTitle: `Soal Latihan ${mapel.nama}`,
-              stimulusText: `Berikut adalah contoh butir soal untuk mata pelajaran ${mapel.nama} (${mapel.kode}).`,
-              questionText: `Manakah pernyataan yang paling tepat terkait pokok bahasan ${mapel.nama}?`,
-              instructionText: 'Pilih satu jawaban yang benar!',
-              options: [
-                { id: 'A', text: 'Pilihan A merupakan konsep utama yang tepat.' },
-                { id: 'B', text: 'Pilihan B merupakan konsep pendukung.' },
-                { id: 'C', text: 'Pilihan C merupakan contoh penerapan.' },
-                { id: 'D', text: 'Pilihan D merupakan evaluasi teori.' },
-              ],
-              correctOptionId: 'A',
-              points: 25,
-              explanation: 'Penjelasan kunci jawaban contoh soal.',
-            },
-          ],
+          questions: [],
+        });
+      }
+    });
+
+    packages.forEach((pkg) => {
+      if (!processedPkgIds.has(pkg.id)) {
+        processedPkgIds.add(pkg.id);
+        const cleanedQuestions = Array.isArray(pkg.questions)
+          ? pkg.questions.filter(
+              (q) => !String(q?.id || '').startsWith('q_default_')
+            )
+          : [];
+        result.push({
+          ...pkg,
+          questions: cleanedQuestions,
         });
       }
     });
@@ -1724,8 +1853,19 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     return result;
   }, [appConfig.mapelList, packages]);
 
+  const visiblePackagesForKelas = useMemo(() => {
+    if (statusTesKelas === 'Semua Kelas') return displayPackages;
+    const filtered = displayPackages.filter(
+      (p) => getPkgClass(p) === statusTesKelas
+    );
+    return filtered.length > 0 ? filtered : displayPackages;
+  }, [displayPackages, statusTesKelas]);
+
   const selectedPackage =
-    displayPackages.find((p) => p.id === selectedPkgId) || displayPackages[0];
+    visiblePackagesForKelas.find((p) => p.id === selectedPkgId) ||
+    displayPackages.find((p) => p.id === selectedPkgId) ||
+    visiblePackagesForKelas[0] ||
+    displayPackages[0];
 
   const [lastUploadedWordFile, setLastUploadedWordFile] = useState<string>('');
 
@@ -1740,7 +1880,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       questions: renumbered,
     };
     const cleanSelectedKode = (selectedPackage.code || '').trim().toUpperCase();
-    const cleanSelectedNama = (selectedPackage.title || '').trim().toLowerCase();
+    const cleanSelectedNama = (selectedPackage.title || '')
+      .replace(/^Simulasi TKA\s*-\s*/i, '')
+      .trim()
+      .toLowerCase();
 
     onUpdatePackages((prevPackages) => {
       const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
@@ -1749,10 +1892,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       baseList.forEach((pkg) => {
         const pCode = (pkg.code || '').trim().toUpperCase();
-        const pTitle = (pkg.title || '').trim().toLowerCase();
+        const pTitle = (pkg.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
         const isMatch =
           pkg.id === selectedPackage.id ||
-          (cleanSelectedKode.length > 0 && pCode === cleanSelectedKode) ||
+          (cleanSelectedKode.length > 0 &&
+            (pCode === cleanSelectedKode ||
+              pCode.startsWith(cleanSelectedKode + '-') ||
+              cleanSelectedKode.startsWith(pCode + '-'))) ||
           (cleanSelectedNama.length > 0 && pTitle === cleanSelectedNama);
 
         if (isMatch) {
@@ -1775,9 +1924,29 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     });
   };
 
-  const handleDeleteQuestion = (qId: string) => {
+  const handleDeleteQuestion = (
+    qId: string,
+    qNumber?: number,
+    targetQuestion?: Question
+  ) => {
     if (!selectedPackage) return;
-    const filtered = selectedPackage.questions.filter((item) => item.id !== qId);
+    let deletedOne = false;
+    const filtered = selectedPackage.questions.filter((item) => {
+      if (deletedOne) return true;
+      if (targetQuestion && item === targetQuestion) {
+        deletedOne = true;
+        return false;
+      }
+      if (qId && item.id === qId) {
+        deletedOne = true;
+        return false;
+      }
+      if (qNumber !== undefined && item.number === qNumber) {
+        deletedOne = true;
+        return false;
+      }
+      return true;
+    });
     syncSelectedPackageQuestions(filtered);
     if (filtered.length === 0) {
       setLastUploadedWordFile('');
@@ -1909,9 +2078,63 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const wordQuestionInputRef = React.useRef<HTMLInputElement | null>(null);
 
+  const triggerUploadWordFile = () => {
+    // Pastikan browser tetap / kembali ke mode fullscreen saat jendela file eksplorer dibuka
+    try {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+        msFullscreenElement?: Element | null;
+      };
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+      };
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+        } else if (docEl.webkitRequestFullscreen) {
+          docEl.webkitRequestFullscreen();
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    if (wordQuestionInputRef.current) {
+      wordQuestionInputRef.current.value = '';
+      if (typeof wordQuestionInputRef.current.showPicker === 'function') {
+        try {
+          wordQuestionInputRef.current.showPicker();
+          return;
+        } catch {
+          // Fallback to click()
+        }
+      }
+      wordQuestionInputRef.current.click();
+    }
+  };
+
   const handleUploadWordQuestions = async (
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
+    // Pastikan fullscreen tetap aktif setelah pengguna memilih file dari file eksplorer
+    try {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+      };
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+        } else if (docEl.webkitRequestFullscreen) {
+          docEl.webkitRequestFullscreen();
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
     const file = e.target.files?.[0];
     if (!file || !selectedPackage) return;
 
@@ -1926,11 +2149,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         questions: importedQuestions,
         redDetectedCount,
         tableCount,
+        typeBreakdown,
       } = await parseWordQuestions(file, newQuestionType, startNum, defaultCat);
 
       if (importedQuestions.length === 0) {
         showNotice(
-          'Tidak ditemukan format soal dan pilihan jawaban (A, B, C, D, E) atau tabel soal yang valid pada file Word tersebut.'
+          'Tidak ditemukan butir soal yang valid pada file yang diunggah. Pastikan file berisi daftar pertanyaan atau tabel soal.'
         );
         return;
       }
@@ -1942,6 +2166,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       syncSelectedPackageQuestions(combinedQuestions);
       setLastUploadedWordFile(file.name);
+      setStatusTesTipeSoal('Semua Tipe Soal');
+
+      const detectedTypes = Object.keys(typeBreakdown) as QuestionType[];
+      if (detectedTypes.length === 1) {
+        setNewQuestionType(detectedTypes[0]);
+      }
+
       setNewQuestionText('');
       setOptA('');
       setOptB('');
@@ -1949,14 +2180,17 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       setOptD('');
       setOptE('');
 
+      const breakdownSummary = detectedTypes
+        .map((t) => `${typeBreakdown[t]} ${getQuestionTypeLabel(t)}`)
+        .join(', ');
       const tableInfo =
         tableCount > 0 ? `, termasuk ${tableCount} tabel soal` : '';
       showNotice(
-        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} butir soal ditambahkan (${redDetectedCount} kunci jawaban teks merah${tableInfo}). Kolom pertanyaan & jawaban manual tidak perlu diisi.`
+        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} soal dikenali otomatis (${breakdownSummary}; ${redDetectedCount} kunci jawaban${tableInfo}).`
       );
     } catch {
       showNotice(
-        'Gagal membaca file Word. Pastikan file berformat .docx atau .doc dan beri warna merah pada teks jawaban yang benar.'
+        'Gagal membaca file soal. Pastikan file berformat .docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, atau .json yang valid.'
       );
     } finally {
       if (wordQuestionInputRef.current) {
@@ -2172,19 +2406,43 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </div>
 
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-3 text-right">
-              <div className="leading-tight">
-                <div className="text-xs font-medium text-slate-500">
-                  Hi, {adminUsername || 'K05060108-KB6K'}
+            {(() => {
+              const cleanInput = (adminUsername || '').trim().toUpperCase();
+              const adminList = Array.isArray(appConfig?.adminList)
+                ? appConfig.adminList
+                : [];
+              const matchedAdmin = adminList.find(
+                (adm: any) =>
+                  String(adm?.adminId || '').trim().toUpperCase() === cleanInput ||
+                  String(adm?.username || '').trim().toUpperCase() === cleanInput ||
+                  String(adm?.namaLengkap || '').trim().toUpperCase() === cleanInput
+              );
+              const displayAdminName =
+                matchedAdmin?.namaLengkap ||
+                appConfig?.adminNama ||
+                'SHAHRUR ROBBY, S.Pd.';
+              const displayAdminId =
+                matchedAdmin?.adminId ||
+                appConfig?.adminId ||
+                adminUsername ||
+                'K05060108-KB6K';
+
+              return (
+                <div className="flex items-center gap-3 text-right">
+                  <div className="leading-tight">
+                    <div className="text-xs font-bold text-slate-800">
+                      {displayAdminName}
+                    </div>
+                    <div className="text-[11px] font-mono font-semibold text-slate-500">
+                      {displayAdminId}
+                    </div>
+                  </div>
+                  <div className="w-9 h-9 rounded-lg bg-[#0095ff] text-white font-bold text-sm flex items-center justify-center shadow-xs">
+                    {displayAdminName.charAt(0).toUpperCase()}
+                  </div>
                 </div>
-                <div className="text-xs font-bold text-slate-700">
-                  GLDTKASMA
-                </div>
-              </div>
-              <div className="w-9 h-9 rounded-lg bg-[#0095ff] text-white font-bold text-sm flex items-center justify-center shadow-xs">
-                {(adminUsername || 'K').charAt(0).toUpperCase()}
-              </div>
-            </div>
+              );
+            })()}
 
             <button
               type="button"
@@ -2264,7 +2522,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       onChange={(e) => setFilterKodeTes(e.target.value)}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
-                      <option value="GLDTKA25MAH2">GLDTKA25MAH2</option>
+                      <option value="SAS26SMADIP1">SAS26SMADIP1</option>
                       <option value="SEMUA">Semua Kode Tes</option>
                     </select>
                   </div>
@@ -2379,19 +2637,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             <ArrowUpDown className="w-3 h-3 text-slate-400" />
                           </div>
                         </th>
-                        <th className="py-3.5 px-4 text-center">
-                          <div className="inline-flex items-center justify-center gap-1.5">
-                            <span>Kelompok</span>
-                            <ArrowUpDown className="w-3 h-3 text-slate-400" />
-                          </div>
-                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-xs">
                       {filteredRows.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={6}
+                            colSpan={5}
                             className="py-10 text-center text-slate-400"
                           >
                             Tidak ada data peserta yang sesuai dengan filter. Klik tombol Reset atau ubah Status menjadi Semua Status.
@@ -2435,9 +2687,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             </td>
                             <td className="py-4 px-4 font-medium text-slate-700">
                               {row.namaPeserta}
-                            </td>
-                            <td className="py-4 px-4 text-center font-mono text-slate-600">
-                              {row.kelompok}
                             </td>
                           </tr>
                         ))
@@ -3792,22 +4041,22 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2.5 text-xs">
-                    {/* Input File Word Tersembunyi */}
+                    {/* Input File Soal Tersembunyi (Mendukung Semua Format & Semua Tipe Soal) */}
                     <input
                       ref={wordQuestionInputRef}
                       type="file"
-                      accept=".docx,.doc"
+                      accept=".docx,.doc,.xlsx,.xls,.csv,.txt,.rtf,.json,.html,.htm"
                       onChange={handleUploadWordQuestions}
                       className="hidden"
                     />
                     <button
                       type="button"
-                      onClick={() => wordQuestionInputRef.current?.click()}
+                      onClick={triggerUploadWordFile}
                       className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
-                      title="Upload file Word (.docx / .doc) dengan teks berwarna merah sebagai kunci jawaban yang benar"
+                      title="Upload file soal (.docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, .json) — otomatis mengenali semua jenis/tipe soal"
                     >
                       <Upload className="w-3.5 h-3.5" />
-                      Upload Word (Teks Merah = Jawaban Benar)
+                      Upload Word / File Soal (Otomatis Kenali Tipe Soal)
                     </button>
                     <button
                       type="button"
@@ -3821,20 +4070,36 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       Template Word
                     </button>
 
-                    {/* Dropdown Tipe Soal */}
-                    <div className="flex items-center gap-1.5">
-                      <label className="font-semibold text-slate-700 whitespace-nowrap">
-                        Tipe Soal:
-                      </label>
-                      <select
-                        value={newQuestionType}
-                        onChange={(e) => setNewQuestionType(e.target.value as QuestionType)}
-                        className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                    {/* Dropdown Tipe Soal + Tombol Pratinjau Soal di bawahnya */}
+                    <div className="flex flex-col items-start gap-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <label className="font-semibold text-slate-700 whitespace-nowrap">
+                          Tipe Soal:
+                        </label>
+                        <select
+                          value={newQuestionType}
+                          onChange={(e) => setNewQuestionType(e.target.value as QuestionType)}
+                          className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                        >
+                          <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
+                          <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
+                          <option value="benar_salah">Benar / Salah</option>
+                          <option value="menjodohkan">Menjodohkan</option>
+                          <option value="isian_singkat">Isian Singkat / Uraian</option>
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewQuestionIdx(0);
+                          setShowQuestionPreviewModal(true);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-[#001a6e] hover:bg-[#00124d] text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
+                        title="Lihat tampilan pratinjau soal seperti pada layar ujian siswa"
                       >
-                        <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
-                        <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
-                        <option value="benar_salah">Benar / Salah</option>
-                      </select>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Pratinjau Soal ({selectedPackage.questions.length})</span>
+                      </button>
                     </div>
 
                     <div className="flex items-center gap-1.5">
@@ -4155,21 +4420,46 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </select>
                     </div>
 
-                    {/* Dropdown Tipe Soal (PG, PG Kompleks, Benar/Salah) */}
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <label className="font-semibold text-slate-700 whitespace-nowrap">
-                        Tipe Soal:
-                      </label>
-                      <select
-                        value={statusTesTipeSoal}
-                        onChange={(e) => setStatusTesTipeSoal(e.target.value)}
-                        className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                    {/* Dropdown Tipe Soal (Semua Tipe Soal) + Tombol Pratinjau Soal di bawahnya */}
+                    <div className="flex flex-col items-start gap-1.5 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <label className="font-semibold text-slate-700 whitespace-nowrap">
+                          Tipe Soal:
+                        </label>
+                        <select
+                          value={statusTesTipeSoal}
+                          onChange={(e) => setStatusTesTipeSoal(e.target.value)}
+                          className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                        >
+                          <option value="Semua Tipe Soal">Semua Tipe Soal</option>
+                          <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
+                          <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
+                          <option value="benar_salah">Benar / Salah</option>
+                          <option value="menjodohkan">Menjodohkan</option>
+                          <option value="isian_singkat">Isian Singkat / Uraian</option>
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewQuestionIdx(0);
+                          setShowQuestionPreviewModal(true);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-[#001a6e] text-[#001a6e] hover:text-white border border-blue-200 hover:border-[#001a6e] text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors shadow-2xs"
+                        title="Pratinjau butir soal pada mata pelajaran ini"
                       >
-                        <option value="Semua Tipe Soal">Semua Tipe Soal</option>
-                        <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
-                        <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
-                        <option value="benar_salah">Benar / Salah</option>
-                      </select>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>
+                          Pratinjau Soal (
+                          {
+                            selectedPackage.questions.filter((q) => {
+                              if (statusTesTipeSoal === 'Semua Tipe Soal') return true;
+                              return q.type === statusTesTipeSoal;
+                            }).length
+                          }
+                          )
+                        </span>
+                      </button>
                     </div>
 
                     {selectedPackage.questions.length > 0 && (
@@ -4192,7 +4482,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     return q.type === statusTesTipeSoal;
                   }).length === 0 ? (
                     <div className="p-6 text-center text-xs text-slate-400 italic">
-                      Belum ada butir soal pada mata pelajaran ini. Silakan klik tombol <strong>Upload Word</strong> atau tambahkan soal baru di atas.
+                      Belum ada butir soal pada mata pelajaran ini. Silakan klik tombol <strong>Upload Word / File Soal</strong> atau tambahkan soal baru di atas.
                     </div>
                   ) : (
                     selectedPackage.questions
@@ -4222,6 +4512,21 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             {q.correctOptionIds && q.correctOptionIds.length > 0 && (
                               <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
                                 Kunci: {q.correctOptionIds.join(', ')}
+                              </span>
+                            )}
+                            {q.statements && q.statements.length > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
+                                Kunci B/S: {q.statements.map((s) => s.correctValue).join(', ')}
+                              </span>
+                            )}
+                            {q.premises && q.premises.length > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
+                                {q.premises.length} Pasangan Menjodohkan
+                              </span>
+                            )}
+                            {q.correctShortAnswers && q.correctShortAnswers.length > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px]">
+                                Kunci: {q.correctShortAnswers.join(' / ')}
                               </span>
                             )}
                           </div>
@@ -4255,7 +4560,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         </div>
                         <button
                           type="button"
-                          onClick={() => handleDeleteQuestion(q.id)}
+                          onClick={() => handleDeleteQuestion(q.id, q.number, q)}
                           title="Hapus soal ini"
                           className="p-1.5 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer shrink-0"
                         >
@@ -4272,64 +4577,199 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
           {/* 5. LAPORAN PENGOLAHAN */}
           {activeMenu === 'laporan_pengolahan' && (
-            <div className="bg-white rounded-xl p-6 shadow-xs border border-slate-100 space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-slate-800">
-                  Laporan Pengolahan Hasil Ujian Peserta
-                </h3>
-                {resultsHistory.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={onClearHistory}
-                    className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
-                  >
-                    Bersihkan Riwayat
-                  </button>
-                )}
+            <div className="space-y-6">
+              {/* Header Kop & Tombol Unduh Semua Kelas */}
+              <div className="bg-white rounded-xl p-6 shadow-xs border border-slate-200 space-y-4">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-4 border-b border-slate-100">
+                  <div>
+                    <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-md bg-blue-50 text-[#001a6e] border border-blue-200 mb-1.5">
+                      Dokumen Resmi PDF Setiap Kelas
+                    </span>
+                    <h3 className="text-base font-extrabold text-slate-900">
+                      LAPORAN NILAI HASIL UJIAN — SMA ISLAM DIPONEGORO WAGIR
+                    </h3>
+                    <p className="text-xs font-semibold text-slate-600 mt-0.5">
+                      TAHUN AJARAN 2026/2027 • SEMESTER 1
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        generateExamReportPDF(
+                          'ALL',
+                          resultsHistory,
+                          participants
+                        )
+                      }
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#001a6e] hover:bg-[#00124d] text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Unduh Laporan Semua Kelas (PDF)</span>
+                    </button>
+                    {resultsHistory.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={onClearHistory}
+                        className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-700 transition-colors cursor-pointer"
+                      >
+                        Bersihkan Riwayat
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Daftar Kartu Unduh Cepat Setiap Kelas */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  {STATUS_TES_CLASS_GROUPS.map((cls) => {
+                    const classResults = resultsHistory.filter((r) =>
+                      doesKelasMatch(
+                        resolveResultClass(r, participants),
+                        cls
+                      )
+                    );
+                    const classStudents = participants.filter((p) =>
+                      doesKelasMatch(p.kelas, cls)
+                    );
+                    return (
+                      <div
+                        key={cls}
+                        className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-3"
+                      >
+                        <div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-extrabold text-slate-900">
+                              Kelas {cls}
+                            </span>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">
+                              {classResults.length} Nilai
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-1">
+                            Terdaftar: {classStudents.length} Peserta
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            generateExamReportPDF(
+                              cls,
+                              resultsHistory,
+                              participants
+                            )
+                          }
+                          className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-[#0066ff] hover:bg-[#0052cc] text-white text-[11px] font-bold shadow-2xs transition-colors cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5 shrink-0" />
+                          <span>Unduh Laporan Hasil Ujian</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
-              {resultsHistory.length === 0 ? (
-                <div className="py-12 text-center rounded-xl bg-slate-50 border border-slate-100 text-xs text-slate-500">
-                  Belum ada hasil ujian peserta yang masuk.
-                </div>
-              ) : (
-                <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold">
-                        <th className="py-3 px-4">Username</th>
-                        <th className="py-3 px-4">Nama Peserta</th>
-                        <th className="py-3 px-4">Mata Ujian</th>
-                        <th className="py-3 px-4">Benar</th>
-                        <th className="py-3 px-4">Nilai Akhir</th>
-                        <th className="py-3 px-4">Waktu Selesai</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {resultsHistory.map((r) => (
-                        <tr key={r.id}>
-                          <td className="py-3 px-4 font-mono">
-                            {r.participant.username}
-                          </td>
-                          <td className="py-3 px-4 font-semibold text-slate-800">
-                            {r.participant.fullName}
-                          </td>
-                          <td className="py-3 px-4">{r.packageTitle}</td>
-                          <td className="py-3 px-4 font-mono">
-                            {r.correctCount} / {r.totalQuestions}
-                          </td>
-                          <td className="py-3 px-4 font-mono font-bold text-[#0095ff]">
-                            {r.finalScore}
-                          </td>
-                          <td className="py-3 px-4 text-slate-500">
-                            {r.completedAt}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {/* Tabel Laporan Nilai Hasil Ujian Per Kelas */}
+              {STATUS_TES_CLASS_GROUPS.map((cls) => {
+                const classResults = resultsHistory.filter((r) =>
+                  doesKelasMatch(resolveResultClass(r, participants), cls)
+                );
+                const classStudents = participants.filter((p) =>
+                  doesKelasMatch(p.kelas, cls)
+                );
+
+                return (
+                  <div
+                    key={cls}
+                    className="bg-white rounded-xl p-6 shadow-xs border border-slate-200 space-y-4"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-100">
+                      <div>
+                        <h4 className="text-sm font-extrabold text-slate-900">
+                          Laporan Pengolahan Nilai — Kelas {cls}
+                        </h4>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {classResults.length} hasil ujian selesai dari{' '}
+                          {classStudents.length} peserta terdaftar di Kelas{' '}
+                          {cls}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          generateExamReportPDF(
+                            cls,
+                            resultsHistory,
+                            participants
+                          )
+                        }
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#0066ff] hover:bg-[#0052cc] text-white text-xs font-bold shadow-xs transition-colors cursor-pointer shrink-0"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>
+                          Unduh Laporan Hasil Ujian Kelas {cls} (PDF)
+                        </span>
+                      </button>
+                    </div>
+
+                    {classResults.length === 0 ? (
+                      <div className="py-8 text-center rounded-xl bg-slate-50 border border-slate-100 text-xs text-slate-500">
+                        Belum ada peserta Kelas {cls} yang menyelesaikan ujian.
+                        Klik tombol{' '}
+                        <strong className="text-slate-700">
+                          Unduh Laporan Hasil Ujian Kelas {cls} (PDF)
+                        </strong>{' '}
+                        di atas untuk mengunduh rekap daftar peserta Kelas {cls}.
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold">
+                              <th className="py-3 px-4 w-12">No</th>
+                              <th className="py-3 px-4">Username</th>
+                              <th className="py-3 px-4">Nama Peserta</th>
+                              <th className="py-3 px-4">Kelas</th>
+                              <th className="py-3 px-4">Mata Ujian</th>
+                              <th className="py-3 px-4">Benar</th>
+                              <th className="py-3 px-4">Nilai Akhir</th>
+                              <th className="py-3 px-4">Waktu Selesai</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {classResults.map((r, idx) => (
+                              <tr key={r.id} className="hover:bg-slate-50/80">
+                                <td className="py-3 px-4 font-mono text-slate-500">
+                                  {idx + 1}
+                                </td>
+                                <td className="py-3 px-4 font-mono font-semibold text-slate-800">
+                                  {r.participant.username}
+                                </td>
+                                <td className="py-3 px-4 font-semibold text-slate-800">
+                                  {r.participant.fullName}
+                                </td>
+                                <td className="py-3 px-4 font-semibold text-slate-700">
+                                  Kelas {cls}
+                                </td>
+                                <td className="py-3 px-4">{r.packageTitle}</td>
+                                <td className="py-3 px-4 font-mono">
+                                  {r.correctCount} / {r.totalQuestions}
+                                </td>
+                                <td className="py-3 px-4 font-mono font-bold text-[#0066ff]">
+                                  {r.finalScore}
+                                </td>
+                                <td className="py-3 px-4 text-slate-500">
+                                  {r.completedAt}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -4508,7 +4948,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </label>
                       <input
                         type="text"
-                        value={appConfig.adminNama || 'ROMEO GALISTRA, S.Pd.'}
+                        value={appConfig.adminNama || 'SHAHRUR ROBBY, S.Pd.'}
                         onChange={(e) =>
                           setAppConfig({ ...appConfig, adminNama: e.target.value })
                         }
@@ -5588,6 +6028,469 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal Pratinjau Soal CBT */}
+      {showQuestionPreviewModal && selectedPackage && (
+        <QuestionPreviewModal
+          pkg={selectedPackage}
+          filterType={statusTesTipeSoal}
+          initialIndex={previewQuestionIdx}
+          onClose={() => setShowQuestionPreviewModal(false)}
+          onDeleteQuestion={(q) => handleDeleteQuestion(q.id, q.number, q)}
+        />
+      )}
+    </div>
+  );
+};
+
+export interface QuestionPreviewModalProps {
+  pkg: ExamPackage;
+  filterType: string;
+  initialIndex?: number;
+  onClose: () => void;
+  onDeleteQuestion?: (q: Question) => void;
+}
+
+export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
+  pkg,
+  filterType,
+  initialIndex = 0,
+  onClose,
+  onDeleteQuestion,
+}) => {
+  const filteredQuestions = useMemo(() => {
+    const byFilter = pkg.questions.filter((q) => {
+      if (!filterType || filterType === 'Semua Tipe Soal') return true;
+      return q.type === filterType;
+    });
+    return byFilter.length > 0 ? byFilter : pkg.questions;
+  }, [pkg.questions, filterType]);
+
+  const [currentIdx, setCurrentIdx] = useState(initialIndex);
+  const [showAnswerKey, setShowAnswerKey] = useState(true);
+
+  useEffect(() => {
+    if (currentIdx >= filteredQuestions.length) {
+      setCurrentIdx(Math.max(0, filteredQuestions.length - 1));
+    }
+  }, [filteredQuestions.length, currentIdx]);
+
+  const activeQuestion = filteredQuestions[currentIdx];
+  const cleanTitle = (pkg.title || '')
+    .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .replace(/\s*\(SMA\/MA\/SMK\)/i, '');
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-slate-900/65 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 animate-in fade-in duration-150"
+      role="dialog"
+      aria-modal="true"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="relative w-full max-w-4xl max-h-[90vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
+        {/* Top Header */}
+        <div className="bg-[#001a6e] text-white px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+              <Eye className="w-5 h-5 text-sky-300" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-extrabold tracking-wide">
+                  PRATINJAU SOAL UJIAN CBT — {cleanTitle.toUpperCase()}
+                </h3>
+                <span className="px-2 py-0.5 rounded bg-sky-500/25 border border-sky-300/30 text-[10px] font-bold text-sky-100">
+                  {getPkgClass(pkg)} • {pkg.code}
+                </span>
+              </div>
+              <p className="text-[11px] text-blue-100 mt-0.5">
+                Filter Tipe:{' '}
+                <strong>
+                  {filterType === 'Semua Tipe Soal'
+                    ? 'Semua Tipe Soal'
+                    : getQuestionTypeLabel(filterType as QuestionType)}
+                </strong>{' '}
+                • Total Ditampilkan: <strong>{filteredQuestions.length} Soal</strong>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowAnswerKey((prev) => !prev)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors border ${
+                showAnswerKey
+                  ? 'bg-emerald-500 text-white border-emerald-400'
+                  : 'bg-white/10 text-white border-white/20 hover:bg-white/20'
+              }`}
+            >
+              {showAnswerKey ? (
+                <Eye className="w-3.5 h-3.5" />
+              ) : (
+                <EyeOff className="w-3.5 h-3.5" />
+              )}
+              <span>{showAnswerKey ? 'Kunci Jawaban: Tampil' : 'Kunci Jawaban: Sembunyi'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3.5 py-1.5 rounded-lg bg-white/15 hover:bg-rose-600 text-white text-xs font-bold cursor-pointer transition-colors"
+            >
+              Tutup
+            </button>
+          </div>
+        </div>
+
+        {filteredQuestions.length === 0 ? (
+          <div className="p-10 text-center space-y-3">
+            <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+              <BookOpen className="w-6 h-6" />
+            </div>
+            <h4 className="text-sm font-bold text-slate-700">
+              Belum Ada Butir Soal untuk Dipratinjau
+            </h4>
+            <p className="text-xs text-slate-500 max-w-md mx-auto">
+              Mata pelajaran <strong>{cleanTitle}</strong> saat ini belum memiliki butir soal. Silakan klik tombol <strong>Upload Word / File Soal</strong> atau tambahkan soal manual terlebih dahulu.
+            </p>
+          </div>
+        ) : (
+          <>
+            {/* Nomor Soal Navigation Bar */}
+            <div className="bg-slate-50 px-5 py-3 border-b border-slate-200 flex items-center gap-1.5 overflow-x-auto shrink-0">
+              <span className="text-[11px] font-bold text-slate-500 mr-2 shrink-0">
+                Nomor Soal:
+              </span>
+              {filteredQuestions.map((q, idx) => {
+                const isActive = idx === currentIdx;
+                return (
+                  <button
+                    key={q.id || idx}
+                    type="button"
+                    onClick={() => setCurrentIdx(idx)}
+                    className={`w-7 h-7 rounded-lg text-xs font-bold shrink-0 cursor-pointer transition-all flex items-center justify-center border ${
+                      isActive
+                        ? 'bg-[#001a6e] text-white border-[#001a6e] shadow-xs scale-105'
+                        : 'bg-white text-slate-700 border-slate-300 hover:border-[#0095ff] hover:text-[#0095ff]'
+                    }`}
+                  >
+                    {q.number}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Active Question Content */}
+            {activeQuestion && (
+              <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-4 text-xs">
+                {/* Question Meta Header */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-2.5 py-1 rounded-md bg-[#001a6e] text-white font-extrabold text-xs">
+                      SOAL NO. {activeQuestion.number}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-md bg-blue-50 text-[#001a6e] border border-blue-200 font-bold">
+                      {getQuestionTypeLabel(activeQuestion.type)}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-600 font-semibold">
+                      {activeQuestion.category || 'Materi Ujian'}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-bold text-[11px]">
+                      Bobot: {activeQuestion.points || 10} Poin
+                    </span>
+                  </div>
+
+                  {onDeleteQuestion && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteQuestion(activeQuestion)}
+                      className="px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                      title="Hapus butir soal ini dari bank soal"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Hapus Soal Ini</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Stimulus Content */}
+                {(activeQuestion.stimulusTitle ||
+                  activeQuestion.stimulusText ||
+                  activeQuestion.stimulusTable) && (
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    {activeQuestion.stimulusTitle && (
+                      <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">
+                        {activeQuestion.stimulusTitle}
+                      </h4>
+                    )}
+                    {activeQuestion.stimulusText && (
+                      <p className="text-slate-700 leading-relaxed whitespace-pre-line">
+                        {activeQuestion.stimulusText}
+                      </p>
+                    )}
+                    {activeQuestion.stimulusTable && (
+                      <div className="overflow-x-auto border border-slate-200 rounded-lg bg-white">
+                        {activeQuestion.stimulusTable.title && (
+                          <div className="px-3 py-1.5 bg-slate-100 border-b border-slate-200 font-bold text-slate-700 text-[11px]">
+                            {activeQuestion.stimulusTable.title}
+                          </div>
+                        )}
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-700">
+                              {activeQuestion.stimulusTable.headers.map((h, hIdx) => (
+                                <th
+                                  key={hIdx}
+                                  className="py-2 px-3 font-bold border-r last:border-r-0 border-slate-200"
+                                >
+                                  {h}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {activeQuestion.stimulusTable.rows.map((r, rIdx) => (
+                              <tr key={rIdx} className="hover:bg-slate-50/70">
+                                {r.map((cell, cIdx) => (
+                                  <td
+                                    key={cIdx}
+                                    className="py-1.5 px-3 text-slate-700 border-r last:border-r-0 border-slate-100"
+                                  >
+                                    {cell}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {activeQuestion.stimulusHighlightBox && (
+                      <div className="p-2.5 rounded-lg bg-blue-50 border border-blue-200 text-[#001a6e] font-semibold text-[11px]">
+                        {activeQuestion.stimulusHighlightBox}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Question Text */}
+                <div className="space-y-1.5">
+                  <p className="text-sm font-semibold text-slate-900 leading-relaxed whitespace-pre-line">
+                    {activeQuestion.questionText}
+                  </p>
+                  {activeQuestion.instructionText && (
+                    <p className="text-[11px] italic text-slate-500">
+                      {activeQuestion.instructionText}
+                    </p>
+                  )}
+                </div>
+
+                {/* Options / Answer Area based on Question Type */}
+                {(activeQuestion.type === 'pilihan_ganda' ||
+                  activeQuestion.type === 'pilihan_ganda_kompleks') &&
+                  activeQuestion.options && (
+                    <div className="space-y-2 pt-1">
+                      {activeQuestion.options.map((opt) => {
+                        const isCorrect =
+                          activeQuestion.type === 'pilihan_ganda'
+                            ? activeQuestion.correctOptionId === opt.id
+                            : Boolean(
+                                activeQuestion.correctOptionIds?.includes(opt.id)
+                              );
+                        return (
+                          <div
+                            key={opt.id}
+                            className={`p-3 rounded-xl border flex items-start gap-3 transition-colors ${
+                              showAnswerKey && isCorrect
+                                ? 'bg-emerald-50 border-emerald-400 text-emerald-950'
+                                : 'bg-white border-slate-200 text-slate-800'
+                            }`}
+                          >
+                            <span
+                              className={`w-6 h-6 rounded-lg font-bold text-xs flex items-center justify-center shrink-0 border ${
+                                showAnswerKey && isCorrect
+                                  ? 'bg-emerald-600 text-white border-emerald-600'
+                                  : 'bg-slate-100 text-slate-700 border-slate-300'
+                              }`}
+                            >
+                              {opt.id}
+                            </span>
+                            <div className="flex-1 pt-0.5 leading-relaxed">
+                              {opt.text}
+                            </div>
+                            {showAnswerKey && isCorrect && (
+                              <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white font-bold text-[10px] shrink-0">
+                                Kunci Jawaban
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                {activeQuestion.type === 'benar_salah' &&
+                  activeQuestion.statements && (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-100 border-b border-slate-200 text-slate-700">
+                            <th className="py-2.5 px-3.5 font-bold">Pernyataan</th>
+                            <th className="py-2.5 px-3.5 font-bold text-center w-28">
+                              {activeQuestion.trueLabel || 'Benar'}
+                            </th>
+                            <th className="py-2.5 px-3.5 font-bold text-center w-28">
+                              {activeQuestion.falseLabel || 'Salah'}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200">
+                          {activeQuestion.statements.map((st) => (
+                            <tr key={st.id} className="bg-white">
+                              <td className="py-2.5 px-3.5 text-slate-800">
+                                {st.statement}
+                              </td>
+                              <td className="py-2.5 px-3.5 text-center">
+                                <span
+                                  className={`inline-flex px-2.5 py-1 rounded-md font-bold text-[11px] ${
+                                    showAnswerKey && st.correctValue === 'Benar'
+                                      ? 'bg-emerald-600 text-white'
+                                      : 'bg-slate-100 text-slate-400'
+                                  }`}
+                                >
+                                  {activeQuestion.trueLabel || 'Benar'}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3.5 text-center">
+                                <span
+                                  className={`inline-flex px-2.5 py-1 rounded-md font-bold text-[11px] ${
+                                    showAnswerKey && st.correctValue === 'Salah'
+                                      ? 'bg-rose-600 text-white'
+                                      : 'bg-slate-100 text-slate-400'
+                                  }`}
+                                >
+                                  {activeQuestion.falseLabel || 'Salah'}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                {activeQuestion.type === 'menjodohkan' &&
+                  activeQuestion.premises && (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-100 border-b border-slate-200 text-slate-700">
+                            <th className="py-2.5 px-3.5 font-bold">
+                              Premis / Pernyataan
+                            </th>
+                            <th className="py-2.5 px-3.5 font-bold">
+                              Pasangan Respon {showAnswerKey ? '(Kunci)' : ''}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200">
+                          {activeQuestion.premises.map((prem) => {
+                            const matchedRespId =
+                              activeQuestion.correctPairs?.[prem.id];
+                            const matchedResp = activeQuestion.responses?.find(
+                              (r) => r.id === matchedRespId
+                            );
+                            return (
+                              <tr key={prem.id} className="bg-white">
+                                <td className="py-2.5 px-3.5 font-medium text-slate-800">
+                                  {prem.text}
+                                </td>
+                                <td className="py-2.5 px-3.5">
+                                  {showAnswerKey ? (
+                                    <span className="inline-flex px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold">
+                                      {matchedResp?.text || matchedRespId || '-'}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400 italic">
+                                      Pilih pasangan respon...
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                {activeQuestion.type === 'isian_singkat' && (
+                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                    <div className="text-slate-600 font-semibold">
+                      Kolom Jawaban Siswa:
+                    </div>
+                    <input
+                      type="text"
+                      readOnly
+                      value={
+                        showAnswerKey && activeQuestion.correctShortAnswers?.length
+                          ? activeQuestion.correctShortAnswers.join(' / ')
+                          : ''
+                      }
+                      placeholder={
+                        activeQuestion.placeholder || 'Ketik jawaban singkat...'
+                      }
+                      className="w-full px-3 py-2 rounded-lg bg-white border border-slate-300 font-bold text-emerald-800"
+                    />
+                  </div>
+                )}
+
+                {showAnswerKey && activeQuestion.explanation && (
+                  <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 text-amber-950 space-y-1">
+                    <div className="font-bold text-[11px] uppercase tracking-wider text-amber-800">
+                      Keterangan / Pembahasan Kunci:
+                    </div>
+                    <p className="leading-relaxed">{activeQuestion.explanation}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Footer Navigation */}
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-3 shrink-0">
+              <button
+                type="button"
+                disabled={currentIdx <= 0}
+                onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}
+                className="px-3.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-xs font-bold text-slate-700 flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              >
+                <ChevronsLeft className="w-4 h-4" />
+                <span>Soal Sebelumnya</span>
+              </button>
+
+              <span className="text-xs font-bold text-slate-600">
+                Soal {currentIdx + 1} dari {filteredQuestions.length}
+              </span>
+
+              <button
+                type="button"
+                disabled={currentIdx >= filteredQuestions.length - 1}
+                onClick={() =>
+                  setCurrentIdx((i) =>
+                    Math.min(filteredQuestions.length - 1, i + 1)
+                  )
+                }
+                className="px-3.5 py-1.5 rounded-lg bg-[#001a6e] hover:bg-[#00124d] disabled:opacity-40 text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              >
+                <span>Soal Berikutnya</span>
+                <ChevronsRight className="w-4 h-4" />
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 };

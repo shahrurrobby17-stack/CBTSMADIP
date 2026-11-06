@@ -9,6 +9,7 @@ import { LoginView, ViolationAlertInfo } from './components/LoginView';
 import {
   ParticipantConfirmationView,
   TestConfirmationView,
+  resolvePackageForSchedule,
 } from './components/ConfirmationViews';
 import { ExamRunnerView } from './components/ExamRunnerView';
 import { ExamResultView } from './components/ExamResultView';
@@ -16,8 +17,11 @@ import { ProctorLoginView } from './components/ProctorLoginView';
 import {
   ProctorDashboardView,
   ProctorParticipantRow,
+  doesKelasMatch,
   isParticipantLockedByViolation,
+  normalizeKelasCode,
   sanitizeParticipantRows,
+  shortenStudentUsername,
 } from './components/ProctorDashboardView';
 import {
   AdminLoginView,
@@ -67,6 +71,8 @@ const STORAGE_KEYS = {
 
 export default function App() {
   const [stage, setStage] = useState<AppStage>('login');
+  const [isAuthSpinning, setIsAuthSpinning] = useState<boolean>(false);
+  const authSpinTimerRef = useRef<number | null>(null);
   const [proctorSession, setProctorSession] = useState<{
     name: string;
     encryptionCode: string;
@@ -75,6 +81,14 @@ export default function App() {
     encryptionCode: 'GLDTKASMA',
   });
   const [adminUsername, setAdminUsername] = useState<string>('ADMIN_SMADIP');
+
+  useEffect(() => {
+    return () => {
+      if (authSpinTimerRef.current) {
+        window.clearTimeout(authSpinTimerRef.current);
+      }
+    };
+  }, []);
 
   const [schedules, setSchedules] = useState<AdminScheduleItem[]>(() => {
     try {
@@ -121,12 +135,18 @@ export default function App() {
   const isScheduleActive = activeSchedules.length > 0;
 
   const filterOutSimulasiTka = useCallback((list: ExamPackage[]): ExamPackage[] => {
-    const cleaned = list.filter(
-      (pkg) =>
-        !pkg.title.toLowerCase().includes('simulasi tka') &&
-        !pkg.code.toUpperCase().startsWith('TKA-')
-    );
-    return cleaned.length > 0 ? cleaned : INITIAL_EXAM_PACKAGES;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((pkg) => pkg && typeof pkg === 'object')
+      .map((pkg) => ({
+        ...pkg,
+        title: String(pkg.title || '').replace(/^Simulasi TKA\s*-\s*/i, ''),
+        questions: Array.isArray(pkg.questions)
+          ? pkg.questions.filter(
+              (q) => !String(q?.id || '').startsWith('q_default_')
+            )
+          : [],
+      }));
   }, []);
 
   const [packages, setPackages] = useState<ExamPackage[]>(() => {
@@ -135,14 +155,17 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const cleaned = parsed.filter(
-            (pkg: ExamPackage) =>
-              pkg &&
-              typeof pkg.title === 'string' &&
-              !pkg.title.toLowerCase().includes('simulasi tka') &&
-              !String(pkg.code || '').toUpperCase().startsWith('TKA-')
-          );
-          if (cleaned.length > 0) return cleaned;
+          return parsed
+            .filter((pkg: ExamPackage) => pkg && typeof pkg === 'object')
+            .map((pkg: ExamPackage) => ({
+              ...pkg,
+              title: String(pkg.title || '').replace(/^Simulasi TKA\s*-\s*/i, ''),
+              questions: Array.isArray(pkg.questions)
+                ? pkg.questions.filter(
+                    (q) => !String(q?.id || '').startsWith('q_default_')
+                  )
+                : [],
+            }));
         }
       }
     } catch {
@@ -295,7 +318,7 @@ export default function App() {
   }, [generateRandomToken, handleUpdateToken, isScheduleActive, stage]);
 
   const [participant, setParticipant] = useState<ParticipantProfile>({
-    username: 'P130100240',
+    username: 'SA20266475',
     nik: '3273011805080002',
     fullName: 'NADIA PUTRI PRATAMA',
     schoolName: 'SMA ISLAM DIPONEGORO WAGIR',
@@ -385,8 +408,10 @@ export default function App() {
     ) => {
       lastLocalMutationAt.current = Date.now();
       setPackages((prev) => {
-        const nextPackages =
+        const rawNext =
           typeof updater === 'function' ? updater(prev) : updater;
+        const nextPackages = filterOutSimulasiTka(rawNext);
+        packagesRef.current = nextPackages;
         try {
           localStorage.setItem(
             STORAGE_KEYS.PACKAGES,
@@ -400,7 +425,15 @@ export default function App() {
           packages: nextPackages,
         })
           .then((res) => {
-            if (res.ok) markSyncedSuccess(res.engine);
+            if (res.ok) {
+              if (typeof res.updatedAt === 'number') {
+                latestUpdatedAtRef.current = Math.max(
+                  latestUpdatedAtRef.current,
+                  res.updatedAt
+                );
+              }
+              markSyncedSuccess(res.engine);
+            }
           })
           .finally(() => {
             pendingPushCount.current = Math.max(
@@ -411,7 +444,7 @@ export default function App() {
         return nextPackages;
       });
     },
-    [markSyncedSuccess]
+    [filterOutSimulasiTka, markSyncedSuccess]
   );
 
   const handleUpdateParticipants = useCallback(
@@ -768,15 +801,33 @@ export default function App() {
     schedules,
   ]);
 
-  const selectedPackage =
-    packages.find((p) => p.id === participant.selectedPackageId) ||
-    (activeSchedules.length > 0
-      ? packages.find(
+  const currentStudentKelas =
+    normalizeKelasCode(
+      participant.kelas ||
+        participants.find(
           (p) =>
-            p.title.trim().toLowerCase() ===
-            activeSchedules[0].mapel.trim().toLowerCase()
+            p.username.trim().toUpperCase() ===
+            participant.username.trim().toUpperCase()
+        )?.kelas
+    ) || 'X';
+
+  const currentStudentActiveSchedules = activeSchedules.filter((s) =>
+    doesKelasMatch(currentStudentKelas, s.kelas)
+  );
+
+  const matchedStudentSchedule =
+    (participant.activeSubjectTitle
+      ? currentStudentActiveSchedules.find(
+          (s) =>
+            s.mapel.trim().toLowerCase() ===
+            participant.activeSubjectTitle?.trim().toLowerCase()
         )
-      : undefined) ||
+      : undefined) || currentStudentActiveSchedules[0];
+
+  const selectedPackage =
+    (matchedStudentSchedule
+      ? resolvePackageForSchedule(matchedStudentSchedule, packages)
+      : packages.find((p) => p.id === participant.selectedPackageId)) ||
     packages[0];
 
   const [isFullscreenActive, setIsFullscreenActive] = useState<boolean>(false);
@@ -881,7 +932,7 @@ export default function App() {
                 id: `p_viol_${nowTs}`,
                 selected: false,
                 status: 'Active',
-                kodeTes: 'GLDTKA25MAH2',
+                kodeTes: 'SAS26SMADIP1',
                 username: participant.username.toUpperCase(),
                 namaPeserta: participant.fullName,
                 kelompok: '1',
@@ -1075,30 +1126,49 @@ export default function App() {
 
   const handleLoginSuccess = (username: string) => {
     const cleanUser = username.trim().toUpperCase();
+    const shortUser = shortenStudentUsername(cleanUser);
     const matchedRow = participants.find(
-      (p) => p.username.toUpperCase() === cleanUser
+      (p) =>
+        p.username.trim().toUpperCase() === cleanUser ||
+        shortenStudentUsername(p.username) === shortUser ||
+        p.namaPeserta.trim().toUpperCase() === cleanUser
     );
 
+    // Block login if username is not registered
+    if (!matchedRow) {
+      return;
+    }
+
+    // Block login if student status is Non Active in Kelompok Tes
+    if (matchedRow.status !== 'Active') {
+      return;
+    }
+
     // Block login if student is locked due to exit violation
-    if (matchedRow && isParticipantLockedByViolation(matchedRow)) {
+    if (isParticipantLockedByViolation(matchedRow)) {
       return;
     }
 
     requestCbtFullscreen();
 
-    const isSainsPreset = cleanUser.startsWith('K02');
+    const resolvedUsername = matchedRow.username.trim().toUpperCase();
+    const isSainsPreset = resolvedUsername.startsWith('K02');
     const resolvedFullName =
       matchedRow?.namaPeserta ||
-      (isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : 'NADIA PUTRI PRATAMA');
+      (isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : cleanUser);
+    const resolvedKelas =
+      normalizeKelasCode(matchedRow?.kelas) ||
+      (activeSchedules[0] ? normalizeKelasCode(activeSchedules[0].kelas) : 'X') ||
+      'X';
 
     // Update or register participant in shared Vercel Storage (without locking or marking exam running yet)
     handleUpdateParticipants((prev) => {
       const exists = prev.some(
-        (row) => row.username.toUpperCase() === cleanUser
+        (row) => row.username.trim().toUpperCase() === resolvedUsername
       );
       if (exists) {
         return prev.map((row) =>
-          row.username.toUpperCase() === cleanUser
+          row.username.trim().toUpperCase() === resolvedUsername
             ? {
                 ...row,
                 requestReset: false,
@@ -1115,11 +1185,11 @@ export default function App() {
           id: `p_${Date.now()}`,
           selected: false,
           status: 'Active',
-          kodeTes: 'GLDTKA25MAH2',
-          username: cleanUser,
+          kodeTes: 'SAS26SMADIP1',
+          username: resolvedUsername,
           namaPeserta: resolvedFullName,
           kelompok: '1',
-          kelas: 'XII IPA',
+          kelas: resolvedKelas,
           loginState: 'Belum Login',
           requestReset: false,
         },
@@ -1127,21 +1197,22 @@ export default function App() {
       ];
     });
 
+    const studentClassSchedules = activeSchedules.filter((s) =>
+      doesKelasMatch(resolvedKelas, s.kelas)
+    );
     const scheduledPkg =
-      activeSchedules.length > 0
-        ? packages.find(
-            (p) =>
-              p.title.trim().toLowerCase() ===
-              activeSchedules[0].mapel.trim().toLowerCase()
-          )
+      studentClassSchedules.length > 0
+        ? resolvePackageForSchedule(studentClassSchedules[0], packages)
         : undefined;
 
     setLastViolationInfo(null);
     setParticipant((prev) => ({
       ...prev,
-      username: cleanUser,
+      username: resolvedUsername,
       nik: isSainsPreset ? '3174052209080004' : '3273011805080002',
       fullName: resolvedFullName,
+      kelas: resolvedKelas,
+      activeSubjectTitle: studentClassSchedules[0]?.mapel,
       gender: isSainsPreset ? 'Laki-Laki' : 'Perempuan',
       selectedPackageId:
         scheduledPkg?.id ||
@@ -1361,12 +1432,20 @@ export default function App() {
           onLoginSuccess={handleLoginSuccess}
           onOpenProctorModal={() => setStage('proctor_login')}
           participants={participants}
+          activeSchedules={activeSchedules}
           lastViolationInfo={lastViolationInfo}
           onRequestResetLogin={handleRequestResetFromLogin}
           onQuickLoginAdmin={() => {
             requestCbtFullscreen();
             setAdminUsername('K05060108-KB6K');
-            setStage('admin_dashboard');
+            if (authSpinTimerRef.current) {
+              window.clearTimeout(authSpinTimerRef.current);
+            }
+            setIsAuthSpinning(true);
+            authSpinTimerRef.current = window.setTimeout(() => {
+              setIsAuthSpinning(false);
+              setStage('admin_dashboard');
+            }, 5000);
           }}
           onQuickLoginProctor={() => {
             requestCbtFullscreen();
@@ -1374,7 +1453,14 @@ export default function App() {
               name: 'K05060108-KB6K',
               encryptionCode: 'GLDTKASMA',
             });
-            setStage('proctor_dashboard');
+            if (authSpinTimerRef.current) {
+              window.clearTimeout(authSpinTimerRef.current);
+            }
+            setIsAuthSpinning(true);
+            authSpinTimerRef.current = window.setTimeout(() => {
+              setIsAuthSpinning(false);
+              setStage('proctor_dashboard');
+            }, 5000);
           }}
         />
       )}
@@ -1385,7 +1471,14 @@ export default function App() {
           onProctorLoginSuccess={(proctorName, encryptionCode) => {
             requestCbtFullscreen();
             setProctorSession({ name: proctorName, encryptionCode });
-            setStage('proctor_dashboard');
+            if (authSpinTimerRef.current) {
+              window.clearTimeout(authSpinTimerRef.current);
+            }
+            setIsAuthSpinning(true);
+            authSpinTimerRef.current = window.setTimeout(() => {
+              setIsAuthSpinning(false);
+              setStage('proctor_dashboard');
+            }, 5000);
           }}
           onBackToStudentLogin={() => setStage('login')}
           onGoToAdminLogin={() => setStage('admin_login')}
@@ -1398,11 +1491,31 @@ export default function App() {
           onAdminLoginSuccess={(adminUser) => {
             requestCbtFullscreen();
             setAdminUsername(adminUser);
-            setStage('admin_dashboard');
+            if (authSpinTimerRef.current) {
+              window.clearTimeout(authSpinTimerRef.current);
+            }
+            setIsAuthSpinning(true);
+            authSpinTimerRef.current = window.setTimeout(() => {
+              setIsAuthSpinning(false);
+              setStage('admin_dashboard');
+            }, 5000);
           }}
           onBackToStudentLogin={() => setStage('login')}
           onGoToProctorLogin={() => setStage('proctor_login')}
         />
+      )}
+
+      {/* Overlay Animasi Berputar 5 Detik (Background Blur, Tanpa Tulisan Apapun) */}
+      {isAuthSpinning && (
+        <div
+          className="fixed inset-0 z-[9999] bg-slate-900/35 backdrop-blur-md flex items-center justify-center"
+          aria-hidden="true"
+        >
+          <div className="relative w-16 h-16 flex items-center justify-center">
+            <div className="absolute inset-0 rounded-full border-4 border-white/25" />
+            <div className="w-16 h-16 rounded-full border-4 border-transparent border-t-[#0088ff] border-r-[#0088ff] animate-spin" />
+          </div>
+        </div>
       )}
 
       {/* Stage 2: Konfirmasi Data Peserta & Token */}
@@ -1410,6 +1523,7 @@ export default function App() {
         <ParticipantConfirmationView
           initialProfile={participant}
           packages={packages}
+          participants={participants}
           activeToken={activeToken}
           isScheduleActive={isScheduleActive}
           activeSchedules={activeSchedules}

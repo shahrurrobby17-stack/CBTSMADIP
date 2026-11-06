@@ -50,3 +50,17 @@
   font-variant-numeric: tabular-nums;
 }
 
+@keyframes cbtSlideUp {
+  0% {
+    opacity: 0;
+    transform: translateY(44px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-cbt-slide-up {
+  animation: cbtSlideUp 0.65s cubic-bezier(0.16, 1, 0.3, 1) both;
+}

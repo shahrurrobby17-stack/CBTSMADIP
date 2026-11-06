@@ -100,6 +100,12 @@ export function generateParticipantCardsPDF(
     format: 'a4',
   });
 
+  const printedDate = new Date().toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+
   // Layout: 4 cards per A4 page (2 columns x 2 rows)
   const cardsPerPage = 4;
   const colWidth = 92;
@@ -159,8 +165,8 @@ export function generateParticipantCardsPDF(
     const labelX = cardX + 4;
     const colonX = cardX + 32;
     const valX = cardX + 34.5;
-    let currY = cardY + 32;
-    const lineStep = 7.2;
+    let currY = cardY + 31;
+    const lineStep = 6.8;
 
     const displayPassword = p.password || `SMADIP${1547 + (index % 50) * 9}*`;
     const displayKelas = p.kelas || (index % 2 === 0 ? 'X' : 'XI IPA');
@@ -172,8 +178,9 @@ export function generateParticipantCardsPDF(
       ['Kata Sandi', displayPassword, true],
       ['Kelas / Rombel', displayKelas, false],
       ['Ruang Ujian', displayRuang, false],
-      ['Kode Ujian', p.kodeTes || 'GLDTKA25MAH2', false],
+      ['Kode Ujian', p.kodeTes || 'SAS26SMADIP1', false],
       ['Sekolah Asal', schoolName, false],
+      ['Tgl. Cetak Kartu', printedDate, false],
     ];
 
     dataRows.forEach(([lbl, val, isBold]) => {
@@ -195,14 +202,14 @@ export function generateParticipantCardsPDF(
     });
 
     // Bottom section: Signature Box on right (tanpa tempat foto)
-    const bottomY = cardY + colHeight - 32;
+    const bottomY = cardY + colHeight - 31;
 
-    // Signature Area on right
+    // Signature Area on right (otomatis mengikuti tanggal saat kartu diunduh)
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7);
     doc.setTextColor(0, 0, 0);
     const sigX = cardX + colWidth - 28;
-    doc.text('Wagir, 07 Desember 2026', sigX, bottomY + 3, { align: 'center' });
+    doc.text(`Wagir, ${printedDate}`, sigX, bottomY + 3, { align: 'center' });
     doc.text('Kepala Sekolah,', sigX, bottomY + 7.5, { align: 'center' });
 
     // Signature line

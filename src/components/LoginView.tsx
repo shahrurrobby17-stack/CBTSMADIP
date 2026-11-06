@@ -1,16 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   AlertTriangle,
   Eye,
   EyeOff,
-  ShieldCheck,
-  UserCog,
-  Zap,
 } from 'lucide-react';
 import {
   ProctorParticipantRow,
   isParticipantLockedByViolation,
+  shortenStudentUsername,
 } from './ProctorDashboardView';
+import { AdminScheduleItem } from '../types/cbt';
 
 export interface ViolationAlertInfo {
   username: string;
@@ -25,34 +24,27 @@ interface LoginViewProps {
   onQuickLoginAdmin?: () => void;
   onQuickLoginProctor?: () => void;
   participants?: ProctorParticipantRow[];
+  activeSchedules?: AdminScheduleItem[];
   lastViolationInfo?: ViolationAlertInfo | null;
   onRequestResetLogin?: (username: string) => void;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({
   onLoginSuccess,
-  onQuickLoginAdmin,
-  onQuickLoginProctor,
   participants = [],
-  lastViolationInfo,
-  onRequestResetLogin,
 }) => {
-  const [username, setUsername] = useState(
-    lastViolationInfo?.username || 'P130100240'
-  );
-  const [password, setPassword] = useState('ANBKTKA26*');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  useEffect(() => {
-    if (lastViolationInfo?.username) {
-      setUsername(lastViolationInfo.username);
-    }
-  }, [lastViolationInfo]);
-
   const cleanUpperUsername = username.trim().toUpperCase();
+  const shortUpperUsername = shortenStudentUsername(cleanUpperUsername);
   const matchedParticipant = participants.find(
-    (p) => p.username.toUpperCase() === cleanUpperUsername
+    (p) =>
+      p.username.trim().toUpperCase() === cleanUpperUsername ||
+      shortenStudentUsername(p.username) === shortUpperUsername ||
+      p.namaPeserta.trim().toUpperCase() === cleanUpperUsername
   );
 
   const isLockedByViolation = Boolean(
@@ -62,6 +54,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanUser = username.trim().toUpperCase();
+    const shortUser = shortenStudentUsername(cleanUser);
     const cleanPass = password.trim();
     if (!cleanUser || !cleanPass) {
       setErrorMsg('Username dan password wajib diisi.');
@@ -69,11 +62,24 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
 
     const row = participants.find(
-      (p) => p.username.toUpperCase() === cleanUser
+      (p) =>
+        p.username.trim().toUpperCase() === cleanUser ||
+        shortenStudentUsername(p.username) === shortUser ||
+        p.namaPeserta.trim().toUpperCase() === cleanUser
     );
-    if (row && isParticipantLockedByViolation(row)) {
+    if (!row) {
+      setErrorMsg('Username anda tidak terdaftar');
+      return;
+    }
+    if (isParticipantLockedByViolation(row)) {
       setErrorMsg(
         'Akses Login Ditolak: Akun Anda terkunci karena pelanggaran keluar dari sistem CBT. Anda wajib meminta Reset Login kepada Proktor atau Administrator.'
+      );
+      return;
+    }
+    if (row.status !== 'Active') {
+      setErrorMsg(
+        'Akses Login Ditolak: Status peserta Anda masih Non Active pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator untuk mengaktifkan status peserta.'
       );
       return;
     }
@@ -99,13 +105,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
 
     setErrorMsg('');
-    onLoginSuccess(cleanUser);
+    onLoginSuccess(row.username.trim().toUpperCase());
   };
 
   return (
     <main className="flex-1 flex flex-col items-center justify-center px-4 py-10 min-h-[calc(100vh-10rem)]">
       {/* Main Login Card matching Pusmendik Simulasi TKA screenshot */}
-      <div className="w-full max-w-[425px] bg-white rounded-[14px] px-9 sm:px-11 py-10 sm:py-11 shadow-[0_24px_60px_-12px_rgba(15,23,42,0.16)] border border-slate-100/80">
+      <div className="w-full max-w-[425px] bg-white rounded-[14px] px-9 sm:px-11 py-10 sm:py-11 shadow-[0_24px_60px_-12px_rgba(15,23,42,0.16)] border border-slate-100/80 animate-cbt-slide-up">
         <h1 className="text-[18px] font-bold text-[#1e293b] tracking-tight">
           Selamat Datang
         </h1>
@@ -173,7 +179,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 }}
                 placeholder="Username"
                 aria-label="Username"
-                autoComplete="username"
+                autoComplete="off"
                 className="w-full pb-2 pt-1 text-[14px] text-slate-800 placeholder:text-slate-400 bg-transparent border-b border-slate-200 focus:border-[#0066ff] focus:outline-none transition-colors"
               />
             </div>
@@ -195,10 +201,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <input
                 type={showPassword ? 'text' : 'password'}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  setErrorMsg('');
+                }}
                 placeholder="Password"
                 aria-label="Password"
-                autoComplete="current-password"
+                autoComplete="new-password"
                 className="w-full pb-2 pt-1 pr-8 text-[14px] text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-none"
               />
               <button
@@ -232,36 +241,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </button>
           </div>
         </form>
-      </div>
-
-      {/* Tombol Akses Masuk Cepat Administrator & Proktor (Hanya Desktop/Tablet) */}
-      <div className="hidden md:block mt-5 w-full max-w-[425px] bg-white/85 backdrop-blur-xs rounded-xl p-3.5 border border-slate-200/80 shadow-xs space-y-2.5">
-        <div className="flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-          <Zap className="w-3.5 h-3.5 text-amber-500" />
-          <span>Akses Masuk Cepat (1-Klik Tanpa Ketik)</span>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {onQuickLoginAdmin && (
-            <button
-              type="button"
-              onClick={onQuickLoginAdmin}
-              className="inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-            >
-              <UserCog className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-              <span>Masuk Administrator</span>
-            </button>
-          )}
-          {onQuickLoginProctor && (
-            <button
-              type="button"
-              onClick={onQuickLoginProctor}
-              className="inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-[#0066ff] hover:bg-[#0052cc] text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-sky-200 shrink-0" />
-              <span>Masuk Proktor</span>
-            </button>
-          )}
-        </div>
       </div>
 
       {/* Copyright Footer */}
