@@ -65,6 +65,49 @@ export interface ProctorParticipantRow {
   requestReset?: boolean;
   violationReason?: string;
   violationAt?: string;
+  violationSchema?: number;
+  violationTimestamp?: number;
+  lastResetAt?: number;
+}
+
+export function isParticipantLockedByViolation(
+  p: ProctorParticipantRow
+): boolean {
+  const vTs = typeof p.violationTimestamp === 'number' ? p.violationTimestamp : 0;
+  const resetTs = typeof p.lastResetAt === 'number' ? p.lastResetAt : 0;
+  return (
+    p.violationSchema === 3 &&
+    vTs > 0 &&
+    vTs > resetTs &&
+    Boolean(p.requestReset || p.loginState === 'Terkunci (Pelanggaran)')
+  );
+}
+
+export function sanitizeParticipantRows(
+  rows: ProctorParticipantRow[]
+): ProctorParticipantRow[] {
+  if (!Array.isArray(rows)) return [];
+  let changed = false;
+  const next = rows.map((row) => {
+    const validLock = isParticipantLockedByViolation(row);
+    if (!validLock && (row.requestReset || row.loginState === 'Terkunci (Pelanggaran)')) {
+      changed = true;
+      return {
+        ...row,
+        loginState:
+          row.loginState === 'Terkunci (Pelanggaran)'
+            ? ('Belum Login' as const)
+            : row.loginState,
+        requestReset: false,
+        violationReason: undefined,
+        violationAt: undefined,
+        violationSchema: undefined,
+        violationTimestamp: undefined,
+      };
+    }
+    return row;
+  });
+  return changed ? next : rows;
 }
 
 const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
@@ -77,6 +120,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     namaPeserta: 'ANDRIAN FAJARICO PRASETYA',
     kelompok: '1',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p2',
@@ -87,6 +131,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     namaPeserta: 'AHMAD RIZKI NOVANSYAH',
     kelompok: '1',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p3',
@@ -96,8 +141,8 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     username: 'TK0506010801565',
     namaPeserta: 'ARYA RESTU KUSUMA',
     kelompok: '1',
-    loginState: 'Sedang Mengerjakan',
-    requestReset: true,
+    loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p4',
@@ -108,6 +153,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     namaPeserta: 'AUREL RIZKY ADI PRATAMA',
     kelompok: '1',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p5',
@@ -118,6 +164,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     namaPeserta: 'AHMAD DENY FIKRUDIN',
     kelompok: '1',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p6',
@@ -128,6 +175,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     namaPeserta: 'ALDISA FRANDIKA LIAN PRATAMA',
     kelompok: '1',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p7',
@@ -137,7 +185,8 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     username: 'P130100240',
     namaPeserta: 'NADIA PUTRI PRATAMA',
     kelompok: '1',
-    loginState: 'Sedang Mengerjakan',
+    loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p8',
@@ -147,7 +196,8 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     username: 'K020500118',
     namaPeserta: 'BAGAS ADITYA NUGRAHA',
     kelompok: '2',
-    loginState: 'Selesai',
+    loginState: 'Belum Login',
+    requestReset: false,
   },
 ];
 
@@ -207,7 +257,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   const [localParticipants, setLocalParticipants] = useState<
     ProctorParticipantRow[]
   >(INITIAL_PARTICIPANT_ROWS);
-  const participants = externalParticipants ?? localParticipants;
+  const rawParticipants = externalParticipants ?? localParticipants;
+  const participants = useMemo(
+    () => sanitizeParticipantRows(rawParticipants),
+    [rawParticipants]
+  );
   const setParticipants = onUpdateParticipants ?? setLocalParticipants;
 
   // Filter states for Kelompok Tes (matching 1, 2, 3, 4 in screenshot)
@@ -372,6 +426,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const handleResetParticipantLogin = (id: string, name: string, username?: string) => {
     const cleanUser = (username || '').trim().toUpperCase();
+    const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
         r.id === id || (cleanUser && r.username.trim().toUpperCase() === cleanUser)
@@ -381,11 +436,32 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
               requestReset: false,
               violationReason: undefined,
               violationAt: undefined,
+              violationSchema: undefined,
+              violationTimestamp: undefined,
+              lastResetAt: nowTs,
             }
           : r
       )
     );
     showNotice(`Sesi login peserta ${name} berhasil di-reset. Siswa kini dapat login kembali.`);
+  };
+
+  const handleResetAllLockedParticipants = () => {
+    const nowTs = Date.now();
+    setParticipants((prev) =>
+      prev.map((r) => ({
+        ...r,
+        loginState:
+          r.loginState === 'Terkunci (Pelanggaran)' ? 'Belum Login' : r.loginState,
+        requestReset: false,
+        violationReason: undefined,
+        violationAt: undefined,
+        violationSchema: undefined,
+        violationTimestamp: undefined,
+        lastResetAt: nowTs,
+      }))
+    );
+    showNotice('Seluruh permintaan Reset Login peserta telah dibersihkan.');
   };
 
   const displayPackages = useMemo(() => {
@@ -788,11 +864,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
             const isActive = activeMenu === item.id;
             const resetCount =
               item.id === 'request_reset'
-                ? participants.filter(
-                    (p) =>
-                      p.requestReset ||
-                      p.loginState === 'Terkunci (Pelanggaran)'
-                  ).length
+                ? participants.filter((p) => isParticipantLockedByViolation(p))
+                    .length
                 : 0;
             return (
               <button
@@ -1953,10 +2026,35 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
               <div className="bg-white rounded-xl shadow-xs border border-slate-100 overflow-hidden">
                 <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <h3 className="text-sm font-bold text-slate-800">
-                    {currentMenuMeta.label} — Ruang Server SMA Islam Diponegoro Wagir
-                  </h3>
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <h3 className="text-sm font-bold text-slate-800">
+                      {currentMenuMeta.label} — Ruang Server SMA Islam Diponegoro Wagir
+                    </h3>
+                    {activeMenu === 'request_reset' && (
+                      <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-xs font-bold">
+                        {
+                          participants.filter((p) =>
+                            isParticipantLockedByViolation(p)
+                          ).length
+                        }{' '}
+                        Permintaan Reset
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    {activeMenu === 'request_reset' &&
+                      participants.some((p) =>
+                        isParticipantLockedByViolation(p)
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={handleResetAllLockedParticipants}
+                          className="px-3.5 py-1.5 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Reset Semua Pelanggaran</span>
+                        </button>
+                      )}
                     <button
                       type="button"
                       onClick={() => setActiveMenu('kelompok_tes')}
@@ -1979,14 +2077,29 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {participants
-                        .filter((p) =>
+                      {(() => {
+                        const visibleParticipants = participants.filter((p) =>
                           activeMenu === 'request_reset'
-                            ? p.requestReset ||
-                              p.loginState === 'Terkunci (Pelanggaran)'
+                            ? isParticipantLockedByViolation(p)
                             : true
-                        )
-                        .map((p) => (
+                        );
+
+                        if (visibleParticipants.length === 0) {
+                          return (
+                            <tr>
+                              <td
+                                colSpan={6}
+                                className="py-10 px-5 text-center text-slate-500"
+                              >
+                                {activeMenu === 'request_reset'
+                                  ? 'Tidak ada pelanggaran atau permintaan Reset Login saat ini. Seluruh sesi peserta berjalan normal.'
+                                  : 'Belum ada data peserta.'}
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return visibleParticipants.map((p) => (
                           <tr key={p.id} className="hover:bg-slate-50">
                             <td className="py-3.5 px-5 font-mono">{p.username}</td>
                             <td className="py-3.5 px-4 font-semibold text-slate-800">
@@ -2007,8 +2120,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                               )}
                             </td>
                             <td className="py-3.5 px-4 font-medium text-slate-700">
-                              {p.loginState === 'Terkunci (Pelanggaran)' ||
-                              p.requestReset ? (
+                              {isParticipantLockedByViolation(p) ? (
                                 <div className="space-y-1">
                                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-bold text-[11px]">
                                     Terkunci (Pelanggaran Keluar CBT)
@@ -2040,7 +2152,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                               </button>
                             </td>
                           </tr>
-                        ))}
+                        ));
+                      })()}
                     </tbody>
                   </table>
                 </div>

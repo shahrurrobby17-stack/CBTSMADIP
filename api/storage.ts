@@ -108,6 +108,53 @@ function writeToFileAndMemory(payload: Record<string, unknown>): void {
   }
 }
 
+function sanitizeParticipantsList(rawList: unknown, existingList?: unknown): unknown {
+  if (!Array.isArray(rawList)) return rawList;
+  const existingMap = new Map<string, Record<string, any>>();
+  if (Array.isArray(existingList)) {
+    for (const item of existingList) {
+      if (item && typeof item === 'object' && typeof (item as any).username === 'string') {
+        existingMap.set((item as any).username.trim().toUpperCase(), item as Record<string, any>);
+      }
+    }
+  }
+
+  return rawList.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const row = { ...(item as Record<string, any>) };
+    const cleanUser = typeof row.username === 'string' ? row.username.trim().toUpperCase() : '';
+    const prevRow = cleanUser ? existingMap.get(cleanUser) : undefined;
+
+    const maxResetAt = Math.max(
+      typeof row.lastResetAt === 'number' ? row.lastResetAt : 0,
+      typeof prevRow?.lastResetAt === 'number' ? prevRow.lastResetAt : 0
+    );
+    if (maxResetAt > 0) {
+      row.lastResetAt = maxResetAt;
+    }
+
+    const vTimestamp = typeof row.violationTimestamp === 'number' ? row.violationTimestamp : 0;
+    const isValidViolation =
+      row.violationSchema === 3 &&
+      vTimestamp > 0 &&
+      vTimestamp > maxResetAt &&
+      (row.requestReset === true || row.loginState === 'Terkunci (Pelanggaran)');
+
+    if (!isValidViolation) {
+      row.requestReset = false;
+      if (row.loginState === 'Terkunci (Pelanggaran)') {
+        row.loginState = 'Belum Login';
+      }
+      delete row.violationReason;
+      delete row.violationAt;
+      delete row.violationSchema;
+      delete row.violationTimestamp;
+    }
+
+    return row;
+  });
+}
+
 export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
@@ -129,9 +176,16 @@ export default async function handler(req: any, res: any) {
     if (!data) {
       data = readFromFileOrMemory();
     }
+    if (data && Array.isArray(data.participants)) {
+      data = {
+        ...data,
+        participants: sanitizeParticipantsList(data.participants),
+      };
+    }
     return res.status(200).json({
       ok: true,
       engine,
+      updatedAt: typeof data?.updatedAt === 'number' ? data.updatedAt : undefined,
       data: data || null,
     });
   }
@@ -143,9 +197,35 @@ export default async function handler(req: any, res: any) {
       const existing =
         (kv ? await readFromVercelKV(kv) : null) || readFromFileOrMemory() || {};
 
+      // Ignore writes from stale un-refreshed browser tabs running older bundle versions
+      if (body.schemaVersion !== 3) {
+        const cleanExisting =
+          existing && Array.isArray(existing.participants)
+            ? {
+                ...existing,
+                participants: sanitizeParticipantsList(existing.participants),
+              }
+            : existing;
+        return res.status(200).json({
+          ok: true,
+          engine,
+          updatedAt: cleanExisting.updatedAt || Date.now(),
+          data: cleanExisting,
+        });
+      }
+
+      const sanitizedParticipants = Array.isArray(body.participants)
+        ? sanitizeParticipantsList(body.participants, existing.participants)
+        : Array.isArray(existing.participants)
+        ? sanitizeParticipantsList(existing.participants)
+        : undefined;
+
       const merged: Record<string, unknown> = {
         ...existing,
         ...body,
+        ...(sanitizedParticipants !== undefined
+          ? { participants: sanitizedParticipants }
+          : {}),
         updatedAt: Date.now(),
       };
 

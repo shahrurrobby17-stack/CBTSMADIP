@@ -7,7 +7,10 @@ import {
   UserCog,
   Zap,
 } from 'lucide-react';
-import { ProctorParticipantRow } from './ProctorDashboardView';
+import {
+  ProctorParticipantRow,
+  isParticipantLockedByViolation,
+} from './ProctorDashboardView';
 
 export interface ViolationAlertInfo {
   username: string;
@@ -53,9 +56,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   );
 
   const isLockedByViolation = Boolean(
-    matchedParticipant &&
-      (matchedParticipant.loginState === 'Terkunci (Pelanggaran)' ||
-        matchedParticipant.requestReset)
+    matchedParticipant && isParticipantLockedByViolation(matchedParticipant)
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -70,10 +71,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
     const row = participants.find(
       (p) => p.username.toUpperCase() === cleanUser
     );
-    if (
-      row &&
-      (row.loginState === 'Terkunci (Pelanggaran)' || row.requestReset)
-    ) {
+    if (row && isParticipantLockedByViolation(row)) {
       setErrorMsg(
         'Akses Login Ditolak: Akun Anda terkunci karena pelanggaran keluar dari sistem CBT. Anda wajib meminta Reset Login kepada Proktor atau Administrator.'
       );

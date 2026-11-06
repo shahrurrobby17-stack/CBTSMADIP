@@ -14,6 +14,7 @@ export interface CBTCloudPayload {
   activeToken?: string;
   resultsHistory?: ExamResultSummary[];
   updatedAt?: number;
+  schemaVersion?: number;
 }
 
 export interface VercelStorageResponse {
@@ -52,7 +53,10 @@ export async function saveVercelStorage(
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        schemaVersion: 3,
+      }),
     });
     if (!res.ok) {
       return { ok: false, engine: 'local', data: null };

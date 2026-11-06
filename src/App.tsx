@@ -16,6 +16,8 @@ import { ProctorLoginView } from './components/ProctorLoginView';
 import {
   ProctorDashboardView,
   ProctorParticipantRow,
+  isParticipantLockedByViolation,
+  sanitizeParticipantRows,
 } from './components/ProctorDashboardView';
 import {
   AdminLoginView,
@@ -92,12 +94,14 @@ export default function App() {
       const saved = localStorage.getItem(STORAGE_KEYS.PARTICIPANTS);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return sanitizeParticipantRows(parsed);
+        }
       }
     } catch {
       // Fallback to initial participants
     }
-    return INITIAL_ADMIN_PARTICIPANTS;
+    return sanitizeParticipantRows(INITIAL_ADMIN_PARTICIPANTS);
   });
 
   const [proctors, setProctors] = useState<AdminProctorItem[]>(() => {
@@ -197,8 +201,34 @@ export default function App() {
   const isHydratedFromCloud = useRef(false);
   const isApplyingRemoteUpdate = useRef(false);
   const lastLocalMutationAt = useRef<number>(0);
+  const latestUpdatedAtRef = useRef<number>(0);
   const pendingPushCount = useRef<number>(0);
   const examStartedAtRef = useRef<number>(0);
+
+  const packagesRef = useRef<ExamPackage[]>(packages);
+  useEffect(() => {
+    packagesRef.current = packages;
+  }, [packages]);
+
+  const schedulesRef = useRef<AdminScheduleItem[]>(schedules);
+  useEffect(() => {
+    schedulesRef.current = schedules;
+  }, [schedules]);
+
+  const participantsRef = useRef<ProctorParticipantRow[]>(participants);
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
+
+  const proctorsRef = useRef<AdminProctorItem[]>(proctors);
+  useEffect(() => {
+    proctorsRef.current = proctors;
+  }, [proctors]);
+
+  const resultsHistoryRef = useRef<ExamResultSummary[]>(resultsHistory);
+  useEffect(() => {
+    resultsHistoryRef.current = resultsHistory;
+  }, [resultsHistory]);
 
   const markSyncedSuccess = useCallback(
     (engine: 'vercel-kv' | 'vercel-serverless' | 'local') => {
@@ -290,10 +320,7 @@ export default function App() {
         p.username.trim().toUpperCase() ===
         lastViolationInfo.username.trim().toUpperCase()
     );
-    if (
-      !matched ||
-      (matched.loginState !== 'Terkunci (Pelanggaran)' && !matched.requestReset)
-    ) {
+    if (!matched || !isParticipantLockedByViolation(matched)) {
       setLastViolationInfo(null);
     }
   }, [participants, lastViolationInfo]);
@@ -395,8 +422,10 @@ export default function App() {
     ) => {
       lastLocalMutationAt.current = Date.now();
       setParticipants((prev) => {
-        const nextParticipants =
+      const rawNext =
           typeof updater === 'function' ? updater(prev) : updater;
+        const nextParticipants = sanitizeParticipantRows(rawNext);
+        participantsRef.current = nextParticipants;
         try {
           localStorage.setItem(
             STORAGE_KEYS.PARTICIPANTS,
@@ -410,7 +439,15 @@ export default function App() {
           participants: nextParticipants,
         })
           .then((res) => {
-            if (res.ok) markSyncedSuccess(res.engine);
+            if (res.ok) {
+              if (typeof res.updatedAt === 'number') {
+                latestUpdatedAtRef.current = Math.max(
+                  latestUpdatedAtRef.current,
+                  res.updatedAt
+                );
+              }
+              markSyncedSuccess(res.engine);
+            }
           })
           .finally(() => {
             pendingPushCount.current = Math.max(
@@ -434,6 +471,7 @@ export default function App() {
       setSchedules((prev) => {
         const nextSchedules =
           typeof updater === 'function' ? updater(prev) : updater;
+        schedulesRef.current = nextSchedules;
         try {
           localStorage.setItem(
             STORAGE_KEYS.SCHEDULES,
@@ -447,7 +485,15 @@ export default function App() {
           schedules: nextSchedules,
         })
           .then((res) => {
-            if (res.ok) markSyncedSuccess(res.engine);
+            if (res.ok) {
+              if (typeof res.updatedAt === 'number') {
+                latestUpdatedAtRef.current = Math.max(
+                  latestUpdatedAtRef.current,
+                  res.updatedAt
+                );
+              }
+              markSyncedSuccess(res.engine);
+            }
           })
           .finally(() => {
             pendingPushCount.current = Math.max(
@@ -471,6 +517,7 @@ export default function App() {
       setProctors((prev) => {
         const nextProctors =
           typeof updater === 'function' ? updater(prev) : updater;
+        proctorsRef.current = nextProctors;
         try {
           localStorage.setItem(
             STORAGE_KEYS.PROCTORS,
@@ -484,7 +531,15 @@ export default function App() {
           proctors: nextProctors,
         })
           .then((res) => {
-            if (res.ok) markSyncedSuccess(res.engine);
+            if (res.ok) {
+              if (typeof res.updatedAt === 'number') {
+                latestUpdatedAtRef.current = Math.max(
+                  latestUpdatedAtRef.current,
+                  res.updatedAt
+                );
+              }
+              markSyncedSuccess(res.engine);
+            }
           })
           .finally(() => {
             pendingPushCount.current = Math.max(
@@ -508,6 +563,7 @@ export default function App() {
       setResultsHistory((prev) => {
         const nextHistory =
           typeof updater === 'function' ? updater(prev) : updater;
+        resultsHistoryRef.current = nextHistory;
         try {
           localStorage.setItem(
             STORAGE_KEYS.HISTORY,
@@ -521,7 +577,15 @@ export default function App() {
           resultsHistory: nextHistory,
         })
           .then((res) => {
-            if (res.ok) markSyncedSuccess(res.engine);
+            if (res.ok) {
+              if (typeof res.updatedAt === 'number') {
+                latestUpdatedAtRef.current = Math.max(
+                  latestUpdatedAtRef.current,
+                  res.updatedAt
+                );
+              }
+              markSyncedSuccess(res.engine);
+            }
           })
           .finally(() => {
             pendingPushCount.current = Math.max(
@@ -536,6 +600,7 @@ export default function App() {
   );
 
   // Initial Hydration & Background Polling from Vercel Storage (/api/storage)
+  // Uses stable refs so polling runs strictly on a 6s interval without re-triggering on state updates
   const syncFromVercelCloud = useCallback(async () => {
     if (
       pendingPushCount.current > 0 ||
@@ -556,13 +621,38 @@ export default function App() {
     setStorageEngine(res.engine);
 
     if (res.data) {
+      const serverUpdatedAt =
+        typeof res.data.updatedAt === 'number'
+          ? res.data.updatedAt
+          : typeof res.updatedAt === 'number'
+          ? res.updatedAt
+          : 0;
+
+      // Never overwrite newer client state with a stale serverless instance response
+      if (
+        isHydratedFromCloud.current &&
+        latestUpdatedAtRef.current > 0 &&
+        serverUpdatedAt > 0
+      ) {
+        if (serverUpdatedAt < latestUpdatedAtRef.current) {
+          return;
+        }
+        if (serverUpdatedAt === latestUpdatedAtRef.current) {
+          return;
+        }
+      }
+
+      if (serverUpdatedAt > 0) {
+        latestUpdatedAtRef.current = Math.max(
+          latestUpdatedAtRef.current,
+          serverUpdatedAt
+        );
+      }
+
       isApplyingRemoteUpdate.current = true;
       if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
         const cleanedPackages = filterOutSimulasiTka(res.data.packages);
         setPackages(cleanedPackages);
-        if (cleanedPackages.length !== res.data.packages.length) {
-          saveVercelStorage({ packages: cleanedPackages }).catch(() => {});
-        }
       }
       if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
         setSchedules(res.data.schedules);
@@ -571,7 +661,26 @@ export default function App() {
         Array.isArray(res.data.participants) &&
         res.data.participants.length > 0
       ) {
-        setParticipants(res.data.participants);
+        // Merge local lastResetAt so a reset participant never flickers back to locked
+        const localResetMap = new Map<string, number>();
+        participantsRef.current.forEach((p) => {
+          if (typeof p.lastResetAt === 'number' && p.lastResetAt > 0) {
+            localResetMap.set(p.username.trim().toUpperCase(), p.lastResetAt);
+          }
+        });
+        const mergedRemoteParticipants = sanitizeParticipantRows(
+          res.data.participants.map((row) => {
+            const localReset = localResetMap.get(
+              (row.username || '').trim().toUpperCase()
+            );
+            const maxReset = Math.max(
+              typeof row.lastResetAt === 'number' ? row.lastResetAt : 0,
+              localReset || 0
+            );
+            return maxReset > 0 ? { ...row, lastResetAt: maxReset } : row;
+          })
+        );
+        setParticipants(mergedRemoteParticipants);
       }
       if (Array.isArray(res.data.proctors) && res.data.proctors.length > 0) {
         setProctors(res.data.proctors);
@@ -600,29 +709,27 @@ export default function App() {
         isApplyingRemoteUpdate.current = false;
       }, 150);
     } else if (!isHydratedFromCloud.current) {
-      // First boot on Vercel Storage: seed cloud storage with current state
+      // First boot on Vercel Storage: seed cloud storage with current sanitized state
       const seedRes = await saveVercelStorage({
-        packages,
-        schedules,
-        participants,
-        proctors,
-        activeToken,
-        resultsHistory,
+        packages: packagesRef.current,
+        schedules: schedulesRef.current,
+        participants: sanitizeParticipantRows(participantsRef.current),
+        proctors: proctorsRef.current,
+        activeToken: activeTokenRef.current,
+        resultsHistory: resultsHistoryRef.current,
       });
       if (seedRes.ok) {
+        if (typeof seedRes.updatedAt === 'number') {
+          latestUpdatedAtRef.current = Math.max(
+            latestUpdatedAtRef.current,
+            seedRes.updatedAt
+          );
+        }
         setStorageEngine(seedRes.engine);
       }
     }
     isHydratedFromCloud.current = true;
-  }, [
-    activeToken,
-    filterOutSimulasiTka,
-    packages,
-    participants,
-    proctors,
-    resultsHistory,
-    schedules,
-  ]);
+  }, [filterOutSimulasiTka]);
 
   useEffect(() => {
     syncFromVercelCloud();
@@ -743,6 +850,7 @@ export default function App() {
 
   const lockStudentByViolation = useCallback(
     (reason: string) => {
+      const nowTs = Date.now();
       const timeStr = new Date().toLocaleTimeString('id-ID', {
         hour: '2-digit',
         minute: '2-digit',
@@ -763,12 +871,14 @@ export default function App() {
                     requestReset: true,
                     violationReason: reason,
                     violationAt: timeStr,
+                    violationSchema: 3,
+                    violationTimestamp: nowTs,
                   }
                 : row
             )
           : [
               {
-                id: `p_viol_${Date.now()}`,
+                id: `p_viol_${nowTs}`,
                 selected: false,
                 status: 'Active',
                 kodeTes: 'GLDTKA25MAH2',
@@ -780,6 +890,8 @@ export default function App() {
                 requestReset: true,
                 violationReason: reason,
                 violationAt: timeStr,
+                violationSchema: 3,
+                violationTimestamp: nowTs,
               },
               ...prev,
             ];
@@ -934,6 +1046,7 @@ export default function App() {
   const handleRequestResetFromLogin = useCallback(
     (username: string) => {
       const cleanUser = username.trim().toUpperCase();
+      const nowTs = Date.now();
       const timeStr = new Date().toLocaleTimeString('id-ID', {
         hour: '2-digit',
         minute: '2-digit',
@@ -950,6 +1063,8 @@ export default function App() {
                   row.violationReason ||
                   'Siswa mengajukan permintaan Reset Login ke Proktor/Administrator',
                 violationAt: row.violationAt || timeStr,
+                violationSchema: 3,
+                violationTimestamp: nowTs,
               }
             : row
         )
@@ -965,11 +1080,7 @@ export default function App() {
     );
 
     // Block login if student is locked due to exit violation
-    if (
-      matchedRow &&
-      (matchedRow.loginState === 'Terkunci (Pelanggaran)' ||
-        matchedRow.requestReset)
-    ) {
+    if (matchedRow && isParticipantLockedByViolation(matchedRow)) {
       return;
     }
 
@@ -993,6 +1104,8 @@ export default function App() {
                 requestReset: false,
                 violationReason: undefined,
                 violationAt: undefined,
+                violationSchema: undefined,
+                violationTimestamp: undefined,
               }
             : row
         );

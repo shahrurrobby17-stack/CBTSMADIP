@@ -50,7 +50,11 @@ import {
   QuestionType,
 } from '../types/cbt';
 import { getQuestionTypeLabel } from '../data/cbtData';
-import { ProctorParticipantRow } from './ProctorDashboardView';
+import {
+  ProctorParticipantRow,
+  isParticipantLockedByViolation,
+  sanitizeParticipantRows,
+} from './ProctorDashboardView';
 import { generateProctorCardsPDF } from '../utils/pdfProctorCard';
 import { generateParticipantCardsPDF } from '../utils/pdfParticipantCard';
 import {
@@ -270,6 +274,7 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     kelompok: '1',
     kelas: 'X',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'ap2',
@@ -282,6 +287,7 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     kelompok: '1',
     kelas: 'XI IPA',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'ap3',
@@ -293,8 +299,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     namaPeserta: 'ARYA RESTU KUSUMA',
     kelompok: '1',
     kelas: 'XI IPS',
-    loginState: 'Sedang Mengerjakan',
-    requestReset: true,
+    loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'ap4',
@@ -307,6 +313,7 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     kelompok: '1',
     kelas: 'XII IPA',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'ap5',
@@ -319,6 +326,7 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     kelompok: '1',
     kelas: 'XII IPS',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'ap6',
@@ -331,6 +339,7 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     kelompok: '1',
     kelas: 'X',
     loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p7',
@@ -342,7 +351,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     namaPeserta: 'NADIA PUTRI PRATAMA',
     kelompok: '1',
     kelas: 'XII IPA',
-    loginState: 'Sedang Mengerjakan',
+    loginState: 'Belum Login',
+    requestReset: false,
   },
   {
     id: 'p8',
@@ -354,7 +364,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     namaPeserta: 'BAGAS ADITYA NUGRAHA',
     kelompok: '2',
     kelas: 'XII IPA',
-    loginState: 'Selesai',
+    loginState: 'Belum Login',
+    requestReset: false,
   },
 ];
 
@@ -754,7 +765,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [localProctors, setLocalProctors] = useState<AdminProctorItem[]>(
     INITIAL_ADMIN_PROCTORS
   );
-  const participants = externalParticipants ?? localParticipants;
+  const rawParticipants = externalParticipants ?? localParticipants;
+  const participants = useMemo(
+    () => sanitizeParticipantRows(rawParticipants),
+    [rawParticipants]
+  );
   const setParticipants = onUpdateParticipants ?? setLocalParticipants;
   const proctors = externalProctors ?? localProctors;
   const setProctors = onUpdateProctors ?? setLocalProctors;
@@ -2102,11 +2117,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             const isActive = activeMenu === item.id;
             const resetCount =
               item.id === 'request_reset'
-                ? participants.filter(
-                    (p) =>
-                      p.requestReset ||
-                      p.loginState === 'Terkunci (Pelanggaran)'
-                  ).length
+                ? participants.filter((p) => isParticipantLockedByViolation(p))
+                    .length
                 : 0;
             return (
               <button
@@ -3105,7 +3117,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                     <h3 className="text-sm font-bold text-slate-800 whitespace-nowrap">
-                      {currentMenuMeta.label} ({participants.length} Peserta)
+                      {currentMenuMeta.label} (
+                      {activeMenu === 'request_reset'
+                        ? `${
+                            participants.filter((p) =>
+                              isParticipantLockedByViolation(p)
+                            ).length
+                          } Permintaan Reset`
+                        : `${participants.length} Peserta`}
+                      )
                     </h3>
                     <div className="relative w-full sm:w-64">
                       <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -3118,7 +3138,40 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       />
                     </div>
                   </div>
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    {activeMenu === 'request_reset' &&
+                      participants.some((p) =>
+                        isParticipantLockedByViolation(p)
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nowTs = Date.now();
+                            setParticipants((prev) =>
+                              prev.map((row) => ({
+                                ...row,
+                                loginState:
+                                  row.loginState === 'Terkunci (Pelanggaran)'
+                                    ? 'Belum Login'
+                                    : row.loginState,
+                                requestReset: false,
+                                violationReason: undefined,
+                                violationAt: undefined,
+                                violationSchema: undefined,
+                                violationTimestamp: undefined,
+                                lastResetAt: nowTs,
+                              }))
+                            );
+                            showNotice(
+                              'Seluruh permintaan Reset Login peserta telah dibersihkan.'
+                            );
+                          }}
+                          className="px-3.5 py-1.5 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Reset Semua Pelanggaran</span>
+                        </button>
+                      )}
                     <button
                       type="button"
                       onClick={() => setActiveMenu('kelompok_tes')}
@@ -3147,8 +3200,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         const filteredParticipantList = participants.filter((p) => {
                           const matchesMenu =
                             activeMenu === 'request_reset'
-                              ? p.requestReset ||
-                                p.loginState === 'Terkunci (Pelanggaran)'
+                              ? isParticipantLockedByViolation(p)
                               : true;
                           if (!matchesMenu) return false;
                           if (participantSearchQuery.trim()) {
@@ -3163,9 +3215,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             <tr>
                               <td
                                 colSpan={8}
-                                className="py-8 px-5 text-center text-slate-400 italic"
+                                className="py-10 px-5 text-center text-slate-500"
                               >
-                                Tidak ada peserta dengan nama &ldquo;{participantSearchQuery}&rdquo; yang ditemukan.
+                                {activeMenu === 'request_reset' &&
+                                !participantSearchQuery.trim()
+                                  ? 'Tidak ada pelanggaran atau permintaan Reset Login saat ini. Seluruh sesi peserta berjalan normal.'
+                                  : `Tidak ada peserta dengan nama "${participantSearchQuery}" yang ditemukan.`}
                               </td>
                             </tr>
                           );
@@ -3205,8 +3260,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                 )}
                               </td>
                               <td className="py-3.5 px-4">
-                                {p.loginState === 'Terkunci (Pelanggaran)' ||
-                                p.requestReset ? (
+                                {isParticipantLockedByViolation(p) ? (
                                   <div className="space-y-1">
                                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-bold text-[11px]">
                                       Terkunci (Pelanggaran Keluar CBT)
@@ -3229,6 +3283,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                   type="button"
                                   onClick={() => {
                                     const targetUser = p.username.trim().toUpperCase();
+                                    const nowTs = Date.now();
                                     setParticipants((prev) =>
                                       prev.map((row) =>
                                         row.id === p.id ||
@@ -3239,6 +3294,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                               requestReset: false,
                                               violationReason: undefined,
                                               violationAt: undefined,
+                                              violationSchema: undefined,
+                                              violationTimestamp: undefined,
+                                              lastResetAt: nowTs,
                                             }
                                           : row
                                       )
