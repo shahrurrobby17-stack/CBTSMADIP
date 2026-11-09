@@ -1448,7 +1448,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                     />
                   </div>
 
-                  {/* Action Buttons: Unassign | Assign | Reset */}
+                  {/* Action Buttons: Unassign | Assign */}
                   <div className="flex items-center gap-2.5">
                     <button
                       type="button"
@@ -1463,14 +1463,6 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       className="px-5 py-2 rounded-lg bg-[#0095ff] hover:bg-[#007acc] text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
                     >
                       Assign
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleResetFiltersAndSelection}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Reset</span>
                     </button>
                   </div>
                 </div>

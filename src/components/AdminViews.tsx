@@ -950,6 +950,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [newParticipantKelas, setNewParticipantKelas] = useState<string>('X');
   const [participantSearchQuery, setParticipantSearchQuery] = useState('');
   const excelInputRef = React.useRef<HTMLInputElement | null>(null);
+  const mapelExcelInputRef = React.useRef<HTMLInputElement | null>(null);
   const [uploadedExcelInfo, setUploadedExcelInfo] = useState<{
     fileName: string;
     count: number;
@@ -1265,43 +1266,328 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     showNotice(`Mata pelajaran "${cleanNama}" (${cleanKode}) untuk ${rawTingkat} berhasil ditambahkan!`);
   };
 
-  const handleRestoreDefaultMapel = () => {
-    const updatedConfig = {
-      ...appConfig,
-      mapelList: [...DEFAULT_MAPEL_LIST],
-    };
-    setAppConfig(updatedConfig);
-    try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
-    } catch {
-      // ignore
-    }
+  const handleUploadMapelExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-    DEFAULT_MAPEL_LIST.forEach((m) => {
-      const cleanKode = m.kode.toUpperCase();
-      const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
-      onUpdatePackages((prevPackages) => {
-        const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
-        if (baseList.some((p) => p.code.toUpperCase() === cleanKode || p.id === newPkgId)) {
-          return baseList;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const buffer = evt.target?.result;
+        if (!buffer) return;
+
+        const workbook = XLSX.read(buffer, { type: 'array' });
+        if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+          showNotice('File Excel kosong atau tidak memiliki lembar kerja.');
+          return;
         }
-        return [
-          ...baseList,
-          {
-            id: newPkgId,
-            code: m.kode,
-            title: m.nama,
-            level: 'SMA / MA / SMK / Sederajat',
-            subtest: m.kategori,
-            durationMinutes: m.alokasiMenit,
-            targetClass: m.tingkat,
-            questions: [],
-          },
-        ];
-      });
-    });
 
-    showNotice('10 Mata Pelajaran Standar Ujian SAS berhasil dipulihkan!');
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        if (!worksheet) {
+          showNotice('Lembar kerja Excel tidak dapat dibaca.');
+          return;
+        }
+
+        const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, {
+          header: 1,
+          defval: '',
+        });
+
+        const nonEmptyRows = rawRows.filter(
+          (row) =>
+            Array.isArray(row) &&
+            row.some((cell) => String(cell ?? '').trim() !== '')
+        );
+
+        if (nonEmptyRows.length === 0) {
+          showNotice('File Excel tidak memiliki baris data.');
+          return;
+        }
+
+        // Cari baris header untuk kolom: Nama mapel, tingkat/fase, kategori, durasi, KKM
+        let headerRowIdx = -1;
+        let namaColIdx = -1;
+        let tingkatColIdx = -1;
+        let kategoriColIdx = -1;
+        let durasiColIdx = -1;
+        let kkmColIdx = -1;
+        let kodeColIdx = -1;
+
+        for (let r = 0; r < Math.min(nonEmptyRows.length, 5); r++) {
+          const cells = nonEmptyRows[r].map((c) =>
+            String(c ?? '').trim().toLowerCase()
+          );
+
+          const nIdx = cells.findIndex(
+            (c) =>
+              c.includes('nama mapel') ||
+              c.includes('nama mata pelajaran') ||
+              c === 'mapel' ||
+              c === 'mata pelajaran' ||
+              c === 'nama' ||
+              c === 'subject'
+          );
+
+          if (nIdx !== -1) {
+            headerRowIdx = r;
+            namaColIdx = nIdx;
+            tingkatColIdx = cells.findIndex(
+              (c) =>
+                c.includes('tingkat') ||
+                c.includes('fase') ||
+                c.includes('kelas') ||
+                c === 'grade' ||
+                c === 'level'
+            );
+            kategoriColIdx = cells.findIndex(
+              (c) =>
+                c.includes('kategori') ||
+                c.includes('jurusan') ||
+                c.includes('peminatan') ||
+                c === 'category'
+            );
+            durasiColIdx = cells.findIndex(
+              (c) =>
+                c.includes('durasi') ||
+                c.includes('waktu') ||
+                c.includes('alokasi') ||
+                c.includes('menit') ||
+                c === 'duration'
+            );
+            kkmColIdx = cells.findIndex(
+              (c) =>
+                c.includes('kkm') ||
+                c.includes('passing grade') ||
+                c.includes('kkm minimal')
+            );
+            kodeColIdx = cells.findIndex(
+              (c) =>
+                c === 'kode' ||
+                c.includes('kode mapel') ||
+                c.includes('kode ujian') ||
+                c === 'code'
+            );
+            break;
+          }
+        }
+
+        let startDataRow = 0;
+        if (headerRowIdx !== -1) {
+          startDataRow = headerRowIdx + 1;
+        } else {
+          // Fallback urutan kolom standar: 0=Nama, 1=Tingkat/Fase, 2=Kategori, 3=Durasi, 4=KKM
+          const firstRowStr = nonEmptyRows[0].map((c) => String(c ?? '').toLowerCase());
+          if (
+            firstRowStr.some(
+              (c) =>
+                isNaN(Number(c)) &&
+                (c.includes('nama') || c.includes('tingkat') || c.includes('kategori'))
+            )
+          ) {
+            startDataRow = 1;
+          }
+          namaColIdx = 0;
+          tingkatColIdx = 1;
+          kategoriColIdx = 2;
+          durasiColIdx = 3;
+          kkmColIdx = 4;
+        }
+
+        const dataRows = nonEmptyRows.slice(startDataRow);
+        if (dataRows.length === 0) {
+          showNotice('Tidak ada baris data mata pelajaran yang ditemukan di file Excel.');
+          return;
+        }
+
+        const currentList = Array.isArray(appConfig.mapelList)
+          ? [...appConfig.mapelList]
+          : [...defaultMapelList];
+
+        const existingCodes = new Set(
+          currentList.map((m: any) => (m.kode || '').trim().toUpperCase())
+        );
+        const existingNames = new Set(
+          currentList.map((m: any) => (m.nama || '').trim().toLowerCase())
+        );
+
+        const newMapels: any[] = [];
+        const newPackagesToAdd: ExamPackage[] = [];
+
+        dataRows.forEach((row) => {
+          const rawNama = String(row[namaColIdx] ?? '').trim();
+          if (!rawNama) return;
+
+          // Normalisasi tingkat / fase
+          let rawTingkat = tingkatColIdx !== -1 ? String(row[tingkatColIdx] ?? '').trim() : '';
+          let normalizedTingkat = 'Kelas X';
+          const tUpper = rawTingkat.toUpperCase();
+          if (tUpper.includes('XII') || tUpper.includes('12')) {
+            if (tUpper.includes('IPS') || tUpper.includes('SOSIAL')) {
+              normalizedTingkat = 'Kelas XII IPS';
+            } else {
+              normalizedTingkat = 'Kelas XII IPA';
+            }
+          } else if (tUpper.includes('XI') || tUpper.includes('11')) {
+            if (tUpper.includes('IPS') || tUpper.includes('SOSIAL')) {
+              normalizedTingkat = 'Kelas XI IPS';
+            } else {
+              normalizedTingkat = 'Kelas XI IPA';
+            }
+          } else if (tUpper.includes('X') || tUpper.includes('10') || tUpper.includes('FASE E')) {
+            normalizedTingkat = 'Kelas X';
+          } else if (rawTingkat) {
+            normalizedTingkat = rawTingkat;
+          } else {
+            normalizedTingkat = getTargetClassFromMapel({ nama: rawNama });
+          }
+
+          // Normalisasi Kategori
+          let rawKategori = kategoriColIdx !== -1 ? String(row[kategoriColIdx] ?? '').trim() : '';
+          if (!rawKategori) {
+            if (normalizedTingkat.includes('IPA')) rawKategori = 'Peminatan MIPA';
+            else if (normalizedTingkat.includes('IPS')) rawKategori = 'Peminatan IPS';
+            else rawKategori = 'Wajib Umum';
+          }
+
+          // Durasi & KKM
+          const rawDurasi = durasiColIdx !== -1 ? Number(row[durasiColIdx]) : 90;
+          const durasiVal = !isNaN(rawDurasi) && rawDurasi > 0 ? rawDurasi : 90;
+
+          const rawKKM = kkmColIdx !== -1 ? Number(row[kkmColIdx]) : 75;
+          const kkmVal = !isNaN(rawKKM) && rawKKM >= 0 ? rawKKM : 75;
+
+          // Kode Mapel unik
+          let rawKode = kodeColIdx !== -1 ? String(row[kodeColIdx] ?? '').trim().toUpperCase() : '';
+          let finalKode = rawKode;
+          if (!finalKode) {
+            const prefix =
+              rawNama
+                .replace(/[^a-zA-Z0-9]/g, '')
+                .slice(0, 3)
+                .toUpperCase() || 'MPL';
+            finalKode = `${prefix}-SAS`;
+            let counter = 2;
+            while (existingCodes.has(finalKode)) {
+              finalKode = `${prefix}-${String(counter).padStart(2, '0')}-SAS`;
+              counter++;
+            }
+          } else if (existingCodes.has(finalKode)) {
+            let counter = 2;
+            let candidate = `${finalKode}-${counter}`;
+            while (existingCodes.has(candidate)) {
+              counter++;
+              candidate = `${finalKode}-${counter}`;
+            }
+            finalKode = candidate;
+          }
+
+          existingCodes.add(finalKode);
+          existingNames.add(rawNama.toLowerCase());
+
+          const mapelEntry = {
+            kode: finalKode,
+            nama: rawNama,
+            tingkat: normalizedTingkat,
+            kategori: rawKategori,
+            alokasiMenit: durasiVal,
+            kkm: kkmVal,
+            status: 'Aktif',
+          };
+          newMapels.push(mapelEntry);
+
+          const newPkgId = 'mapel_pkg_' + finalKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
+          newPackagesToAdd.push({
+            id: newPkgId,
+            code: finalKode,
+            title: rawNama,
+            level: 'SMA / MA / SMK / Sederajat',
+            subtest: rawKategori,
+            durationMinutes: durasiVal,
+            targetClass: normalizedTingkat,
+            questions: [],
+          });
+        });
+
+        if (newMapels.length === 0) {
+          showNotice('Tidak ada baris mata pelajaran valid yang dapat diimpor.');
+          return;
+        }
+
+        const updatedList = [...currentList, ...newMapels];
+        const updatedConfig = {
+          ...appConfig,
+          mapelList: updatedList,
+        };
+        setAppConfig(updatedConfig);
+        try {
+          localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
+        } catch {
+          // ignore
+        }
+
+        // Daftarkan ke paket CBT agar langsung muncul di Status Tes
+        onUpdatePackages((prevPackages) => {
+          const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
+          const merged = [...baseList];
+          newPackagesToAdd.forEach((newPkg) => {
+            const already = merged.some(
+              (p) =>
+                p.id === newPkg.id ||
+                p.code.toUpperCase() === newPkg.code.toUpperCase()
+            );
+            if (!already) {
+              merged.push(newPkg);
+            }
+          });
+          return merged;
+        });
+
+        showNotice(
+          `Berhasil mengimpor ${newMapels.length} mata pelajaran dari file Excel "${file.name}"!`
+        );
+      } catch (err: any) {
+        showNotice(`Gagal membaca file Excel: ${err?.message || 'Format tidak valid'}`);
+      } finally {
+        if (e.target) e.target.value = '';
+      }
+    };
+
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleDownloadMapelTemplateExcel = () => {
+    try {
+      const headers = ['Nama Mapel', 'Tingkat/Fase', 'Kategori', 'Durasi', 'KKM'];
+      const sampleData = [
+        ['Bahasa Indonesia & Literasi Membaca', 'Kelas X', 'Wajib Umum', 90, 75],
+        ['Pendidikan Agama Islam & Budi Pekerti', 'Kelas X', 'Pendidikan Agama', 60, 80],
+        ['Biologi & Kimia Terapan', 'Kelas XI IPA', 'Peminatan MIPA', 90, 78],
+        ['Matematika Lanjut & Penalaran Sains', 'Kelas XI IPA', 'Peminatan MIPA', 90, 78],
+        ['Matematika Wajib & Numerasi', 'Kelas XI IPS', 'Wajib Umum', 90, 75],
+        ['Ekonomi & Sosiologi Terapan', 'Kelas XI IPS', 'Peminatan IPS', 90, 75],
+        ['Bahasa Inggris & Literasi Digital', 'Kelas XII IPA', 'Wajib Umum', 90, 75],
+        ['Fisika & Kimia Analisis Lanjut', 'Kelas XII IPA', 'Peminatan MIPA', 90, 78],
+        ['Sejarah Indonesia & Kebangsaan', 'Kelas XII IPS', 'Wajib Umum', 60, 75],
+        ['Geografi & Sosiologi Kontemporer', 'Kelas XII IPS', 'Peminatan IPS', 90, 75],
+      ];
+
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...sampleData]);
+      ws['!cols'] = [
+        { wch: 40 }, // Nama Mapel
+        { wch: 18 }, // Tingkat/Fase
+        { wch: 20 }, // Kategori
+        { wch: 12 }, // Durasi
+        { wch: 10 }, // KKM
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Template Mapel');
+      XLSX.writeFile(wb, 'Format_Excel_Mata_Pelajaran_CBT.xlsx');
+      showNotice('Format template Excel Mata Pelajaran berhasil diunduh.');
+    } catch {
+      showNotice('Gagal mengunduh template Excel.');
+    }
   };
 
   const handleDeleteMapelFromSettings = (kodeToDelete: string) => {
@@ -2771,7 +3057,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     />
                   </div>
 
-                  {/* Action Buttons: Unassign | Assign | Reset */}
+                  {/* Action Buttons: Unassign | Assign */}
                   <div className="flex items-center gap-2.5">
                     <button
                       type="button"
@@ -2786,14 +3072,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       className="px-5 py-2 rounded-lg bg-[#0095ff] hover:bg-[#007acc] text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
                     >
                       Assign
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleResetAll}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#f04452] hover:bg-[#d93240] text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Reset</span>
                     </button>
                   </div>
                 </div>
@@ -5691,14 +5969,31 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         <BookOpen className="w-3.5 h-3.5 text-[#0095ff]" />
                         Total {(appConfig.mapelList || []).length} Mapel Terdaftar
                       </span>
+                      {/* Input file Excel tersembunyi untuk Upload Mata Pelajaran */}
+                      <input
+                        type="file"
+                        ref={mapelExcelInputRef}
+                        onChange={handleUploadMapelExcel}
+                        accept=".xlsx, .xls, .csv"
+                        className="hidden"
+                      />
                       <button
                         type="button"
-                        onClick={handleRestoreDefaultMapel}
-                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
-                        title="Pulihkan dan lengkapi 10 mata pelajaran standar ujian SAS"
+                        onClick={handleDownloadMapelTemplateExcel}
+                        className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="Unduh contoh template Excel dengan format: Nama mapel, tingkat/fase, kategori, durasi, KKM"
                       >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Pulihkan 10 Mapel Standar</span>
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Format Excel</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => mapelExcelInputRef.current?.click()}
+                        className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="Upload file Excel mata pelajaran (Format: Nama mapel, tingkat/fase, kategori, durasi, KKM)"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload Excel Mapel</span>
                       </button>
                       <button
                         type="button"
@@ -5711,25 +6006,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </button>
                     </div>
                   </div>
-
-                  {/* Banner jika mapel kurang dari 10 */}
-                  {(appConfig.mapelList || []).length < 10 && (
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-amber-50 border border-amber-200 rounded-lg gap-2 text-xs">
-                      <div className="flex items-center gap-2 text-amber-800">
-                        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                        <span>
-                          Saat ini hanya terdaftar <strong>{(appConfig.mapelList || []).length} mata pelajaran</strong>. Anda dapat menginput mata pelajaran baru lewat formulir atau klik tombol di samping untuk memulihkan seluruh 10 mapel standar SAS.
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleRestoreDefaultMapel}
-                        className="py-1 px-3 bg-amber-700 hover:bg-amber-800 text-white font-bold text-[11px] rounded-md transition-colors cursor-pointer shrink-0"
-                      >
-                        Pulihkan 10 Mapel Standar
-                      </button>
-                    </div>
-                  )}
 
                   {/* Form Input Mata Pelajaran Baru */}
                   {(showMapelForm || (appConfig.mapelList || []).length === 0) && (
@@ -5938,14 +6214,34 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           <div className="text-[11px] text-slate-500">Klik tombol di sebelah kanan untuk membuka formulir input mata pelajaran.</div>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowMapelForm(true)}
-                        className="py-2 px-4 bg-[#001a6e] hover:bg-[#00155a] text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm shrink-0"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        Input Mata Pelajaran
-                      </button>
+                      <div className="flex items-center gap-2 flex-wrap shrink-0">
+                        <button
+                          type="button"
+                          onClick={handleDownloadMapelTemplateExcel}
+                          className="py-2 px-3 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                          title="Unduh contoh template Excel: Nama mapel, tingkat/fase, kategori, durasi, KKM"
+                        >
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Format Excel</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => mapelExcelInputRef.current?.click()}
+                          className="py-2 px-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                          title="Upload file Excel mata pelajaran (Format: Nama mapel, tingkat/fase, kategori, durasi, KKM)"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>Upload Excel Mapel</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowMapelForm(true)}
+                          className="py-2 px-4 bg-[#001a6e] hover:bg-[#00155a] text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Input Manual</span>
+                        </button>
+                      </div>
                     </div>
                   )}
 
