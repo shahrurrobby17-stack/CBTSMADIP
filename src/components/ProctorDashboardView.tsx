@@ -170,6 +170,12 @@ export function shortenStudentUsername(raw?: string): string {
   return clean;
 }
 
+export function isParticipantStatusActive(status?: string): boolean {
+  if (!status) return false;
+  const s = String(status).trim().toLowerCase();
+  return s === 'active' || s === 'aktif';
+}
+
 export function sanitizeParticipantRows(
   rows: ProctorParticipantRow[]
 ): ProctorParticipantRow[] {
@@ -185,10 +191,8 @@ export function sanitizeParticipantRows(
           u === 'P130100240' ||
           u === 'K020500118' ||
           u === 'TK1601' ||
-          u === 'TK1610' ||
-          u === 'SA20266475' ||
-          u === 'SA20261839';
-        if (isLegacyPreset && (r.id === 'p7' || r.id === 'p8')) {
+          u === 'TK1610';
+        if (isLegacyPreset) {
           changed = true;
           return false;
         }
@@ -400,14 +404,14 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   const setParticipants = onUpdateParticipants ?? setLocalParticipants;
 
   // Filter states for Kelompok Tes (matching 1, 2, 3, 4 in screenshot)
-  const [filterStatus, setFilterStatus] = useState<string>('Non Aktif');
-  const [filterKodeTes, setFilterKodeTes] = useState<string>('SAS26SMADIP1');
-  const [filterKelompok, setFilterKelompok] = useState<string>('1');
+  const [filterStatus, setFilterStatus] = useState<string>('Semua Status');
+  const [filterKodeTes, setFilterKodeTes] = useState<string>('SEMUA');
+  const [filterKelompok, setFilterKelompok] = useState<string>('SEMUA');
 
   // Applied filters when clicking "Apply"
-  const [appliedStatus, setAppliedStatus] = useState<string>('Non Aktif');
-  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('SAS26SMADIP1');
-  const [appliedKelompok, setAppliedKelompok] = useState<string>('1');
+  const [appliedStatus, setAppliedStatus] = useState<string>('Semua Status');
+  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('SEMUA');
+  const [appliedKelompok, setAppliedKelompok] = useState<string>('SEMUA');
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [toastMsg, setToastMsg] = useState<string>('');
@@ -454,22 +458,23 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   // Filtered rows for Kelompok Tes table
   const filteredRows = useMemo(() => {
     return participants.filter((row) => {
-      if (appliedStatus === 'Non Aktif' && row.status !== 'Non Active') {
+      const isAktif = isParticipantStatusActive(row.status);
+      if (appliedStatus === 'Non Aktif' && isAktif) {
         return false;
       }
-      if (appliedStatus === 'Aktif' && row.status !== 'Active') {
+      if (appliedStatus === 'Aktif' && !isAktif) {
         return false;
       }
-      if (appliedKodeTes !== 'SEMUA' && row.kodeTes !== appliedKodeTes) {
+      if (appliedKodeTes !== 'SEMUA' && row.kodeTes && row.kodeTes !== appliedKodeTes) {
         return false;
       }
-      if (appliedKelompok !== 'SEMUA' && row.kelompok !== appliedKelompok) {
+      if (appliedKelompok !== 'SEMUA' && (row.kelompok || '1') !== appliedKelompok) {
         return false;
       }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchUser = row.username.toLowerCase().includes(q);
-        const matchName = row.namaPeserta.toLowerCase().includes(q);
+        const matchUser = (row.username || '').toLowerCase().includes(q);
+        const matchName = (row.namaPeserta || '').toLowerCase().includes(q);
         if (!matchUser && !matchName) return false;
       }
       return true;
@@ -542,23 +547,23 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         visibleSelectedIds.has(r.id) ? { ...r, status: 'Non Active' } : r
       )
     );
-    setFilterStatus('Non Aktif');
-    setAppliedStatus('Non Aktif');
+    setFilterStatus('Semua Status');
+    setAppliedStatus('Semua Status');
     showNotice(
       `${selectedCount} peserta berhasil di-Unassign (Status: Non Active).`
     );
   };
 
   const handleResetFiltersAndSelection = () => {
-    setFilterStatus('Non Aktif');
-    setFilterKodeTes('SAS26SMADIP1');
-    setFilterKelompok('1');
-    setAppliedStatus('Non Aktif');
-    setAppliedKodeTes('SAS26SMADIP1');
-    setAppliedKelompok('1');
+    setFilterStatus('Semua Status');
+    setFilterKodeTes('SEMUA');
+    setFilterKelompok('SEMUA');
+    setAppliedStatus('Semua Status');
+    setAppliedKodeTes('SEMUA');
+    setAppliedKelompok('SEMUA');
     setSearchQuery('');
     setParticipants(INITIAL_PARTICIPANT_ROWS);
-    showNotice('Data filter dan pilihan peserta telah di-reset.');
+    showNotice('Data filter telah di-reset ke Semua Status dan Semua Kelompok.');
   };
 
   const handleResetParticipantLogin = (id: string, name: string, username?: string) => {
@@ -1379,12 +1384,16 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                     </label>
                     <select
                       value={filterStatus}
-                      onChange={(e) => setFilterStatus(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFilterStatus(val);
+                        setAppliedStatus(val);
+                      }}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
-                      <option value="Non Aktif">Non Aktif</option>
-                      <option value="Aktif">Aktif</option>
                       <option value="Semua Status">Semua Status</option>
+                      <option value="Aktif">Aktif</option>
+                      <option value="Non Aktif">Non Aktif</option>
                     </select>
                   </div>
 
@@ -1395,11 +1404,15 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                     </label>
                     <select
                       value={filterKodeTes}
-                      onChange={(e) => setFilterKodeTes(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFilterKodeTes(val);
+                        setAppliedKodeTes(val);
+                      }}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
-                      <option value="SAS26SMADIP1">SAS26SMADIP1</option>
                       <option value="SEMUA">Semua Kode Tes</option>
+                      <option value="SAS26SMADIP1">SAS26SMADIP1</option>
                     </select>
                   </div>
 
@@ -1410,12 +1423,16 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                     </label>
                     <select
                       value={filterKelompok}
-                      onChange={(e) => setFilterKelompok(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFilterKelompok(val);
+                        setAppliedKelompok(val);
+                      }}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
+                      <option value="SEMUA">Semua Kelompok</option>
                       <option value="1">1</option>
                       <option value="2">2</option>
-                      <option value="SEMUA">Semua Kelompok</option>
                     </select>
                   </div>
 
@@ -1512,9 +1529,24 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                         <tr>
                           <td
                             colSpan={5}
-                            className="py-10 text-center text-slate-400"
+                            className="py-10 text-center text-slate-500 space-y-2"
                           >
-                            Tidak ada data peserta yang sesuai dengan filter. Klik tombol Reset atau ubah Status menjadi Semua Status.
+                            <p>Tidak ada data peserta yang sesuai dengan filter.</p>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setFilterStatus('Semua Status');
+                                setAppliedStatus('Semua Status');
+                                setFilterKodeTes('SEMUA');
+                                setAppliedKodeTes('SEMUA');
+                                setFilterKelompok('SEMUA');
+                                setAppliedKelompok('SEMUA');
+                                setSearchQuery('');
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#0095ff] text-xs font-semibold cursor-pointer"
+                            >
+                              Tampilkan Semua Siswa (Reset Filter)
+                            </button>
                           </td>
                         </tr>
                       ) : (
@@ -1537,13 +1569,13 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                               />
                             </td>
                             <td className="py-4 px-4">
-                              {row.status === 'Non Active' ? (
-                                <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-[#ffe4e6] text-[#f43f5e] font-semibold text-[11.5px]">
-                                  Non Active
-                                </span>
-                              ) : (
+                              {isParticipantStatusActive(row.status) ? (
                                 <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold text-[11.5px]">
                                   Active
+                                </span>
+                              ) : (
+                                <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-[#ffe4e6] text-[#f43f5e] font-semibold text-[11.5px]">
+                                  Non Active
                                 </span>
                               )}
                             </td>

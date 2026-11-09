@@ -56,6 +56,7 @@ import {
   ProctorParticipantRow,
   doesKelasMatch,
   isParticipantLockedByViolation,
+  isParticipantStatusActive,
   sanitizeParticipantRows,
 } from './ProctorDashboardView';
 import { generateProctorCardsPDF } from '../utils/pdfProctorCard';
@@ -895,13 +896,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [proctorSearch, setProctorSearch] = useState('');
 
   // Filter controls (1: Status, 2: Kode Tes, 3: Kelompok, 4: Apply)
-  const [filterStatus, setFilterStatus] = useState<string>('Non Aktif');
-  const [filterKodeTes, setFilterKodeTes] = useState<string>('SAS26SMADIP1');
-  const [filterKelompok, setFilterKelompok] = useState<string>('1');
+  const [filterStatus, setFilterStatus] = useState<string>('Semua Status');
+  const [filterKodeTes, setFilterKodeTes] = useState<string>('SEMUA');
+  const [filterKelompok, setFilterKelompok] = useState<string>('SEMUA');
 
-  const [appliedStatus, setAppliedStatus] = useState<string>('Non Aktif');
-  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('SAS26SMADIP1');
-  const [appliedKelompok, setAppliedKelompok] = useState<string>('1');
+  const [appliedStatus, setAppliedStatus] = useState<string>('Semua Status');
+  const [appliedKodeTes, setAppliedKodeTes] = useState<string>('SEMUA');
+  const [appliedKelompok, setAppliedKelompok] = useState<string>('SEMUA');
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [toastMsg, setToastMsg] = useState<string>('');
@@ -1590,6 +1591,62 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     }
   };
 
+  const handleExportMapelToExcel = () => {
+    try {
+      const currentList =
+        Array.isArray(appConfig.mapelList) && appConfig.mapelList.length > 0
+          ? appConfig.mapelList
+          : defaultMapelList;
+
+      if (!currentList || currentList.length === 0) {
+        showNotice('Belum ada data mata pelajaran untuk diunduh.');
+        return;
+      }
+
+      const headers = [
+        'No',
+        'Kode Mapel',
+        'Nama Mata Pelajaran',
+        'Tingkat / Fase',
+        'Kategori',
+        'Durasi (Menit)',
+        'KKM',
+        'Status',
+      ];
+
+      const rows = currentList.map((m: any, idx: number) => [
+        idx + 1,
+        m.kode || '-',
+        m.nama || '-',
+        m.tingkat || '-',
+        m.kategori || '-',
+        m.alokasiMenit || 90,
+        m.kkm || 75,
+        m.status || 'Aktif',
+      ]);
+
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      ws['!cols'] = [
+        { wch: 6 },  // No
+        { wch: 16 }, // Kode Mapel
+        { wch: 42 }, // Nama Mapel
+        { wch: 18 }, // Tingkat/Fase
+        { wch: 22 }, // Kategori
+        { wch: 15 }, // Durasi
+        { wch: 10 }, // KKM
+        { wch: 12 }, // Status
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Daftar Mapel SAS');
+      const dateStr = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(wb, `Daftar_Mata_Pelajaran_SAS_${dateStr}.xlsx`);
+      showNotice(`Berhasil mengunduh ${currentList.length} data mata pelajaran ke Excel!`);
+    } catch (err: any) {
+      showNotice(`Gagal mengunduh Excel: ${err?.message || 'Terjadi kesalahan'}`);
+    }
+  };
+
   const handleDeleteMapelFromSettings = (kodeToDelete: string) => {
     const currentList = Array.isArray(appConfig.mapelList)
       ? appConfig.mapelList
@@ -1792,22 +1849,23 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const filteredRows = useMemo(() => {
     return participants.filter((row) => {
-      if (appliedStatus === 'Non Aktif' && row.status !== 'Non Active') {
+      const isAktif = isParticipantStatusActive(row.status);
+      if (appliedStatus === 'Non Aktif' && isAktif) {
         return false;
       }
-      if (appliedStatus === 'Aktif' && row.status !== 'Active') {
+      if (appliedStatus === 'Aktif' && !isAktif) {
         return false;
       }
-      if (appliedKodeTes !== 'SEMUA' && row.kodeTes !== appliedKodeTes) {
+      if (appliedKodeTes !== 'SEMUA' && row.kodeTes && row.kodeTes !== appliedKodeTes) {
         return false;
       }
-      if (appliedKelompok !== 'SEMUA' && row.kelompok !== appliedKelompok) {
+      if (appliedKelompok !== 'SEMUA' && (row.kelompok || '1') !== appliedKelompok) {
         return false;
       }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchUser = row.username.toLowerCase().includes(q);
-        const matchName = row.namaPeserta.toLowerCase().includes(q);
+        const matchUser = (row.username || '').toLowerCase().includes(q);
+        const matchName = (row.namaPeserta || '').toLowerCase().includes(q);
         if (!matchUser && !matchName) return false;
       }
       return true;
@@ -1879,21 +1937,21 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         visibleSelectedIds.has(r.id) ? { ...r, status: 'Non Active' } : r
       )
     );
-    setFilterStatus('Non Aktif');
-    setAppliedStatus('Non Aktif');
+    setFilterStatus('Semua Status');
+    setAppliedStatus('Semua Status');
     showNotice(`${selectedCount} peserta diubah menjadi Non Active.`);
   };
 
   const handleResetAll = () => {
-    setFilterStatus('Non Aktif');
-    setFilterKodeTes('SAS26SMADIP1');
-    setFilterKelompok('1');
-    setAppliedStatus('Non Aktif');
-    setAppliedKodeTes('SAS26SMADIP1');
-    setAppliedKelompok('1');
+    setFilterStatus('Semua Status');
+    setFilterKodeTes('SEMUA');
+    setFilterKelompok('SEMUA');
+    setAppliedStatus('Semua Status');
+    setAppliedKodeTes('SEMUA');
+    setAppliedKelompok('SEMUA');
     setSearchQuery('');
     setParticipants(INITIAL_ADMIN_PARTICIPANTS);
-    showNotice('Filter dan daftar peserta telah di-reset.');
+    showNotice('Filter dan daftar peserta telah di-reset ke Semua Status dan Semua Kelompok.');
   };
 
   const handleAddParticipant = (e: React.FormEvent) => {
@@ -2988,12 +3046,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     </label>
                     <select
                       value={filterStatus}
-                      onChange={(e) => setFilterStatus(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFilterStatus(val);
+                        setAppliedStatus(val);
+                      }}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
-                      <option value="Non Aktif">Non Aktif</option>
-                      <option value="Aktif">Aktif</option>
                       <option value="Semua Status">Semua Status</option>
+                      <option value="Aktif">Aktif</option>
+                      <option value="Non Aktif">Non Aktif</option>
                     </select>
                   </div>
 
@@ -3004,11 +3066,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     </label>
                     <select
                       value={filterKodeTes}
-                      onChange={(e) => setFilterKodeTes(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFilterKodeTes(val);
+                        setAppliedKodeTes(val);
+                      }}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
-                      <option value="SAS26SMADIP1">SAS26SMADIP1</option>
                       <option value="SEMUA">Semua Kode Tes</option>
+                      <option value="SAS26SMADIP1">SAS26SMADIP1</option>
                     </select>
                   </div>
 
@@ -3019,12 +3085,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     </label>
                     <select
                       value={filterKelompok}
-                      onChange={(e) => setFilterKelompok(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFilterKelompok(val);
+                        setAppliedKelompok(val);
+                      }}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
+                      <option value="SEMUA">Semua Kelompok</option>
                       <option value="1">1</option>
                       <option value="2">2</option>
-                      <option value="SEMUA">Semua Kelompok</option>
                     </select>
                   </div>
 
@@ -3121,9 +3191,24 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         <tr>
                           <td
                             colSpan={5}
-                            className="py-10 text-center text-slate-400"
+                            className="py-10 text-center text-slate-500 space-y-2"
                           >
-                            Tidak ada data peserta yang sesuai dengan filter. Klik tombol Reset atau ubah Status menjadi Semua Status.
+                            <p>Tidak ada data peserta yang sesuai dengan filter.</p>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setFilterStatus('Semua Status');
+                                setAppliedStatus('Semua Status');
+                                setFilterKodeTes('SEMUA');
+                                setAppliedKodeTes('SEMUA');
+                                setFilterKelompok('SEMUA');
+                                setAppliedKelompok('SEMUA');
+                                setSearchQuery('');
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#0095ff] text-xs font-semibold cursor-pointer"
+                            >
+                              Tampilkan Semua Siswa (Reset Filter)
+                            </button>
                           </td>
                         </tr>
                       ) : (
@@ -3146,13 +3231,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                               />
                             </td>
                             <td className="py-4 px-4">
-                              {row.status === 'Non Active' ? (
-                                <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-[#ffe4e6] text-[#f43f5e] font-semibold text-[11.5px]">
-                                  Non Active
-                                </span>
-                              ) : (
+                              {isParticipantStatusActive(row.status) ? (
                                 <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold text-[11.5px]">
                                   Active
+                                </span>
+                              ) : (
+                                <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-[#ffe4e6] text-[#f43f5e] font-semibold text-[11.5px]">
+                                  Non Active
                                 </span>
                               )}
                             </td>
@@ -5979,6 +6064,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       />
                       <button
                         type="button"
+                        onClick={handleExportMapelToExcel}
+                        className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="Unduh seluruh daftar mata pelajaran aktif ke file Excel (.xlsx)"
+                      >
+                        <Download className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Unduh Excel</span>
+                      </button>
+                      <button
+                        type="button"
                         onClick={handleDownloadMapelTemplateExcel}
                         className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
                         title="Unduh contoh template Excel dengan format: Nama mapel, tingkat/fase, kategori, durasi, KKM"
@@ -6215,6 +6309,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         </div>
                       </div>
                       <div className="flex items-center gap-2 flex-wrap shrink-0">
+                        <button
+                          type="button"
+                          onClick={handleExportMapelToExcel}
+                          className="py-2 px-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                          title="Unduh seluruh daftar mata pelajaran aktif ke file Excel (.xlsx)"
+                        >
+                          <Download className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Unduh Excel</span>
+                        </button>
                         <button
                           type="button"
                           onClick={handleDownloadMapelTemplateExcel}
