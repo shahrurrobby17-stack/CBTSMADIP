@@ -1978,6 +1978,65 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     }
   };
 
+  const handleDeleteMapelPackage = (pkgToDelete: ExamPackage) => {
+    const pkgTitle = pkgToDelete.title.replace(/^Simulasi TKA\s*-\s*/i, '').replace(/\s*\(SMA\/MA\/SMK\)/i, '');
+    const cleanTargetKode = (pkgToDelete.code || '').trim().toUpperCase();
+    const cleanTargetNama = (pkgToDelete.title || '')
+      .replace(/^Simulasi TKA\s*-\s*/i, '')
+      .trim()
+      .toLowerCase();
+
+    // 1. Hapus dari packages
+    onUpdatePackages((prevPackages) => {
+      const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
+      return baseList.filter((p) => {
+        if (p.id === pkgToDelete.id) return false;
+        const pCode = (p.code || '').trim().toUpperCase();
+        const pTitle = (p.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
+        if (cleanTargetKode && pCode === cleanTargetKode) return false;
+        if (cleanTargetNama && pTitle === cleanTargetNama) return false;
+        return true;
+      });
+    });
+
+    // 2. Hapus dari appConfig.mapelList & simpan ke localStorage
+    const currentMapelList = Array.isArray(appConfig.mapelList)
+      ? appConfig.mapelList
+      : defaultMapelList;
+    const updatedMapelList = currentMapelList.filter((m: any) => {
+      const mKode = (m.kode || '').trim().toUpperCase();
+      const mNama = (m.nama || '')
+        .replace(/^Simulasi TKA\s*-\s*/i, '')
+        .trim()
+        .toLowerCase();
+      if (cleanTargetKode && mKode === cleanTargetKode) return false;
+      if (cleanTargetNama && mNama === cleanTargetNama) return false;
+      return true;
+    });
+
+    const updatedConfig = {
+      ...appConfig,
+      mapelList: updatedMapelList,
+    };
+    setAppConfig(updatedConfig);
+    try {
+      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
+    } catch {
+      // ignore
+    }
+
+    // 3. Update selectedPkgId jika yang dihapus sedang dipilih
+    const remainingVisible = displayPackages.filter((p) => p.id !== pkgToDelete.id);
+    if (selectedPkgId === pkgToDelete.id && remainingVisible.length > 0) {
+      setSelectedPkgId(remainingVisible[0].id);
+    }
+
+    showNotice(`Mata pelajaran "${pkgTitle}" (${pkgToDelete.code}) berhasil dihapus.`);
+  };
+
   const handleAddQuestion = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPackage) {
@@ -4008,13 +4067,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                 <div
                                   key={pkg.id}
                                   onClick={() => setSelectedPkgId(pkg.id)}
-                                  className={`p-3 rounded-lg border transition-all cursor-pointer ${
+                                  className={`p-3 rounded-lg border transition-all cursor-pointer flex items-start justify-between gap-2 group ${
                                     isSelected
                                       ? 'bg-blue-50/90 border-[#0095ff] ring-1 ring-[#0095ff]/30 shadow-xs'
                                       : 'bg-white border-slate-200 hover:border-blue-300 hover:bg-slate-50/60'
                                   }`}
                                 >
-                                  <div className="min-w-0">
+                                  <div className="min-w-0 flex-1">
                                     <div className="flex items-center gap-1.5 flex-wrap">
                                       <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
                                         {idxMapel + 1}. {pkg.code}
@@ -4030,6 +4089,18 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                       {pkg.subtest} · {pkg.durationMinutes} mnt
                                     </p>
                                   </div>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteMapelPackage(pkg);
+                                    }}
+                                    className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer shrink-0"
+                                    title={`Hapus mata pelajaran ${cleanTitle}`}
+                                    aria-label={`Hapus mata pelajaran ${cleanTitle}`}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
                                 </div>
                               );
                             })
