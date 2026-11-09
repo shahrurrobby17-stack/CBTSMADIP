@@ -26,6 +26,7 @@ import {
   Upload,
   FileText,
   Eye,
+  Archive,
 } from 'lucide-react';
 import { TutWuriLogo } from './PusmendikHeader';
 import {
@@ -51,6 +52,7 @@ import {
 import {
   parseWordQuestions,
   downloadWordQuestionTemplate,
+  downloadWordQuestionArchive,
 } from '../utils/wordQuestionParser';
 
 export interface ProctorParticipantRow {
@@ -1813,6 +1815,18 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       <FileText className="w-3.5 h-3.5 text-blue-600" />
                       Template Word
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        downloadWordQuestionArchive(selectedPackage, 'Semua Tipe Soal');
+                        showNotice(`Arsip soal mata pelajaran ${selectedPackage.title} berhasil diunduh (.docx).`);
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
+                      title="Unduh seluruh butir soal mata pelajaran ini beserta kunci jawaban ke format Word (.docx) sebagai cadangan/arsip"
+                    >
+                      <Archive className="w-3.5 h-3.5" />
+                      <span>Arsip Soal</span>
+                    </button>
 
                     {/* Dropdown Tipe Soal + Tombol Pratinjau Soal di bawahnya */}
                     <div className="flex flex-col items-start gap-1.5">
@@ -2210,6 +2224,19 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                         </span>
                       </button>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        downloadWordQuestionArchive(selectedPackage, statusTesTipeSoal);
+                        showNotice(`Arsip soal (${statusTesTipeSoal}) mata pelajaran ${selectedPackage.title} berhasil diunduh (.docx).`);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white border border-emerald-300 hover:border-emerald-600 text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors shadow-2xs"
+                      title="Unduh butir soal yang sedang ditampilkan ke dalam dokumen Word (.docx) untuk arsip bank soal"
+                    >
+                      <Archive className="w-3.5 h-3.5" />
+                      <span>Arsip Soal</span>
+                    </button>
 
                     {selectedPackage.questions.length > 0 && (
                       <button

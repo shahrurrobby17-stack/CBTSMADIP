@@ -3636,3 +3636,196 @@ export function downloadWordQuestionTemplate(subjectTitle: string = 'Mata Pelaja
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Generates and downloads an archival .docx document containing ALL current questions in the selected exam package.
+ * Correct answers are highlighted in Red (#FF0000) so teachers/admins can re-upload or backup with 100% fidelity.
+ */
+export function downloadWordQuestionArchive(
+  pkg: { title: string; code?: string; questions: Question[] },
+  filterType: string = 'Semua Tipe Soal'
+): void {
+  const cleanSubject = (pkg.title || 'Mata Pelajaran')
+    .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .replace(/\s*\(SMA\/MA\/SMK\)/i, '')
+    .trim();
+
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`;
+
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+
+  const makePara = (
+    text: string,
+    isRed: boolean = false,
+    isBold: boolean = false,
+    isItalic: boolean = false
+  ) => {
+    const escaped = (text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const rPrParts: string[] = [];
+    if (isBold) rPrParts.push('<w:b/>');
+    if (isItalic) rPrParts.push('<w:i/>');
+    if (isRed) rPrParts.push('<w:color w:val="FF0000"/>');
+    const rPrXml = rPrParts.length > 0 ? `<w:rPr>${rPrParts.join('')}</w:rPr>` : '';
+    return `<w:p><w:r>${rPrXml}<w:t xml:space="preserve">${escaped}</w:t></w:r></w:p>`;
+  };
+
+  const makeTableXml = (headers: string[], rows: string[][]) => {
+    const makeRow = (cells: string[], isHeader: boolean) =>
+      `<w:tr>${cells
+        .map((c) => `<w:tc>${makePara(c, false, isHeader)}</w:tc>`)
+        .join('')}</w:tr>`;
+    return `<w:tbl>${makeRow(headers, true)}${rows.map((r) => makeRow(r, false)).join('')}</w:tbl>`;
+  };
+
+  const filteredQuestions = pkg.questions.filter((q) => {
+    if (!filterType || filterType === 'Semua Tipe Soal') return true;
+    return q.type === filterType;
+  });
+
+  const questionElements: string[] = [];
+
+  // Header Title
+  questionElements.push(
+    makePara(
+      `ARSIP BANK SOAL CBT: ${cleanSubject.toUpperCase()} (${pkg.code || 'SAS2026'})`,
+      false,
+      true
+    )
+  );
+  questionElements.push(
+    makePara(
+      `Total Soal: ${filteredQuestions.length} Butir | Filter: ${filterType} | Tanggal Unduh: ${new Date().toLocaleDateString('id-ID')}`,
+      false,
+      false,
+      true
+    )
+  );
+  questionElements.push(makePara('------------------------------------------------------------'));
+
+  filteredQuestions.forEach((q, idx) => {
+    const qNum = idx + 1;
+
+    // Stimulus (jika ada)
+    if (q.stimulusTitle) {
+      questionElements.push(makePara(`[STIMULUS: ${q.stimulusTitle}]`, false, true));
+    }
+    if (q.stimulusText) {
+      const paras = q.stimulusText.split('\n\n');
+      paras.forEach((p) => questionElements.push(makePara(p.trim())));
+    }
+    if (q.stimulusTable && q.stimulusTable.headers?.length > 0) {
+      questionElements.push(
+        makeTableXml(q.stimulusTable.headers, q.stimulusTable.rows || [])
+      );
+    }
+
+    // Nomor & Pertanyaan Soal
+    questionElements.push(
+      makePara(`${qNum}. ${q.questionText || ''}`, false, true)
+    );
+
+    // Render Opsi Berdasarkan Tipe Soal
+    if (q.type === 'pilihan_ganda' || q.type === 'pilihan_ganda_kompleks') {
+      const opts = q.options || [];
+      const correctOptionId = q.correctOptionId || '';
+      const correctOptionIds = new Set(q.correctOptionIds || []);
+
+      opts.forEach((opt) => {
+        const isCorrect =
+          q.type === 'pilihan_ganda'
+            ? opt.id.toUpperCase() === correctOptionId.toUpperCase()
+            : correctOptionIds.has(opt.id) ||
+              correctOptionIds.has(opt.id.toUpperCase()) ||
+              correctOptionIds.has(opt.id.toLowerCase());
+
+        questionElements.push(
+          makePara(`${opt.id}. ${opt.text}`, isCorrect, isCorrect)
+        );
+      });
+    } else if (q.type === 'benar_salah') {
+      const statements = q.statements || [];
+      statements.forEach((st, sIdx) => {
+        const val = st.correctValue || 'Benar';
+        const isBenar = val === 'Benar';
+        questionElements.push(
+          makePara(
+            `Pernyataan ${sIdx + 1}: ${st.statement} [Kunci: ${val}]`,
+            isBenar,
+            true
+          )
+        );
+      });
+    } else if (q.type === 'menjodohkan') {
+      const pairs = q.correctPairs || {};
+      const premises = q.premises || [];
+      const responses = q.responses || [];
+      questionElements.push(makePara('[Pasangan Menjodohkan]:', false, true));
+      premises.forEach((pr) => {
+        const targetRespId = pairs[pr.id];
+        const matchedResp = responses.find((r) => r.id === targetRespId);
+        questionElements.push(
+          makePara(
+            `- ${pr.text} ===> ${matchedResp ? matchedResp.text : targetRespId || '-'}`,
+            true,
+            true
+          )
+        );
+      });
+    } else if (q.type === 'isian_singkat') {
+      const keys = q.correctShortAnswers || [];
+      questionElements.push(
+        makePara(
+          `[Kunci Jawaban Singkat]: ${keys.join(' / ') || '(Tidak ditentukan)'}`,
+          true,
+          true
+        )
+      );
+    }
+
+    if (q.explanation) {
+      questionElements.push(
+        makePara(`Pembahasan: ${q.explanation}`, false, false, true)
+      );
+    }
+
+    questionElements.push(makePara('')); // Baris kosong antar soal
+  });
+
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${questionElements.join('\n    ')}
+  </w:body>
+</w:document>`;
+
+  const zipBytes = createUncompressedZip({
+    '[Content_Types].xml': contentTypesXml,
+    '_rels/.rels': relsXml,
+    'word/document.xml': documentXml,
+  });
+
+  const blob = new Blob([zipBytes as unknown as BlobPart], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const safeName = cleanSubject.replace(/[^a-zA-Z0-9_-]/g, '_') || 'Mapel';
+  const filterSuffix = filterType && filterType !== 'Semua Tipe Soal' ? `_${filterType}` : '';
+  link.href = url;
+  link.download = `Arsip_Soal_${safeName}${filterSuffix}.docx`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
