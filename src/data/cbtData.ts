@@ -633,15 +633,185 @@ export const INITIAL_EXAM_PACKAGES: ExamPackage[] = [
             statement: 'Belanda mengakui kedaulatan Republik Indonesia Serikat (RIS) sebagai negara merdeka dan berdaulat.',
             correctValue: 'Benar',
           },
-          {
-            id: 'sts2',
-            statement: 'Masalah Irian Barat berhasil diselesaikan secara tuntas pada saat penandatanganan dokumen KMB di Den Haag.',
-            correctValue: 'Salah',
-          },
+      {
+        id: 'sts2',
+        statement: 'Masalah Irian Barat berhasil diselesaikan secara tuntas pada saat penandatanganan dokumen KMB di Den Haag.',
+        correctValue: 'Salah',
+      },
+    ],
+    points: 25,
+    explanation:
+      'KMB menghasilkan pengakuan kedaulatan RIS. Masalah Irian Barat ditunda dan disepakati akan diselesaikan dalam waktu 1 tahun setelah KMB.',
+      },
+    ],
+  },
+  {
+    id: 'pai-sas-01',
+    code: 'PAI-SAS',
+    title: 'Pendidikan Agama Islam & Budi Pekerti',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Pendidikan Agama & Budi Pekerti',
+    durationMinutes: 60,
+    targetClass: 'Kelas X',
+    questions: [
+      {
+        id: 'qpai1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'Akidah & Akhlak Mulia',
+        stimulusTitle: 'Konsep Kejujuran dan Integritas dalam Kehidupan',
+        stimulusText:
+          'Sifat jujur (siddiq) merupakan salah satu fondasi utama dalam ajaran Islam yang mengantarkan seseorang menuju kebaikan dan keberkahan hidup.',
+        questionText:
+          'Perilaku amanah dan integritas dalam pelaksanaan ujian sekolah merupakan cerminan dari pengamalan sifat...',
+        instructionText: 'Pilih satu jawaban yang paling tepat!',
+        options: [
+          { id: 'A', text: 'Kizb (Dusta)' },
+          { id: 'B', text: 'Siddiq (Benar dan Jujur)' },
+          { id: 'C', text: 'Kitman (Menyembunyikan kebenaran)' },
+          { id: 'D', text: 'Baladah (Kebodohan)' },
+          { id: 'E', text: 'Riya (Pamer amal)' },
         ],
+        correctOptionId: 'B',
         points: 25,
         explanation:
-          'KMB menghasilkan pengakuan kedaulatan RIS. Masalah Irian Barat ditunda dan disepakati akan diselesaikan dalam waktu 1 tahun setelah KMB.',
+          'Siddiq berarti jujur dan benar, merupakan sifat terpuji yang mendasari integritas akademik.',
+      },
+    ],
+  },
+  {
+    id: 'bio-sas-01',
+    code: 'BIO-SAS',
+    title: 'Biologi & Kimia Terapan',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Peminatan MIPA',
+    durationMinutes: 90,
+    targetClass: 'Kelas XI IPA',
+    questions: [
+      {
+        id: 'qbio1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'Biologi Sel & Metabolisme',
+        stimulusTitle: 'Organel Sel dan Metabolisme Energi',
+        stimulusText:
+          'Mitokondria sering dijuluki sebagai the powerhouse of cell karena perannya yang vital dalam menghasilkan energi dalam bentuk adenosin trifosfat (ATP).',
+        questionText:
+          'Tahap respirasi seluler yang menghasilkan jumlah molekul ATP terbanyak di dalam mitokondria adalah...',
+        instructionText: 'Pilih satu jawaban yang paling tepat!',
+        options: [
+          { id: 'A', text: 'Glikolisis di sitoplasma' },
+          { id: 'B', text: 'Dekarboksilasi oksidatif asam piruvat' },
+          { id: 'C', text: 'Sistem transpor elektron dan fosforilasi oksidatif' },
+          { id: 'D', text: 'Siklus asam sitrat (Krebs)' },
+          { id: 'E', text: 'Fermentasi asam laktat' },
+        ],
+        correctOptionId: 'C',
+        points: 25,
+        explanation:
+          'Rantai transpor elektron dan fosforilasi oksidatif menghasilkan molekul ATP terbanyak dalam respirasi seluler aerob.',
+      },
+    ],
+  },
+  {
+    id: 'eko-sas-01',
+    code: 'EKO-SAS',
+    title: 'Ekonomi & Sosiologi Terapan',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Peminatan IPS',
+    durationMinutes: 90,
+    targetClass: 'Kelas XI IPS',
+    questions: [
+      {
+        id: 'qeko1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'Ekonomi Makro - Kebijakan Moneter',
+        stimulusTitle: 'Pengendalian Inflasi Melalui Kebijakan Moneter',
+        stimulusText:
+          'Bank Indonesia sebagai bank sentral memiliki wewenang untuk mengatur jumlah uang yang beredar guna menjaga kestabilan nilai rupiah.',
+        questionText:
+          'Instrumen kebijakan moneter ketat (tight money policy) yang diterapkan pemerintah untuk meredam laju inflasi tinggi adalah...',
+        instructionText: 'Pilih satu jawaban yang paling tepat!',
+        options: [
+          { id: 'A', text: 'Menurunkan suku bunga acuan perbankan (BI-Rate)' },
+          { id: 'B', text: 'Menaikkan rasio cadangan wajib minimum perbankan' },
+          { id: 'C', text: 'Membeli surat berharga negara secara masif di pasar terbuka' },
+          { id: 'D', text: 'Mempermudah penyaluran kredit konsumtif bagi masyarakat' },
+          { id: 'E', text: 'Menghapuskan pagu kredit batas pinjaman' },
+        ],
+        correctOptionId: 'B',
+        points: 25,
+        explanation:
+          'Menaikkan rasio cadangan wajib kas (reserve requirement) menyerap likuiditas perbankan sehingga jumlah uang beredar berkurang.',
+      },
+    ],
+  },
+  {
+    id: 'fis-sas-01',
+    code: 'FIS-SAS',
+    title: 'Fisika & Kimia Analisis Lanjut',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Peminatan MIPA',
+    durationMinutes: 90,
+    targetClass: 'Kelas XII IPA',
+    questions: [
+      {
+        id: 'qfis1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'Fisika Modern - Efek Fotolistrik',
+        stimulusTitle: 'Fenomena Efek Fotolistrik dan Teori Kuantum',
+        stimulusText:
+          'Eksperimen efek fotolistrik membuktikan bahwa cahaya memiliki sifat partikel berupa paket-paket energi diskrit yang disebut foton.',
+        questionText:
+          'Energi kinetik maksimum elektron yang terlepas dari permukaan logam pada efek fotolistrik bergantung secara langsung pada...',
+        instructionText: 'Pilih satu jawaban yang paling tepat!',
+        options: [
+          { id: 'A', text: 'Intensitas berkas cahaya yang datang' },
+          { id: 'B', text: 'Frekuensi cahaya foton yang dijatuhkan' },
+          { id: 'C', text: 'Durasi waktu penyinaran permukaan logam' },
+          { id: 'D', text: 'Luas penampang pelat katoda logam' },
+          { id: 'E', text: 'Jarak antara sumber cahaya ke plat logam' },
+        ],
+        correctOptionId: 'B',
+        points: 25,
+        explanation:
+          'Menurut persamaan Einstein: Ek = hf - W0. Energi kinetik elektron foto berbanding lurus dengan frekuensi foton penyinar.',
+      },
+    ],
+  },
+  {
+    id: 'geo-sas-01',
+    code: 'GEO-SAS',
+    title: 'Geografi & Sosiologi Kontemporer',
+    level: 'SMA / MA / SMK / Sederajat',
+    subtest: 'Peminatan IPS',
+    durationMinutes: 90,
+    targetClass: 'Kelas XII IPS',
+    questions: [
+      {
+        id: 'qgeo1',
+        number: 1,
+        type: 'pilihan_ganda',
+        category: 'Sistem Informasi Geografis & Tata Ruang',
+        stimulusTitle: 'Pemanfaatan SIG untuk Mitigasi Bencana Alam',
+        stimulusText:
+          'Sistem Informasi Geografis (SIG) memfasilitasi overlay (tumpang susun) peta tematik untuk pemodelan zona rawan tanah longsor.',
+        questionText:
+          'Data spasial atribut lereng curam, curah hujan tinggi, dan jenis tanah rentan erosi dioverlay untuk menghasilkan peta...',
+        instructionText: 'Pilih satu jawaban yang paling tepat!',
+        options: [
+          { id: 'A', text: 'Peta kepadatan persebaran penduduk perkotaan' },
+          { id: 'B', text: 'Peta zonasi tingkat kerawanan bencana longsor' },
+          { id: 'C', text: 'Peta jalur navigasi pelayaran samudra' },
+          { id: 'D', text: 'Peta cadangan minyak bumi dan gas alam lepas pantai' },
+          { id: 'E', text: 'Peta wilayah perbatasan kedaulatan maritim' },
+        ],
+        correctOptionId: 'B',
+        points: 25,
+        explanation:
+          'Tumpang susun peta kemiringan lereng, curah hujan, dan tutupan lahan digunakan untuk pemetaan zona kerentanan bencana tanah longsor.',
       },
     ],
   },

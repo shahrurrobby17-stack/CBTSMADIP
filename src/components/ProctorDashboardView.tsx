@@ -612,6 +612,21 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
             ...m,
             tingkat: getTargetClassFromMapel(m),
           }));
+          if (currentMapelList.length < 10) {
+            const existingCodes = new Set(
+              currentMapelList.map((m: any) => (m.kode || '').trim().toUpperCase())
+            );
+            DEFAULT_MAPEL_LIST.forEach((defM: any) => {
+              const defCode = (defM.kode || '').trim().toUpperCase();
+              if (defCode && !existingCodes.has(defCode)) {
+                currentMapelList.push({
+                  ...defM,
+                  tingkat: getTargetClassFromMapel(defM),
+                });
+                existingCodes.add(defCode);
+              }
+            });
+          }
         }
       }
     } catch {

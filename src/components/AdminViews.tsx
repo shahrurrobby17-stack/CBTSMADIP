@@ -40,6 +40,7 @@ import {
   FileSpreadsheet,
   FileText,
   Archive,
+  AlertCircle,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { TutWuriLogo } from './PusmendikHeader';
@@ -1073,10 +1074,28 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           ? parsed.mapelList
           : defaultMapelList;
 
-        const normalizedMapelList = rawMapelList.map((m: any) => ({
+        let normalizedMapelList = rawMapelList.map((m: any) => ({
           ...m,
           tingkat: getTargetClassFromMapel(m),
         }));
+
+        // Jika tersisa kurang dari 10 mapel (misalnya hanya 5 mapel awal),
+        // otomatis lengkapi dengan mapel standar yang belum ada agar kartu mapel lengkap 10
+        if (normalizedMapelList.length < 10) {
+          const existingCodes = new Set(
+            normalizedMapelList.map((m: any) => (m.kode || '').trim().toUpperCase())
+          );
+          defaultMapelList.forEach((defM: any) => {
+            const defCode = (defM.kode || '').trim().toUpperCase();
+            if (defCode && !existingCodes.has(defCode)) {
+              normalizedMapelList.push({
+                ...defM,
+                tingkat: getTargetClassFromMapel(defM),
+              });
+              existingCodes.add(defCode);
+            }
+          });
+        }
 
         const migratedAdminNama =
           !parsed.adminNama || parsed.adminNama === 'ROMEO GALISTRA, S.Pd.'
@@ -1140,36 +1159,63 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [newMapelAlokasi, setNewMapelAlokasi] = useState(90);
   const [newMapelKKM, setNewMapelKKM] = useState(75);
 
-  const handleAddMapelToSettings = () => {
-    if (!newMapelNama.trim()) {
+  const handleAddMapelToSettings = (presetData?: {
+    nama: string;
+    kode?: string;
+    tingkat?: string;
+    kategori?: string;
+    alokasi?: number;
+    kkm?: number;
+  }) => {
+    const rawNama = presetData ? presetData.nama : newMapelNama;
+    const rawKode = presetData ? (presetData.kode || '') : newMapelKode;
+    const rawTingkat = presetData ? (presetData.tingkat || newMapelTingkat) : newMapelTingkat;
+    const rawKategori = presetData ? (presetData.kategori || newMapelKategori) : newMapelKategori;
+    const rawAlokasi = presetData ? (presetData.alokasi || newMapelAlokasi) : newMapelAlokasi;
+    const rawKKM = presetData ? (presetData.kkm || newMapelKKM) : newMapelKKM;
+
+    if (!rawNama.trim()) {
       showNotice('Harap masukkan nama mata pelajaran.');
       return;
     }
-    const cleanNama = newMapelNama.trim();
-    const cleanKode = (
-      newMapelKode.trim() ||
-      cleanNama
-        .replace(/[^a-zA-Z0-9]/g, '')
-        .slice(0, 3)
-        .toUpperCase() + '-SAS'
-    ).toUpperCase();
+    const cleanNama = rawNama.trim();
 
     const currentList = Array.isArray(appConfig.mapelList)
-      ? appConfig.mapelList
-      : defaultMapelList;
+      ? [...appConfig.mapelList]
+      : [...defaultMapelList];
 
-    if (currentList.some((m: { kode: string }) => m.kode.toUpperCase() === cleanKode)) {
-      showNotice(`Mata pelajaran dengan kode ${cleanKode} sudah terdaftar.`);
-      return;
+    let cleanKode = rawKode.trim().toUpperCase();
+    if (!cleanKode) {
+      const basePrefix =
+        cleanNama
+          .replace(/[^a-zA-Z0-9]/g, '')
+          .slice(0, 3)
+          .toUpperCase() || 'MPL';
+      cleanKode = `${basePrefix}-SAS`;
+      let counter = 2;
+      while (currentList.some((m: { kode: string }) => m.kode.toUpperCase() === cleanKode)) {
+        cleanKode = `${basePrefix}-${String(counter).padStart(2, '0')}-SAS`;
+        counter++;
+      }
+    } else {
+      if (currentList.some((m: { kode: string }) => m.kode.toUpperCase() === cleanKode)) {
+        let counter = 2;
+        let candidate = `${cleanKode}-${counter}`;
+        while (currentList.some((m: { kode: string }) => m.kode.toUpperCase() === candidate)) {
+          counter++;
+          candidate = `${cleanKode}-${counter}`;
+        }
+        cleanKode = candidate;
+      }
     }
 
     const newEntry = {
       kode: cleanKode,
       nama: cleanNama,
-      tingkat: newMapelTingkat,
-      kategori: newMapelKategori,
-      alokasiMenit: Number(newMapelAlokasi) || 90,
-      kkm: Number(newMapelKKM) || 75,
+      tingkat: rawTingkat,
+      kategori: rawKategori,
+      alokasiMenit: Number(rawAlokasi) || 90,
+      kkm: Number(rawKKM) || 75,
       status: 'Aktif',
     };
 
@@ -1184,17 +1230,85 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     } catch {
       // ignore
     }
+
+    // Daftarkan juga secara otomatis ke paket soal CBT agar langsung muncul di Status Tes
+    const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    onUpdatePackages((prevPackages) => {
+      const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
+      const already = baseList.some(
+        (p) =>
+          p.id === newPkgId ||
+          p.code.toUpperCase() === cleanKode ||
+          p.title.trim().toLowerCase() === cleanNama.toLowerCase()
+      );
+      if (already) return baseList;
+      return [
+        ...baseList,
+        {
+          id: newPkgId,
+          code: cleanKode,
+          title: cleanNama,
+          level: 'SMA / MA / SMK / Sederajat',
+          subtest: rawKategori,
+          durationMinutes: Number(rawAlokasi) || 90,
+          targetClass: rawTingkat,
+          questions: [],
+        },
+      ];
+    });
+
     setNewMapelKode('');
     setNewMapelNama('');
     setNewMapelAlokasi(90);
     setNewMapelKKM(75);
-    showNotice(`Mata pelajaran "${cleanNama}" (${cleanKode}) berhasil ditambahkan!`);
+    setShowMapelForm(true);
+    showNotice(`Mata pelajaran "${cleanNama}" (${cleanKode}) untuk ${rawTingkat} berhasil ditambahkan!`);
+  };
+
+  const handleRestoreDefaultMapel = () => {
+    const updatedConfig = {
+      ...appConfig,
+      mapelList: [...DEFAULT_MAPEL_LIST],
+    };
+    setAppConfig(updatedConfig);
+    try {
+      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
+    } catch {
+      // ignore
+    }
+
+    DEFAULT_MAPEL_LIST.forEach((m) => {
+      const cleanKode = m.kode.toUpperCase();
+      const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
+      onUpdatePackages((prevPackages) => {
+        const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
+        if (baseList.some((p) => p.code.toUpperCase() === cleanKode || p.id === newPkgId)) {
+          return baseList;
+        }
+        return [
+          ...baseList,
+          {
+            id: newPkgId,
+            code: m.kode,
+            title: m.nama,
+            level: 'SMA / MA / SMK / Sederajat',
+            subtest: m.kategori,
+            durationMinutes: m.alokasiMenit,
+            targetClass: m.tingkat,
+            questions: [],
+          },
+        ];
+      });
+    });
+
+    showNotice('10 Mata Pelajaran Standar Ujian SAS berhasil dipulihkan!');
   };
 
   const handleDeleteMapelFromSettings = (kodeToDelete: string) => {
     const currentList = Array.isArray(appConfig.mapelList)
       ? appConfig.mapelList
       : defaultMapelList;
+    const itemToDelete = currentList.find((m: any) => m.kode === kodeToDelete);
     const updatedList = currentList.filter(
       (m: { kode: string }) => m.kode !== kodeToDelete
     );
@@ -1208,7 +1322,22 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     } catch {
       // ignore
     }
-    showNotice(`Mata pelajaran ${kodeToDelete} berhasil dihapus dari pengaturan.`);
+
+    // Juga hapus dari daftar paket soal CBT agar sinkron di status tes
+    const cleanTargetKode = kodeToDelete.trim().toUpperCase();
+    const cleanTargetNama = (itemToDelete?.nama || '').trim().toLowerCase();
+    onUpdatePackages((prevPackages) => {
+      const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
+      return baseList.filter((p) => {
+        const pCode = (p.code || '').trim().toUpperCase();
+        const pTitle = (p.title || '').replace(/^Simulasi TKA\s*-\s*/i, '').trim().toLowerCase();
+        if (cleanTargetKode && pCode === cleanTargetKode) return false;
+        if (cleanTargetNama && pTitle === cleanTargetNama) return false;
+        return true;
+      });
+    });
+
+    showNotice(`Mata pelajaran ${itemToDelete?.nama || kodeToDelete} berhasil dihapus dari pengaturan.`);
   };
 
   const handleToggleMapelStatus = (kodeToToggle: string) => {
@@ -5564,6 +5693,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </span>
                       <button
                         type="button"
+                        onClick={handleRestoreDefaultMapel}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="Pulihkan dan lengkapi 10 mata pelajaran standar ujian SAS"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Pulihkan 10 Mapel Standar</span>
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => setShowMapelForm((prev) => !prev)}
                         className="px-3.5 py-1.5 bg-[#0095ff] hover:bg-[#007acc] text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
                         title="Klik untuk membuka formulir input mata pelajaran baru"
@@ -5573,6 +5711,25 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {/* Banner jika mapel kurang dari 10 */}
+                  {(appConfig.mapelList || []).length < 10 && (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-amber-50 border border-amber-200 rounded-lg gap-2 text-xs">
+                      <div className="flex items-center gap-2 text-amber-800">
+                        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>
+                          Saat ini hanya terdaftar <strong>{(appConfig.mapelList || []).length} mata pelajaran</strong>. Anda dapat menginput mata pelajaran baru lewat formulir atau klik tombol di samping untuk memulihkan seluruh 10 mapel standar SAS.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleRestoreDefaultMapel}
+                        className="py-1 px-3 bg-amber-700 hover:bg-amber-800 text-white font-bold text-[11px] rounded-md transition-colors cursor-pointer shrink-0"
+                      >
+                        Pulihkan 10 Mapel Standar
+                      </button>
+                    </div>
+                  )}
 
                   {/* Form Input Mata Pelajaran Baru */}
                   {(showMapelForm || (appConfig.mapelList || []).length === 0) && (
@@ -5596,18 +5753,32 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             placeholder="Contoh: Bahasa Indonesia & Literasi"
                             value={newMapelNama}
                             onChange={(e) => setNewMapelNama(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                handleAddMapelToSettings();
+                              }
+                            }}
                             className="w-full px-3 py-1.5 border border-slate-300 rounded-lg bg-white text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none"
                           />
                         </div>
                         <div>
                           <label className="block font-semibold text-slate-600 mb-1">
-                            Kode Mapel
+                            Kode Mapel (Opsional)
                           </label>
                           <input
                             type="text"
                             placeholder="Contoh: BIN-SAS"
                             value={newMapelKode}
                             onChange={(e) => setNewMapelKode(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                handleAddMapelToSettings();
+                              }
+                            }}
                             className="w-full px-3 py-1.5 border border-slate-300 rounded-lg bg-white font-mono uppercase text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none"
                           />
                         </div>
@@ -5654,6 +5825,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                               max={240}
                               value={newMapelAlokasi}
                               onChange={(e) => setNewMapelAlokasi(Number(e.target.value) || 90)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleAddMapelToSettings();
+                                }
+                              }}
                               className="w-full px-2 py-1.5 border border-slate-300 rounded-lg bg-white text-center font-mono text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none"
                             />
                           </div>
@@ -5667,11 +5845,61 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                               max={100}
                               value={newMapelKKM}
                               onChange={(e) => setNewMapelKKM(Number(e.target.value) || 75)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleAddMapelToSettings();
+                                }
+                              }}
                               className="w-full px-2 py-1.5 border border-slate-300 rounded-lg bg-white text-center font-mono text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none"
                             />
                           </div>
                         </div>
                       </div>
+
+                      {/* Pilihan Cepat / Preset Mata Pelajaran */}
+                      <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                        <div className="text-[11px] font-semibold text-slate-500">
+                          Pilihan Cepat Mapel (Klik untuk mengisi formulir):
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            { nama: 'Bahasa Indonesia & Literasi Membaca', kode: 'BIN-SAS', tingkat: 'Kelas X', kategori: 'Wajib Umum' },
+                            { nama: 'Pendidikan Agama Islam & Budi Pekerti', kode: 'PAI-SAS', tingkat: 'Kelas X', kategori: 'Pendidikan Agama' },
+                            { nama: 'Biologi & Kimia Terapan', kode: 'BIO-SAS', tingkat: 'Kelas XI IPA', kategori: 'Peminatan MIPA' },
+                            { nama: 'Matematika Lanjut & Penalaran Sains', kode: 'TKA-SAINS-02', tingkat: 'Kelas XI IPA', kategori: 'Peminatan MIPA' },
+                            { nama: 'Matematika Wajib & Numerasi', kode: 'MAT-SAS', tingkat: 'Kelas XI IPS', kategori: 'Wajib Umum' },
+                            { nama: 'Ekonomi & Sosiologi Terapan', kode: 'EKO-SAS', tingkat: 'Kelas XI IPS', kategori: 'Peminatan IPS' },
+                            { nama: 'Bahasa Inggris & Literasi Digital', kode: 'BIG-SAS', tingkat: 'Kelas XII IPA', kategori: 'Wajib Umum' },
+                            { nama: 'Fisika & Kimia Analisis Lanjut', kode: 'FIS-SAS', tingkat: 'Kelas XII IPA', kategori: 'Peminatan MIPA' },
+                            { nama: 'Sejarah Indonesia & Kebangsaan', kode: 'SEJ-SAS', tingkat: 'Kelas XII IPS', kategori: 'Wajib Umum' },
+                            { nama: 'Geografi & Sosiologi Kontemporer', kode: 'GEO-SAS', tingkat: 'Kelas XII IPS', kategori: 'Peminatan IPS' },
+                            { nama: 'Informatika & Koding', kode: 'INF-SAS', tingkat: 'Kelas X', kategori: 'Peminatan MIPA' },
+                            { nama: 'Pendidikan Pancasila & Kewarganegaraan (PPKn)', kode: 'PPKN-SAS', tingkat: 'Kelas X', kategori: 'Wajib Umum' },
+                            { nama: 'Pendidikan Jasmani, Olahraga, dan Kesehatan (PJOK)', kode: 'PJOK-SAS', tingkat: 'Kelas XI IPA', kategori: 'Wajib Umum' },
+                            { nama: 'Seni Budaya & Prakarya', kode: 'SNB-SAS', tingkat: 'Kelas XI IPS', kategori: 'Wajib Umum' },
+                          ].map((preset, pIdx) => (
+                            <button
+                              key={pIdx}
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setNewMapelNama(preset.nama);
+                                setNewMapelKode(preset.kode);
+                                setNewMapelTingkat(preset.tingkat);
+                                setNewMapelKategori(preset.kategori);
+                                showNotice(`Form diisi: "${preset.nama}". Tekan Simpan Mata Pelajaran.`);
+                              }}
+                              className="px-2 py-0.5 bg-slate-100 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-300 border border-slate-200 rounded text-[11px] text-slate-700 font-medium transition-colors cursor-pointer"
+                            >
+                              + {preset.kode.split('-')[0]}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
                       <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                         {showMapelForm && (
                           <button
@@ -5684,7 +5912,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         )}
                         <button
                           type="button"
-                          onClick={handleAddMapelToSettings}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleAddMapelToSettings();
+                          }}
                           className="py-1.5 px-4 bg-[#001a6e] hover:bg-[#00155a] text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
                         >
                           <Plus className="w-3.5 h-3.5" />

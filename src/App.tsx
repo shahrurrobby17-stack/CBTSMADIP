@@ -156,7 +156,7 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed
+          const list = parsed
             .filter((pkg: ExamPackage) => pkg && typeof pkg === 'object')
             .map((pkg: ExamPackage) => ({
               ...pkg,
@@ -167,6 +167,22 @@ export default function App() {
                   )
                 : [],
             }));
+
+          // Jika jumlah paket kurang dari 10 (misalnya hanya 5 dari versi lama),
+          // lengkapi dengan paket standar yang belum ada agar kartu mapel lengkap 10 mapel
+          if (list.length < 10) {
+            const existingCodes = new Set(
+              list.map((p) => (p.code || '').trim().toUpperCase())
+            );
+            INITIAL_EXAM_PACKAGES.forEach((initPkg) => {
+              const initCode = (initPkg.code || '').trim().toUpperCase();
+              if (initCode && !existingCodes.has(initCode)) {
+                list.push(initPkg);
+                existingCodes.add(initCode);
+              }
+            });
+          }
+          return list;
         }
       }
     } catch {
