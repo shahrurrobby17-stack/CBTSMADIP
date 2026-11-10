@@ -276,17 +276,6 @@ export const ProctorModal: React.FC<ProctorModalProps> = ({
                   <h3 className="text-sm font-bold text-slate-800">
                     Daftar Paket Mata Ujian & Alokasi Waktu
                   </h3>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onResetDefaultPackages();
-                      notify('Bank soal dikembalikan ke setelan awal Pusmendik.');
-                    }}
-                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-600 hover:text-rose-800 cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Reset ke Bank Soal Bawaan</span>
-                  </button>
                 </div>
 
                 <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl overflow-hidden">

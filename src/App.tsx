@@ -77,9 +77,25 @@ export default function App() {
   const [proctorSession, setProctorSession] = useState<{
     name: string;
     encryptionCode: string;
-  }>({
-    name: 'K05060108-KB6K',
-    encryptionCode: 'GLDTKASMA',
+  }>(() => {
+    try {
+      const saved = localStorage.getItem('cbt_proctor_session');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed.name === 'string' && parsed.name.trim()) {
+          return {
+            name: parsed.name.trim().toUpperCase(),
+            encryptionCode: (parsed.encryptionCode || 'GLDTKASMA').trim().toUpperCase(),
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return {
+      name: 'DRS. H. AHMAD FAUZI, M.PD.',
+      encryptionCode: 'GLDTKASMA',
+    };
   });
   const [adminUsername, setAdminUsername] = useState<string>('ADMIN_SMADIP');
 
@@ -400,6 +416,14 @@ export default function App() {
       // ignore
     }
   }, [proctors]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('cbt_proctor_session', JSON.stringify(proctorSession));
+    } catch {
+      // ignore
+    }
+  }, [proctorSession]);
 
   useEffect(() => {
     try {
@@ -1409,6 +1433,11 @@ export default function App() {
       <ProctorDashboardView
         proctorName={proctorSession.name}
         encryptionCode={proctorSession.encryptionCode}
+        onUpdateProctorName={(newName: string) => {
+          setProctorSession((prev) => ({ ...prev, name: newName }));
+        }}
+        proctors={proctors}
+        onUpdateProctors={handleUpdateProctors}
         activeToken={activeToken}
         tokenSecondsLeft={tokenSecondsLeft}
         onUpdateToken={handleUpdateToken}
@@ -1497,9 +1526,13 @@ export default function App() {
           }}
           onQuickLoginProctor={() => {
             requestCbtFullscreen();
+            const activeProctorName =
+              proctors[0]?.fullName || proctorSession.name || 'DRS. H. AHMAD FAUZI, M.PD.';
+            const activeProctorEnc =
+              proctors[0]?.encryptionCode || proctorSession.encryptionCode || 'GLDTKASMA';
             setProctorSession({
-              name: 'K05060108-KB6K',
-              encryptionCode: 'GLDTKASMA',
+              name: activeProctorName,
+              encryptionCode: activeProctorEnc,
             });
             if (authSpinTimerRef.current) {
               window.clearTimeout(authSpinTimerRef.current);

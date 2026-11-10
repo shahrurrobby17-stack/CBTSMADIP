@@ -41,6 +41,8 @@ import {
   FileText,
   Archive,
   AlertCircle,
+  Edit,
+  X,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { TutWuriLogo } from './PusmendikHeader';
@@ -1046,6 +1048,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     ruangDefault: 'LAB KOMPUTER',
     tingkatKelas: 'Semua Tingkat (Kelas X, XI, XII)',
     daftarKelas: 'X-1, X-2, XI-IPA, XI-IPS, XII-IPA, XII-IPS',
+    namaProktor: 'DRS. H. AHMAD FAUZI, M.PD.',
     adminNama: 'SHAHRUR ROBBY, S.Pd.',
     adminId: 'K05060108-KB6K',
     adminNip: '-',
@@ -1067,7 +1070,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       'Anda terdeteksi keluar dari layar CBT! Harap lapor ke Proktor / Pengawas untuk reset login.',
   };
 
-  const [appConfig, setAppConfig] = useState(() => {
+  const [appConfig, setAppConfig] = useState<typeof defaultAdminConfig>(() => {
     try {
       const saved = localStorage.getItem('cbt_admin_settings');
       if (saved) {
@@ -1121,6 +1124,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         return {
           ...defaultAdminConfig,
           ...parsed,
+          namaProktor: parsed.namaProktor || 'DRS. H. AHMAD FAUZI, M.PD.',
           adminNama: migratedAdminNama,
           adminList: migratedAdminList,
           kelasList:
@@ -1135,6 +1139,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     }
     return defaultAdminConfig;
   });
+
+  const [editingProctor, setEditingProctor] = useState<AdminProctorItem | null>(null);
+  const [editingProctorForm, setEditingProctorForm] = useState<AdminProctorItem | null>(null);
 
   // State untuk form Tambah Data Administrator Baru di menu Pengaturan
   const [showAdminForm, setShowAdminForm] = useState(false);
@@ -1813,6 +1820,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     e.preventDefault();
     try {
       localStorage.setItem('cbt_admin_settings', JSON.stringify(appConfig));
+      if (appConfig.namaProktor && proctors.length > 0) {
+        setProctors((prev) =>
+          prev.map((pr, idx) =>
+            idx === 0 ? { ...pr, fullName: (appConfig.namaProktor || '').toUpperCase() } : pr
+          )
+        );
+      }
     } catch {
       // ignore
     }
@@ -2776,6 +2790,63 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     showNotice('Data proktor berhasil dihapus.');
   };
 
+  const handleSaveEditingProctor = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProctorForm) return;
+    const updatedName = editingProctorForm.fullName.trim().toUpperCase();
+    if (!updatedName) {
+      showNotice('Nama proktor tidak boleh kosong!');
+      return;
+    }
+    const updatedRoom = editingProctorForm.roomName.trim().toUpperCase() || 'LAB KOMPUTER';
+    const updatedRombel = editingProctorForm.rombel.trim() || 'Kelas X';
+    const updatedPassword = editingProctorForm.password.trim() || 'SMADIP2026*';
+
+    setProctors((prev) =>
+      prev.map((pr) =>
+        pr.id === editingProctorForm.id
+          ? {
+              ...pr,
+              fullName: updatedName,
+              roomName: updatedRoom,
+              rombel: updatedRombel,
+              password: updatedPassword,
+              status: editingProctorForm.status,
+            }
+          : pr
+      )
+    );
+
+    // Keep appConfig in sync if this matches the first proctor
+    if (proctors[0]?.id === editingProctorForm.id) {
+      const nextCfg = { ...appConfig, namaProktor: updatedName };
+      setAppConfig(nextCfg);
+      try {
+        localStorage.setItem('cbt_admin_settings', JSON.stringify(nextCfg));
+      } catch {
+        // ignore
+      }
+    }
+
+    // Keep active proctor session in sync in localStorage
+    try {
+      const rawSession = localStorage.getItem('cbt_proctor_session');
+      if (rawSession) {
+        const parsed = JSON.parse(rawSession);
+        if (parsed) {
+          parsed.name = updatedName;
+          localStorage.setItem('cbt_proctor_session', JSON.stringify(parsed));
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    setEditingProctor(null);
+    setEditingProctorForm(null);
+    showNotice(`Data Proktor ${updatedName} berhasil diperbarui dan disimpan.`);
+  };
+
   const handleAddSchedule = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newHariTanggal.trim() || !newJadwalMapel.trim()) return;
@@ -3646,6 +3717,18 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             <td className="py-4 px-4 text-right space-x-2 whitespace-nowrap">
                               <button
                                 type="button"
+                                onClick={() => {
+                                  setEditingProctor(pr);
+                                  setEditingProctorForm({ ...pr });
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[11px] font-semibold cursor-pointer inline-flex items-center gap-1 shadow-2xs"
+                                title="Edit & Simpan Data Proktor"
+                              >
+                                <Edit className="w-3.5 h-3.5 text-[#0095ff]" />
+                                <span>Edit</span>
+                              </button>
+                              <button
+                                type="button"
                                 onClick={() => handleToggleProctorStatus(pr.id)}
                                 className="px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-[#0095ff] text-[11px] font-semibold cursor-pointer"
                               >
@@ -3749,6 +3832,148 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     ))}
                 </div>
               </div>
+
+              {/* Modal Edit Data Proktor */}
+              {editingProctor && editingProctorForm && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
+                  <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-[#f8f9fc]">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-lg bg-blue-100 text-[#0095ff] flex items-center justify-center font-bold">
+                          <Edit className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-800">Edit Data Proktor</h3>
+                          <p className="text-[11px] text-slate-500">ID: {editingProctor.proctorId}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingProctor(null);
+                          setEditingProctorForm(null);
+                        }}
+                        className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-200 transition-colors cursor-pointer"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <form onSubmit={handleSaveEditingProctor} className="p-6 space-y-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          Nama Lengkap Proktor / Gelar
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editingProctorForm.fullName}
+                          onChange={(e) =>
+                            setEditingProctorForm((prev) =>
+                              prev ? { ...prev, fullName: e.target.value } : null
+                            )
+                          }
+                          placeholder="Contoh: DRS. H. AHMAD FAUZI, M.PD."
+                          className="w-full px-3 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0095ff]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          Ruang / Lab Ujian
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editingProctorForm.roomName}
+                          onChange={(e) =>
+                            setEditingProctorForm((prev) =>
+                              prev ? { ...prev, roomName: e.target.value } : null
+                            )
+                          }
+                          placeholder="Contoh: LAB KOMPUTER 1"
+                          className="w-full px-3 py-2 text-xs text-slate-800 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0095ff]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          Rombel yang Dipegang
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editingProctorForm.rombel}
+                          onChange={(e) =>
+                            setEditingProctorForm((prev) =>
+                              prev ? { ...prev, rombel: e.target.value } : null
+                            )
+                          }
+                          placeholder="Contoh: Kelas X & XI IPA"
+                          className="w-full px-3 py-2 text-xs text-slate-800 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0095ff]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          Kata Sandi Login Proktor
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editingProctorForm.password}
+                          onChange={(e) =>
+                            setEditingProctorForm((prev) =>
+                              prev ? { ...prev, password: e.target.value } : null
+                            )
+                          }
+                          className="w-full px-3 py-2 text-xs font-mono text-slate-800 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0095ff]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          Status Akun
+                        </label>
+                        <select
+                          value={editingProctorForm.status}
+                          onChange={(e) =>
+                            setEditingProctorForm((prev) =>
+                              prev
+                                ? { ...prev, status: e.target.value as 'Active' | 'Non Active' }
+                                : null
+                            )
+                          }
+                          className="w-full px-3 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0095ff]"
+                        >
+                          <option value="Active">Active (Aktif Melayani Ujian)</option>
+                          <option value="Non Active">Non Active (Nonaktif)</option>
+                        </select>
+                      </div>
+
+                      <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingProctor(null);
+                            setEditingProctorForm(null);
+                          }}
+                          className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                        >
+                          Batal
+                        </button>
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-semibold text-white bg-[#0095ff] hover:bg-[#007acc] rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-xs"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          Simpan Perubahan
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -5394,14 +5619,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     <Download className="w-3.5 h-3.5" />
                     Ekspor JSON
                   </button>
-                  <button
-                    type="button"
-                    onClick={handleResetSettings}
-                    className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-rose-200 text-rose-600 bg-rose-50 hover:bg-rose-100 flex items-center gap-1.5 transition-colors cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    Reset Standar
-                  </button>
                 </div>
               </div>
 
@@ -5565,6 +5782,40 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           setAppConfig({ ...appConfig, adminId: e.target.value })
                         }
                         className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white font-mono text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Nama Proktor Utama / Penanggung Jawab Ruang
+                      </label>
+                      <input
+                        type="text"
+                        value={appConfig.namaProktor ?? proctors[0]?.fullName ?? 'DRS. H. AHMAD FAUZI, M.PD.'}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setAppConfig({ ...appConfig, namaProktor: val });
+                          if (proctors.length > 0) {
+                            setProctors((prev) =>
+                              prev.map((pr, idx) =>
+                                idx === 0 ? { ...pr, fullName: val.toUpperCase() } : pr
+                              )
+                            );
+                          }
+                          try {
+                            const raw = localStorage.getItem('cbt_proctor_session');
+                            if (raw) {
+                              const s = JSON.parse(raw);
+                              if (s) {
+                                s.name = val.toUpperCase();
+                                localStorage.setItem('cbt_proctor_session', JSON.stringify(s));
+                              }
+                            }
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        placeholder="Contoh: DRS. H. AHMAD FAUZI, M.PD."
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-800 font-medium focus:ring-2 focus:ring-[#0095ff] outline-none"
                       />
                     </div>
                     <div>

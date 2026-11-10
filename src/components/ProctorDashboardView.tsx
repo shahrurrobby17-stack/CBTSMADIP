@@ -27,6 +27,7 @@ import {
   FileText,
   Eye,
   Archive,
+  Edit,
 } from 'lucide-react';
 import { TutWuriLogo } from './PusmendikHeader';
 import {
@@ -38,6 +39,7 @@ import {
 } from '../types/cbt';
 import { getQuestionTypeLabel } from '../data/cbtData';
 import {
+  AdminProctorItem,
   getPkgClass,
   getTargetClassFromMapel,
   DEFAULT_MAPEL_LIST,
@@ -362,6 +364,11 @@ interface ProctorDashboardViewProps {
   onUpdateParticipants?: React.Dispatch<
     React.SetStateAction<ProctorParticipantRow[]>
   >;
+  proctors?: AdminProctorItem[];
+  onUpdateProctors?: (
+    updater: AdminProctorItem[] | ((prev: AdminProctorItem[]) => AdminProctorItem[])
+  ) => void;
+  onUpdateProctorName?: (newName: string) => void;
   packages: ExamPackage[];
   onUpdatePackages: (
     updater:
@@ -383,6 +390,9 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   activeSchedules,
   participants: externalParticipants,
   onUpdateParticipants,
+  proctors,
+  onUpdateProctors,
+  onUpdateProctorName,
   packages,
   onUpdatePackages,
   onResetDefaultPackages,
@@ -416,6 +426,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [toastMsg, setToastMsg] = useState<string>('');
   const [showLogoutConfirmModal, setShowLogoutConfirmModal] = useState<boolean>(false);
+  const [showEditProctorModal, setShowEditProctorModal] = useState<boolean>(false);
+  const [editProctorNameInput, setEditProctorNameInput] = useState<string>('');
 
   // Bank Soal & Status Tes state
   const [selectedPkgId, setSelectedPkgId] = useState(packages[0]?.id || '');
@@ -1263,51 +1275,63 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
           <div className="flex items-center gap-4">
             {(() => {
-              const proctorDirectory = [
-                {
-                  proctorId: 'K05060108-KB6K',
-                  fullName: 'DRS. H. AHMAD FAUZI, M.PD.',
-                  encryptionCode: 'GLDTKASMA',
-                },
-                {
-                  proctorId: 'K05060108-KB7L',
-                  fullName: 'SITI NURHALIZA, S.KOM.',
-                  encryptionCode: 'ENC-8842-WGR',
-                },
-                {
-                  proctorId: 'K05060108-KB8M',
-                  fullName: 'MOCHAMAD RIZALDI, S.PD.',
-                  encryptionCode: 'ENC-9910-WGR',
-                },
-              ];
+              const currentProctorList =
+                Array.isArray(proctors) && proctors.length > 0
+                  ? proctors
+                  : [
+                      {
+                        id: 'pr1',
+                        proctorId: 'K05060108-KB6K',
+                        fullName: 'DRS. H. AHMAD FAUZI, M.PD.',
+                        roomName: 'LAB KOMPUTER 1 (UTAMA)',
+                        rombel: 'Kelas X & XI IPA',
+                        encryptionCode: 'GLDTKASMA',
+                        password: 'SMADIP2026*',
+                        status: 'Active' as const,
+                      },
+                    ];
               const cleanInput = (proctorName || '').trim().toUpperCase();
               const cleanEnc = (encryptionCode || '').trim().toUpperCase();
+
               const matched =
-                proctorDirectory.find(
+                currentProctorList.find(
                   (p) =>
-                    p.proctorId.toUpperCase() === cleanInput ||
-                    p.fullName.toUpperCase() === cleanInput
+                    (p.proctorId || '').toUpperCase() === cleanInput ||
+                    (p.fullName || '').toUpperCase() === cleanInput
                 ) ||
-                proctorDirectory.find(
-                  (p) => p.encryptionCode.toUpperCase() === cleanEnc
+                currentProctorList.find(
+                  (p) => (p.encryptionCode || '').toUpperCase() === cleanEnc
                 );
 
               const displayFullName = matched
                 ? matched.fullName
                 : cleanInput && !cleanInput.startsWith('K05060108')
-                  ? proctorName
-                  : 'DRS. H. AHMAD FAUZI, M.PD.';
+                  ? proctorName.trim().toUpperCase()
+                  : currentProctorList[0]?.fullName || 'DRS. H. AHMAD FAUZI, M.PD.';
               const displayProctorId = matched
                 ? matched.proctorId
                 : cleanInput.startsWith('K05060108')
                   ? cleanInput
-                  : 'K05060108-KB6K';
+                  : currentProctorList[0]?.proctorId || 'K05060108-KB6K';
 
               return (
                 <div className="flex items-center gap-3 text-right">
                   <div className="leading-tight">
-                    <div className="text-xs font-bold text-slate-800">
-                      {displayFullName}
+                    <div className="flex items-center justify-end gap-1.5">
+                      <span className="text-xs font-bold text-slate-800">
+                        {displayFullName}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditProctorNameInput(displayFullName);
+                          setShowEditProctorModal(true);
+                        }}
+                        className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-[#0095ff] cursor-pointer transition-colors"
+                        title="Ubah & Simpan Nama Proktor"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                     <div className="text-[11px] font-mono font-semibold text-slate-500">
                       {displayProctorId}
@@ -2938,6 +2962,83 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
             handleDeleteQuestion(selectedPackage.id, q.id, q.number, q)
           }
         />
+      )}
+
+      {/* Modal Ubah & Simpan Nama Proktor */}
+      {showEditProctorModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-2xs"
+        >
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-50 px-6 py-4 border-b border-slate-100 flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-blue-100 text-[#0095ff] flex items-center justify-center shrink-0">
+                <Edit className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">
+                  Ubah & Simpan Nama Proktor
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  Nama proktor akan tersimpan di sistem dan ditampilkan pada sesi login & laporan.
+                </p>
+              </div>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const clean = editProctorNameInput.trim().toUpperCase();
+                if (!clean) return;
+                onUpdateProctorName?.(clean);
+                if (onUpdateProctors) {
+                  onUpdateProctors((prev) => {
+                    if (prev.length === 0) return prev;
+                    return prev.map((pr, idx) =>
+                      idx === 0 || pr.proctorId === (proctorName || '').trim().toUpperCase()
+                        ? { ...pr, fullName: clean }
+                        : pr
+                    );
+                  });
+                }
+                setShowEditProctorModal(false);
+                showNotice(`Nama Proktor berhasil diubah dan disimpan: ${clean}`);
+              }}
+              className="p-6 space-y-4"
+            >
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Nama Lengkap Proktor Beserta Gelar *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editProctorNameInput}
+                  onChange={(e) => setEditProctorNameInput(e.target.value)}
+                  placeholder="Contoh: DRS. H. AHMAD FAUZI, M.PD."
+                  className="w-full px-3.5 py-2.5 text-xs text-slate-800 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-[#0095ff] shadow-2xs"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setShowEditProctorModal(false)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 text-xs font-bold text-white bg-[#0095ff] hover:bg-[#007acc] rounded-lg shadow-sm transition-colors cursor-pointer"
+                >
+                  Simpan Nama Proktor
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );
