@@ -1,5 +1,8 @@
 import { jsPDF } from 'jspdf';
-import { ProctorParticipantRow } from '../components/ProctorDashboardView';
+import {
+  ProctorParticipantRow,
+  resolveParticipantRuang,
+} from '../components/ProctorDashboardView';
 
 export interface ParticipantCardExportData {
   id: string;
@@ -63,6 +66,13 @@ export function generateParticipantCardsPDF(
     year: 'numeric',
   });
 
+  // Sort/group participants by Ruang Ujian so cards are ordered by room
+  const sortedParticipants = [...participants].sort((a, b) => {
+    const ruangA = resolveParticipantRuang(a as any);
+    const ruangB = resolveParticipantRuang(b as any);
+    return ruangA.localeCompare(ruangB, 'id', { numeric: true });
+  });
+
   // Layout: 8 cards per A4 page (2 columns x 4 rows)
   const cardsPerPage = 8;
   const colWidth = 94;
@@ -72,7 +82,7 @@ export function generateParticipantCardsPDF(
   const gapX = 6;
   const gapY = 3.5;
 
-  participants.forEach((p, index) => {
+  sortedParticipants.forEach((p, index) => {
     if (index > 0 && index % cardsPerPage === 0) {
       doc.addPage();
     }
@@ -144,14 +154,14 @@ export function generateParticipantCardsPDF(
 
     const displayPassword = p.password || `SMADIP${1547 + (index % 50) * 9}*`;
     const displayKelas = p.kelas || (index % 2 === 0 ? 'X' : 'XI IPA');
-    const displayRuang = (p as any).ruang || 'LAB KOMPUTER 1';
+    const displayRuang = resolveParticipantRuang(p as any);
 
     const dataRows: [string, string, boolean][] = [
       ['Nama Peserta', p.namaPeserta, true],
       ['Username / ID', p.username, true],
       ['Kata Sandi', displayPassword, true],
       ['Kelas / Rombel', displayKelas, false],
-      ['Ruang Ujian', displayRuang, false],
+      ['Ruang Ujian', displayRuang, true],
       ['Kode Ujian', p.kodeTes || 'SAS26SMADIP1', false],
       ['Sekolah Asal', schoolName, false],
       ['Tgl. Cetak Kartu', printedDate, false],

@@ -43,6 +43,7 @@ import {
   AlertCircle,
   Edit,
   X,
+  Check,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { TutWuriLogo } from './PusmendikHeader';
@@ -56,6 +57,8 @@ import {
 import { getQuestionTypeLabel } from '../data/cbtData';
 import {
   ProctorParticipantRow,
+  DEFAULT_EXAM_ROOMS,
+  resolveParticipantRuang,
   doesKelasMatch,
   isDefaultDemoParticipantRow,
   isDefaultDemoParticipantsList,
@@ -383,78 +386,84 @@ const KELAS_OPTIONS = ['X', 'XI IPA', 'XI IPS', 'XII IPA', 'XII IPS'] as const;
 export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
   {
     id: 'ap1',
-    selected: true,
+    selected: false,
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20264821',
     password: 'SMADIP1547*',
     namaPeserta: 'ANDRIAN FAJARICO PRASETYA',
-    kelompok: '1',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'X',
     loginState: 'Belum Login',
     requestReset: false,
   },
   {
     id: 'ap2',
-    selected: true,
+    selected: false,
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20267394',
     password: 'SMADIP1556*',
     namaPeserta: 'AHMAD RIZKI NOVANSYAH',
-    kelompok: '1',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'XI IPA',
     loginState: 'Belum Login',
     requestReset: false,
   },
   {
     id: 'ap3',
-    selected: true,
+    selected: false,
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20262918',
     password: 'SMADIP1565*',
     namaPeserta: 'ARYA RESTU KUSUMA',
-    kelompok: '1',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'XI IPS',
     loginState: 'Belum Login',
     requestReset: false,
   },
   {
     id: 'ap4',
-    selected: true,
+    selected: false,
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20268563',
     password: 'SMADIP1574*',
     namaPeserta: 'AUREL RIZKY ADI PRATAMA',
-    kelompok: '1',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'XII IPA',
     loginState: 'Belum Login',
     requestReset: false,
   },
   {
     id: 'ap5',
-    selected: true,
+    selected: false,
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20265147',
     password: 'SMADIP1583*',
     namaPeserta: 'AHMAD DENY FIKRUDIN',
-    kelompok: '1',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'XII IPS',
     loginState: 'Belum Login',
     requestReset: false,
   },
   {
     id: 'ap6',
-    selected: true,
+    selected: false,
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20269302',
     password: 'SMADIP1592*',
     namaPeserta: 'ALDISA FRANDIKA LIAN PRATAMA',
-    kelompok: '1',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'X',
     loginState: 'Belum Login',
     requestReset: false,
@@ -467,7 +476,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     username: 'SA20266475',
     password: 'ANBKTKA26*',
     namaPeserta: 'NADIA PUTRI PRATAMA',
-    kelompok: '1',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'XI IPA',
     loginState: 'Belum Login',
     requestReset: false,
@@ -480,7 +490,8 @@ export const INITIAL_ADMIN_PARTICIPANTS: ProctorParticipantRow[] = [
     username: 'SA20261839',
     password: 'SAINSTKA*',
     namaPeserta: 'BAGAS ADITYA NUGRAHA',
-    kelompok: '2',
+    kelompok: 'Ruang 1',
+    ruang: 'Ruang 1',
     kelas: 'XII IPA',
     loginState: 'Belum Login',
     requestReset: false,
@@ -899,14 +910,29 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [newProctorPass] = useState('SMADIP2026*');
   const [proctorSearch, setProctorSearch] = useState('');
 
-  // Filter controls (1: Status, 2: Kode Tes, 3: Kelompok, 4: Apply)
+  // Filter controls (1: Status, 2: Kode Tes, 3: Ruang Ujian, 4: Apply)
   const [filterStatus, setFilterStatus] = useState<string>('Semua Status');
   const [filterKodeTes, setFilterKodeTes] = useState<string>('SEMUA');
   const [filterKelompok, setFilterKelompok] = useState<string>('SEMUA');
+  const [targetMoveRuang, setTargetMoveRuang] = useState<string>('Ruang 2');
 
   const [appliedStatus, setAppliedStatus] = useState<string>('Semua Status');
   const [appliedKodeTes, setAppliedKodeTes] = useState<string>('SEMUA');
   const [appliedKelompok, setAppliedKelompok] = useState<string>('SEMUA');
+
+  const availableExamRooms = useMemo(() => {
+    const roomSet = new Set<string>(DEFAULT_EXAM_ROOMS);
+    proctors.forEach((pr) => {
+      if (pr.roomName && pr.roomName.trim()) {
+        roomSet.add(pr.roomName.trim());
+      }
+    });
+    participants.forEach((p) => {
+      const r = resolveParticipantRuang(p);
+      if (r) roomSet.add(r);
+    });
+    return Array.from(roomSet);
+  }, [proctors, participants]);
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [toastMsg, setToastMsg] = useState<string>('');
@@ -1961,28 +1987,38 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   };
 
   const filteredRows = useMemo(() => {
-    return participants.filter((row) => {
-      const isAktif = isParticipantStatusActive(row.status);
-      if (appliedStatus === 'Non Aktif' && isAktif) {
-        return false;
-      }
-      if (appliedStatus === 'Aktif' && !isAktif) {
-        return false;
-      }
-      if (appliedKodeTes !== 'SEMUA' && row.kodeTes && row.kodeTes !== appliedKodeTes) {
-        return false;
-      }
-      if (appliedKelompok !== 'SEMUA' && (row.kelompok || '1') !== appliedKelompok) {
-        return false;
-      }
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchUser = (row.username || '').toLowerCase().includes(q);
-        const matchName = (row.namaPeserta || '').toLowerCase().includes(q);
-        if (!matchUser && !matchName) return false;
-      }
-      return true;
-    });
+    return participants
+      .filter((row) => {
+        const isAktif = isParticipantStatusActive(row.status);
+        if (appliedStatus === 'Non Aktif' && isAktif) {
+          return false;
+        }
+        if (appliedStatus === 'Aktif' && !isAktif) {
+          return false;
+        }
+        if (appliedKodeTes !== 'SEMUA' && row.kodeTes && row.kodeTes !== appliedKodeTes) {
+          return false;
+        }
+        if (
+          appliedKelompok !== 'SEMUA' &&
+          resolveParticipantRuang(row) !== appliedKelompok
+        ) {
+          return false;
+        }
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const matchUser = (row.username || '').toLowerCase().includes(q);
+          const matchName = (row.namaPeserta || '').toLowerCase().includes(q);
+          const matchRuang = resolveParticipantRuang(row).toLowerCase().includes(q);
+          if (!matchUser && !matchName && !matchRuang) return false;
+        }
+        return true;
+      })
+      .sort((a, b) =>
+        resolveParticipantRuang(a).localeCompare(resolveParticipantRuang(b), 'id', {
+          numeric: true,
+        })
+      );
   }, [
     participants,
     appliedStatus,
@@ -1994,11 +2030,47 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const allVisibleSelected =
     filteredRows.length > 0 && filteredRows.every((r) => r.selected);
 
+  const selectedVisibleCount = useMemo(
+    () => participants.filter((r) => r.selected).length,
+    [participants]
+  );
+
   const handleApplyFilter = () => {
     setAppliedStatus(filterStatus);
     setAppliedKodeTes(filterKodeTes);
     setAppliedKelompok(filterKelompok);
-    showNotice('Filter Kelompok Test berhasil diterapkan.');
+    showNotice('Filter Ruang Ujian pada Kelompok Tes berhasil diterapkan.');
+  };
+
+  const handleMoveSelectedToRuang = (explicitRuang?: string) => {
+    const selectedRows = participants.filter((r) => r.selected);
+    if (selectedRows.length === 0) {
+      showNotice(
+        'Klik tombol centang biru untuk memilih minimal satu siswa terlebih dahulu.'
+      );
+      return;
+    }
+    const destinationRuang =
+      explicitRuang && explicitRuang !== 'SEMUA'
+        ? explicitRuang
+        : targetMoveRuang || 'Ruang 2';
+
+    const selectedIdSet = new Set(selectedRows.map((r) => r.id));
+    setParticipants((prev) =>
+      prev.map((r) =>
+        selectedIdSet.has(r.id)
+          ? {
+              ...r,
+              ruang: destinationRuang,
+              kelompok: destinationRuang,
+              selected: false,
+            }
+          : r
+      )
+    );
+    showNotice(
+      `${selectedRows.length} siswa berhasil dipindahkan ke ${destinationRuang} (juga diperbarui pada Kartu Login Peserta).`
+    );
   };
 
   const handleToggleSelectAll = () => {
@@ -3243,10 +3315,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     </select>
                   </div>
 
-                  {/* 3. Kelompok Dropdown */}
+                  {/* 3. Ruang Ujian Dropdown */}
                   <div className="lg:col-span-3 space-y-1.5">
                     <label className="block text-xs font-medium text-slate-500">
-                      Kelompok
+                      Ruang Ujian
                     </label>
                     <select
                       value={filterKelompok}
@@ -3254,46 +3326,138 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         const val = e.target.value;
                         setFilterKelompok(val);
                         setAppliedKelompok(val);
+                        if (val !== 'SEMUA') {
+                          setTargetMoveRuang(val);
+                        }
                       }}
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
-                      <option value="SEMUA">Semua Kelompok</option>
-                      <option value="1">1</option>
-                      <option value="2">2</option>
+                      <option value="SEMUA">Semua Ruang Ujian</option>
+                      {availableExamRooms.map((room) => (
+                        <option key={room} value={room}>
+                          {room}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
                   {/* 4. Apply Button */}
-                  <div className="lg:col-span-3">
+                  <div className="lg:col-span-3 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={handleApplyFilter}
-                      className="px-8 py-2.5 rounded-lg bg-[#0095ff] hover:bg-[#007acc] text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
+                      className="px-6 py-2.5 rounded-lg bg-[#0095ff] hover:bg-[#007acc] text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors cursor-pointer"
                     >
                       Apply
                     </button>
                   </div>
                 </div>
+
+                {/* Tab Pengelompokan Siswa per Ruang Ujian */}
+                <div className="pt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilterKelompok('SEMUA');
+                      setAppliedKelompok('SEMUA');
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                      appliedKelompok === 'SEMUA'
+                        ? 'bg-[#001a6e] text-white border-[#001a6e] shadow-2xs'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    Semua Ruang ({participants.length})
+                  </button>
+                  {availableExamRooms.map((room) => {
+                    const countInRoom = participants.filter(
+                      (p) => resolveParticipantRuang(p) === room
+                    ).length;
+                    const isSelectedRoom = appliedKelompok === room;
+                    return (
+                      <button
+                        key={room}
+                        type="button"
+                        onClick={() => {
+                          setFilterKelompok(room);
+                          setAppliedKelompok(room);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                          isSelectedRoom
+                            ? 'bg-[#0095ff] text-white border-[#0095ff] shadow-2xs'
+                            : countInRoom > 0
+                            ? 'bg-blue-50/70 text-[#001a6e] border-blue-200 hover:bg-blue-100/70'
+                            : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span>{room}</span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            isSelectedRoom
+                              ? 'bg-white/20 text-white'
+                              : countInRoom > 0
+                              ? 'bg-[#0095ff] text-white'
+                              : 'bg-slate-100 text-slate-400'
+                          }`}
+                        >
+                          {countInRoom > 0 ? `${countInRoom} Siswa` : 'Kosong'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Table Card */}
               <div className="bg-white rounded-xl shadow-xs border border-slate-100 overflow-hidden">
-                {/* Search & Unassign / Assign / Reset Toolbar */}
-                <div className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  {/* Search Input */}
-                  <div className="relative w-full sm:max-w-xs">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Search by Username atau Nama Peserta"
-                      className="w-full pl-10 pr-4 py-2 text-xs text-slate-700 placeholder:text-slate-400 bg-white border border-slate-200 rounded-lg focus:outline-none focus:border-[#0095ff]"
-                    />
+                {/* Search & Move Room / Unassign / Assign Toolbar */}
+                <div className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  {/* Search Input & Selected Counter */}
+                  <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+                    <div className="relative w-full sm:w-72">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Search Username, Nama, atau Ruang..."
+                        className="w-full pl-10 pr-4 py-2 text-xs text-slate-700 placeholder:text-slate-400 bg-white border border-slate-200 rounded-lg focus:outline-none focus:border-[#0095ff]"
+                      />
+                    </div>
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200 text-[#0095ff] text-xs font-bold">
+                      <Check className="w-3.5 h-3.5 stroke-[3]" />
+                      <span>{selectedVisibleCount} Siswa Terpilih</span>
+                    </span>
                   </div>
 
-                  {/* Action Buttons: Unassign | Assign */}
-                  <div className="flex items-center gap-2.5">
+                  {/* Action Buttons: Pindahkan Ruang Ujian | Unassign | Assign */}
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <div className="inline-flex items-center gap-1.5 bg-blue-50/60 border border-blue-200 rounded-lg p-1">
+                      <span className="text-[11px] font-bold text-[#001a6e] pl-2">
+                        Pindahkan ke:
+                      </span>
+                      <select
+                        value={targetMoveRuang}
+                        onChange={(e) => setTargetMoveRuang(e.target.value)}
+                        aria-label="Pilih Ruang Ujian Tujuan"
+                        className="px-2.5 py-1 text-xs font-bold text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:border-[#0095ff]"
+                      >
+                        {availableExamRooms.map((room) => (
+                          <option key={room} value={room}>
+                            {room}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleMoveSelectedToRuang(targetMoveRuang)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#0095ff] hover:bg-[#007acc] text-white text-xs font-semibold transition-colors cursor-pointer shadow-2xs"
+                      >
+                        <Check className="w-3.5 h-3.5 stroke-[3]" />
+                        <span>Pindahkan Ruang</span>
+                      </button>
+                    </div>
+
                     <button
                       type="button"
                       onClick={handleUnassignSelected}
@@ -3316,14 +3480,20 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="bg-[#f8f9fc] border-y border-slate-100 text-[12px] font-bold text-slate-600">
-                        <th className="py-3.5 px-5 w-12">
-                          <input
-                            type="checkbox"
-                            checked={allVisibleSelected}
-                            onChange={handleToggleSelectAll}
+                        <th className="py-3.5 px-5 w-14">
+                          <button
+                            type="button"
+                            onClick={handleToggleSelectAll}
                             aria-label="Pilih Semua Peserta"
-                            className="w-4 h-4 rounded accent-[#0095ff] cursor-pointer"
-                          />
+                            title="Pilih / Batal Pilih Semua Siswa"
+                            className={`w-5 h-5 rounded-md flex items-center justify-center transition-all cursor-pointer ${
+                              allVisibleSelected
+                                ? 'bg-[#0095ff] border-2 border-[#0095ff] text-white shadow-2xs ring-2 ring-blue-100'
+                                : 'bg-blue-50/50 hover:bg-blue-100/80 border-2 border-[#0095ff]/60 text-[#0095ff]/40 hover:text-[#0095ff]'
+                            }`}
+                          >
+                            <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          </button>
                         </th>
                         <th className="py-3.5 px-4">
                           <div className="inline-flex items-center gap-1.5">
@@ -3334,6 +3504,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         <th className="py-3.5 px-4">
                           <div className="inline-flex items-center gap-1.5">
                             <span>Kode Test</span>
+                            <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                          </div>
+                        </th>
+                        <th className="py-3.5 px-4">
+                          <div className="inline-flex items-center gap-1.5">
+                            <span>Ruang Ujian</span>
                             <ArrowUpDown className="w-3 h-3 text-slate-400" />
                           </div>
                         </th>
@@ -3352,71 +3528,201 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-xs">
-                      {filteredRows.length === 0 ? (
-                        <tr>
-                          <td
-                            colSpan={5}
-                            className="py-10 text-center text-slate-500 space-y-2"
-                          >
-                            <p>Tidak ada data peserta yang sesuai dengan filter.</p>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setFilterStatus('Semua Status');
-                                setAppliedStatus('Semua Status');
-                                setFilterKodeTes('SEMUA');
-                                setAppliedKodeTes('SEMUA');
-                                setFilterKelompok('SEMUA');
-                                setAppliedKelompok('SEMUA');
-                                setSearchQuery('');
-                              }}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#0095ff] text-xs font-semibold cursor-pointer"
-                            >
-                              Tampilkan Semua Siswa (Reset Filter)
-                            </button>
-                          </td>
-                        </tr>
-                      ) : (
-                        filteredRows.map((row) => (
-                          <tr
-                            key={row.id}
-                            onClick={() => handleToggleRow(row.id)}
-                            className="hover:bg-slate-50/90 transition-colors cursor-pointer"
-                          >
+                      {appliedKelompok !== 'SEMUA' ? (
+                        filteredRows.length === 0 ? (
+                          <tr>
                             <td
-                              className="py-4 px-5"
-                              onClick={(e) => e.stopPropagation()}
+                              colSpan={6}
+                              className="py-12 text-center text-slate-500 space-y-2"
                             >
-                              <input
-                                type="checkbox"
-                                checked={row.selected}
-                                onChange={() => handleToggleRow(row.id)}
-                                aria-label={`Pilih ${row.namaPeserta}`}
-                                className="w-4 h-4 rounded accent-[#0095ff] cursor-pointer"
-                              />
-                            </td>
-                            <td className="py-4 px-4">
-                              {isParticipantStatusActive(row.status) ? (
-                                <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold text-[11.5px]">
-                                  Active
-                                </span>
-                              ) : (
-                                <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-[#ffe4e6] text-[#f43f5e] font-semibold text-[11.5px]">
-                                  Non Active
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-4 px-4 font-medium text-slate-600">
-                              {row.kodeTes}
-                            </td>
-                            <td className="py-4 px-4 font-mono text-slate-600">
-                              {row.username}
-                            </td>
-                            <td className="py-4 px-4 font-medium text-slate-700">
-                              {row.namaPeserta}
+                              <div className="text-sm font-bold text-slate-700">
+                                Tidak ada data
+                              </div>
+                              <p className="text-xs text-slate-500">
+                                Belum ada peserta yang ditempatkan pada{' '}
+                                <strong>{appliedKelompok}</strong>. Pilih siswa
+                                dengan tombol centang biru lalu klik{' '}
+                                <strong>Pindahkan Ruang</strong>.
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setFilterStatus('Semua Status');
+                                  setAppliedStatus('Semua Status');
+                                  setFilterKodeTes('SEMUA');
+                                  setAppliedKodeTes('SEMUA');
+                                  setFilterKelompok('SEMUA');
+                                  setAppliedKelompok('SEMUA');
+                                  setSearchQuery('');
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#0095ff] text-xs font-semibold cursor-pointer"
+                              >
+                                Tampilkan Semua Ruang Ujian
+                              </button>
                             </td>
                           </tr>
-                        ))
+                        ) : (
+                          filteredRows.map((row) => (
+                            <tr
+                              key={row.id}
+                              onClick={() => handleToggleRow(row.id)}
+                              className={`transition-colors cursor-pointer ${
+                                row.selected
+                                  ? 'bg-blue-50/35 hover:bg-blue-50/60'
+                                  : 'hover:bg-slate-50/90'
+                              }`}
+                            >
+                              <td
+                                className="py-4 px-5"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleRow(row.id)}
+                                  aria-label={`Pilih ${row.namaPeserta}`}
+                                  title={
+                                    row.selected
+                                      ? `Batal pilih ${row.namaPeserta}`
+                                      : `Pilih ${row.namaPeserta}`
+                                  }
+                                  className={`w-5 h-5 rounded-md flex items-center justify-center transition-all cursor-pointer ${
+                                    row.selected
+                                      ? 'bg-[#0095ff] border-2 border-[#0095ff] text-white shadow-2xs ring-2 ring-blue-100'
+                                      : 'bg-blue-50/50 hover:bg-blue-100/80 border-2 border-[#0095ff]/60 text-[#0095ff]/35 hover:text-[#0095ff]'
+                                  }`}
+                                >
+                                  <Check className="w-3.5 h-3.5 stroke-[3]" />
+                                </button>
+                              </td>
+                              <td className="py-4 px-4">
+                                {isParticipantStatusActive(row.status) ? (
+                                  <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold text-[11.5px]">
+                                    Active
+                                  </span>
+                                ) : (
+                                  <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-[#ffe4e6] text-[#f43f5e] font-semibold text-[11.5px]">
+                                    Non Active
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-4 px-4 font-medium text-slate-600">
+                                {row.kodeTes}
+                              </td>
+                              <td className="py-4 px-4">
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-md bg-blue-50 text-[#001a6e] border border-blue-200 font-bold text-[11px]">
+                                  {resolveParticipantRuang(row)}
+                                </span>
+                              </td>
+                              <td className="py-4 px-4 font-mono text-slate-600">
+                                {row.username}
+                              </td>
+                              <td className="py-4 px-4 font-medium text-slate-700">
+                                {row.namaPeserta}
+                              </td>
+                            </tr>
+                          ))
+                        )
+                      ) : (
+                        availableExamRooms.map((room) => {
+                          const roomRows = filteredRows.filter(
+                            (r) => resolveParticipantRuang(r) === room
+                          );
+                          return (
+                            <React.Fragment key={room}>
+                              <tr className="bg-slate-100/85 border-y border-slate-200">
+                                <td
+                                  colSpan={6}
+                                  className="py-2.5 px-5 font-extrabold text-xs text-[#001a6e]"
+                                >
+                                  <div className="flex items-center justify-between">
+                                    <span>KELOMPOK RUANG UJIAN: {room}</span>
+                                    <span
+                                      className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                                        roomRows.length > 0
+                                          ? 'bg-blue-100 text-[#001a6e]'
+                                          : 'bg-slate-200 text-slate-600'
+                                      }`}
+                                    >
+                                      {roomRows.length > 0
+                                        ? `${roomRows.length} Peserta`
+                                        : 'Tidak ada data (0 Peserta)'}
+                                    </span>
+                                  </div>
+                                </td>
+                              </tr>
+                              {roomRows.length === 0 ? (
+                                <tr>
+                                  <td
+                                    colSpan={6}
+                                    className="py-4 px-5 text-center text-slate-400 italic bg-slate-50/40"
+                                  >
+                                    Tidak ada data peserta pada {room}.
+                                  </td>
+                                </tr>
+                              ) : (
+                                roomRows.map((row) => (
+                                  <tr
+                                    key={row.id}
+                                    onClick={() => handleToggleRow(row.id)}
+                                    className={`transition-colors cursor-pointer ${
+                                      row.selected
+                                        ? 'bg-blue-50/35 hover:bg-blue-50/60'
+                                        : 'hover:bg-slate-50/90'
+                                    }`}
+                                  >
+                                    <td
+                                      className="py-4 px-5"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleRow(row.id)}
+                                        aria-label={`Pilih ${row.namaPeserta}`}
+                                        title={
+                                          row.selected
+                                            ? `Batal pilih ${row.namaPeserta}`
+                                            : `Pilih ${row.namaPeserta}`
+                                        }
+                                        className={`w-5 h-5 rounded-md flex items-center justify-center transition-all cursor-pointer ${
+                                          row.selected
+                                            ? 'bg-[#0095ff] border-2 border-[#0095ff] text-white shadow-2xs ring-2 ring-blue-100'
+                                            : 'bg-blue-50/50 hover:bg-blue-100/80 border-2 border-[#0095ff]/60 text-[#0095ff]/35 hover:text-[#0095ff]'
+                                        }`}
+                                      >
+                                        <Check className="w-3.5 h-3.5 stroke-[3]" />
+                                      </button>
+                                    </td>
+                                    <td className="py-4 px-4">
+                                      {isParticipantStatusActive(row.status) ? (
+                                        <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold text-[11.5px]">
+                                          Active
+                                        </span>
+                                      ) : (
+                                        <span className="inline-block min-w-[110px] text-center px-3 py-1 rounded-md bg-[#ffe4e6] text-[#f43f5e] font-semibold text-[11.5px]">
+                                          Non Active
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-4 px-4 font-medium text-slate-600">
+                                      {row.kodeTes}
+                                    </td>
+                                    <td className="py-4 px-4">
+                                      <span className="inline-flex items-center px-2.5 py-1 rounded-md bg-blue-50 text-[#001a6e] border border-blue-200 font-bold text-[11px]">
+                                        {resolveParticipantRuang(row)}
+                                      </span>
+                                    </td>
+                                    <td className="py-4 px-4 font-mono text-slate-600">
+                                      {row.username}
+                                    </td>
+                                    <td className="py-4 px-4 font-medium text-slate-700">
+                                      {row.namaPeserta}
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+                            </React.Fragment>
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
@@ -4319,6 +4625,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         <th className="py-3.5 px-5">Username</th>
                         <th className="py-3.5 px-4">Password</th>
                         <th className="py-3.5 px-4">Nama Peserta</th>
+                        <th className="py-3.5 px-4">Ruang Ujian</th>
                         <th className="py-3.5 px-4">Kode Test</th>
                         <th className="py-3.5 px-4 text-center">Kelas</th>
                         <th className="py-3.5 px-4">Status</th>
@@ -4345,7 +4652,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           return (
                             <tr>
                               <td
-                                colSpan={8}
+                                colSpan={9}
                                 className="py-10 px-5 text-center text-slate-500"
                               >
                                 {activeMenu === 'request_reset' &&
@@ -4372,6 +4679,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                               </td>
                               <td className="py-3.5 px-4 font-semibold text-slate-800">
                                 {p.namaPeserta}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <span className="inline-flex items-center px-2.5 py-0.5 rounded bg-blue-50 text-[#001a6e] border border-blue-200 font-bold text-[11px]">
+                                  {resolveParticipantRuang(p)}
+                                </span>
                               </td>
                               <td className="py-3.5 px-4 text-slate-600">
                                 {p.kodeTes}

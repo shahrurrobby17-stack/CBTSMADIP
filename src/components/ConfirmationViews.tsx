@@ -5,6 +5,7 @@ import {
   ProctorParticipantRow,
   doesKelasMatch,
   normalizeKelasCode,
+  resolveParticipantRuang,
 } from './ProctorDashboardView';
 import { getPkgClass } from './AdminViews';
 import { fetchVercelStorage } from '../utils/vercelStorage';
@@ -103,6 +104,11 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       matchedParticipant?.kelas || initialProfile.kelas || 'X';
     return normalizeKelasCode(rawKelas) || 'X';
   }, [initialProfile.kelas, matchedParticipant]);
+
+  const studentRuang = useMemo(
+    () => resolveParticipantRuang(matchedParticipant),
+    [matchedParticipant]
+  );
 
   // Prefer active schedules matching the student's class; if none match specifically, fall back to all active schedules
   const studentActiveSchedules = useMemo(() => {
@@ -303,6 +309,16 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             </label>
             <div className="sm:col-span-2 text-sm font-bold text-slate-900">
               Kelas {studentKelas}
+            </div>
+          </div>
+
+          {/* Ruang Ujian */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
+            <label className="text-xs font-semibold text-slate-500">
+              Ruang Ujian
+            </label>
+            <div className="sm:col-span-2 text-sm font-bold text-slate-900">
+              {studentRuang}
             </div>
           </div>
 

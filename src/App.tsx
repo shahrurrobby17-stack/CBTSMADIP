@@ -612,6 +612,7 @@ export default function App() {
               namaPeserta: row.namaPeserta,
               kelas: row.kelas,
               kelompok: row.kelompok,
+              ruang: row.ruang,
               kodeTes: row.kodeTes,
               status: row.status,
               loginState: row.loginState,
@@ -942,23 +943,32 @@ export default function App() {
         Array.isArray(res.data.participants) &&
         res.data.participants.length > 0
       ) {
-        // Merge local lastResetAt so a reset participant never flickers back to locked
+        // Merge local lastResetAt and local selected state so UI selections never flicker
         const localResetMap = new Map<string, number>();
+        const localSelectedMap = new Map<string, boolean>();
         participantsRef.current.forEach((p) => {
+          const u = p.username.trim().toUpperCase();
           if (typeof p.lastResetAt === 'number' && p.lastResetAt > 0) {
-            localResetMap.set(p.username.trim().toUpperCase(), p.lastResetAt);
+            localResetMap.set(u, p.lastResetAt);
           }
+          localSelectedMap.set(u, Boolean(p.selected));
         });
         const mergedRemoteParticipants = sanitizeParticipantRows(
           res.data.participants.map((row) => {
-            const localReset = localResetMap.get(
-              (row.username || '').trim().toUpperCase()
-            );
+            const u = (row.username || '').trim().toUpperCase();
+            const localReset = localResetMap.get(u);
+            const localSelected = localSelectedMap.get(u);
             const maxReset = Math.max(
               typeof row.lastResetAt === 'number' ? row.lastResetAt : 0,
               localReset || 0
             );
-            return maxReset > 0 ? { ...row, lastResetAt: maxReset } : row;
+            return {
+              ...row,
+              ...(typeof localSelected === 'boolean'
+                ? { selected: localSelected }
+                : {}),
+              ...(maxReset > 0 ? { lastResetAt: maxReset } : {}),
+            };
           })
         );
         setParticipants(mergedRemoteParticipants);
