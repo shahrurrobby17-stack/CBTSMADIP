@@ -14,85 +14,42 @@ export interface ParticipantCardExportData {
   sekolah?: string;
 }
 
-/**
- * Draws the colored Kementerian Pendidikan (Tut Wuri Handayani) emblem at (cx, cy) with radius r.
- */
-function drawKemendikbudLogo(doc: jsPDF, cx: number, cy: number, r: number) {
-  // Pentagon vertices (top, upper-right, lower-right, lower-left, upper-left)
-  const pts: [number, number][] = [];
-  for (let i = 0; i < 5; i++) {
-    const angle = ((-90 + i * 72) * Math.PI) / 180;
-    pts.push([cx + r * Math.cos(angle), cy + r * Math.sin(angle)]);
+function getStoredCardLogoDataUrl(explicitLogo?: string): string {
+  if (explicitLogo && explicitLogo.startsWith('data:image/')) {
+    return explicitLogo;
   }
-
-  // Fill pentagon with Kemendikbud Blue (#297bbf)
-  doc.setFillColor(41, 123, 191);
-  doc.setDrawColor(41, 123, 191);
-  for (let i = 0; i < 5; i++) {
-    const next = (i + 1) % 5;
-    doc.triangle(
-      cx,
-      cy,
-      pts[i][0],
-      pts[i][1],
-      pts[next][0],
-      pts[next][1],
-      'F'
-    );
+  try {
+    const direct = localStorage.getItem('cbt_kartu_peserta_logo');
+    if (direct && direct.startsWith('data:image/')) {
+      return direct;
+    }
+    const rawSettings = localStorage.getItem('cbt_admin_settings');
+    if (rawSettings) {
+      const parsed = JSON.parse(rawSettings);
+      if (
+        parsed &&
+        typeof parsed.logoKartuPeserta === 'string' &&
+        parsed.logoKartuPeserta.startsWith('data:image/')
+      ) {
+        return parsed.logoKartuPeserta;
+      }
+    }
+  } catch {
+    // ignore
   }
-
-  // Outer black border of pentagon
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.35);
-  for (let i = 0; i < 5; i++) {
-    const next = (i + 1) % 5;
-    doc.line(pts[i][0], pts[i][1], pts[next][0], pts[next][1]);
-  }
-
-  // White Garuda wings & tail feathers
-  doc.setDrawColor(255, 255, 255);
-  doc.setFillColor(255, 255, 255);
-  doc.setLineWidth(0.45);
-  // Left wing
-  doc.line(cx - r * 0.56, cy - r * 0.06, cx - r * 0.16, cy + r * 0.18);
-  doc.line(cx - r * 0.48, cy + r * 0.12, cx - r * 0.14, cy + r * 0.3);
-  doc.line(cx - r * 0.38, cy + r * 0.28, cx - r * 0.12, cy + r * 0.4);
-  // Right wing
-  doc.line(cx + r * 0.56, cy - r * 0.06, cx + r * 0.16, cy + r * 0.18);
-  doc.line(cx + r * 0.48, cy + r * 0.12, cx + r * 0.14, cy + r * 0.3);
-  doc.line(cx + r * 0.38, cy + r * 0.28, cx + r * 0.12, cy + r * 0.4);
-
-  // Yellow/Gold Flame in center
-  doc.setFillColor(251, 210, 6);
-  doc.circle(cx, cy + r * 0.04, r * 0.16, 'F');
-  doc.triangle(
-    cx - r * 0.12,
-    cy + r * 0.02,
-    cx + r * 0.12,
-    cy + r * 0.02,
-    cx,
-    cy - r * 0.36,
-    'F'
-  );
-
-  // White Open Book
-  doc.setFillColor(255, 255, 255);
-  doc.rect(cx - r * 0.34, cy + r * 0.42, r * 0.68, r * 0.16, 'F');
-
-  // Top Text
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(2.8);
-  doc.setTextColor(255, 255, 255);
-  doc.text('TUT WURI HANDAYANI', cx, cy - r * 0.48, { align: 'center' });
+  return '';
 }
 
 export function generateParticipantCardsPDF(
   participants: (ProctorParticipantRow | ParticipantCardExportData)[],
   filename = 'Kartu_Peserta_Ujian_SAS_SMA_Islam_Diponegoro_Wagir.pdf',
   schoolName = 'SMA ISLAM DIPONEGORO WAGIR',
-  headmasterName = 'ROMEO GALISTRA, S.Pd.'
+  headmasterName = 'ROMEO GALISTRA, S.Pd.',
+  logoDataUrl?: string
 ): void {
   if (!participants || participants.length === 0) return;
+
+  const resolvedLogo = getStoredCardLogoDataUrl(logoDataUrl);
 
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -140,24 +97,40 @@ export function generateParticipantCardsPDF(
     doc.line(cardX + 1.5, headerTopY, cardX + colWidth - 1.5, headerTopY);
     doc.line(cardX + 1.5, headerBottomY, cardX + colWidth - 1.5, headerBottomY);
 
-    // Header Text (Centered across card)
+    let textCenterX = cardX + colWidth / 2;
+
+    // Draw uploaded Kop Logo on the left side of the header if available
+    if (resolvedLogo) {
+      try {
+        const format = resolvedLogo.startsWith('data:image/jpeg') ||
+          resolvedLogo.startsWith('data:image/jpg')
+          ? 'JPEG'
+          : 'PNG';
+        doc.addImage(resolvedLogo, format, cardX + 3.5, cardY + 4.8, 16, 16);
+        textCenterX = cardX + 20 + (colWidth - 22) / 2;
+      } catch {
+        // Fallback to centered text if image fails
+      }
+    }
+
+    // Header Text
     doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
-    doc.text('KARTU LOGIN PESERTA', cardX + colWidth / 2, cardY + 8.5, {
+    doc.text('KARTU LOGIN PESERTA', textCenterX, cardY + 8.5, {
       align: 'center',
     });
     doc.setFontSize(8.5);
-    doc.text('SUMATIF AKHIR SEMESTER', cardX + colWidth / 2, cardY + 13, {
+    doc.text('SUMATIF AKHIR SEMESTER', textCenterX, cardY + 13, {
       align: 'center',
     });
     doc.setFontSize(8);
-    doc.text('TAHUN 2026', cardX + colWidth / 2, cardY + 17.5, {
+    doc.text('TAHUN 2026', textCenterX, cardY + 17.5, {
       align: 'center',
     });
     doc.setFontSize(7);
     doc.setFont('helvetica', 'normal');
-    doc.text(schoolName, cardX + colWidth / 2, cardY + 21.5, {
+    doc.text(schoolName, textCenterX, cardY + 21.5, {
       align: 'center',
     });
 
@@ -222,7 +195,12 @@ export function generateParticipantCardsPDF(
     // Bottom decorative horizontal line of card
     doc.setDrawColor(0, 0, 0);
     doc.setLineWidth(0.35);
-    doc.line(cardX + 1.5, cardY + colHeight - 2, cardX + colWidth - 1.5, cardY + colHeight - 2);
+    doc.line(
+      cardX + 1.5,
+      cardY + colHeight - 2,
+      cardX + colWidth - 1.5,
+      cardY + colHeight - 2
+    );
   });
 
   doc.save(filename);

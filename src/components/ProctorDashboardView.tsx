@@ -57,7 +57,6 @@ import {
   downloadWordQuestionTemplate,
   downloadWordQuestionArchive,
 } from '../utils/wordQuestionParser';
-import { BeritaAcaraView } from './BeritaAcaraView';
 
 export interface ProctorParticipantRow {
   id: string;
@@ -405,7 +404,6 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
 
 type SidebarMenuId =
   | 'beranda'
-  | 'berita_acara'
   | 'status_peserta'
   | 'daftar_peserta'
   | 'status_tes'
@@ -1213,7 +1211,6 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     icon: React.FC<{ className?: string }>;
   }[] = [
     { id: 'beranda', label: 'Beranda', breadcrumb: 'Dashboard Beranda', icon: Home },
-    { id: 'berita_acara', label: 'Berita Acara', breadcrumb: 'Berita Acara & Daftar Hadir Siswa', icon: FileText },
     { id: 'status_peserta', label: 'Status Peserta', breadcrumb: 'List Status Peserta', icon: ClipboardList },
     { id: 'daftar_peserta', label: 'Daftar Peserta', breadcrumb: 'Data Daftar Peserta', icon: User },
     { id: 'status_tes', label: 'Status Tes', breadcrumb: 'Manajemen Bank Soal', icon: ClipboardCheck },
@@ -1774,24 +1771,6 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                 </p>
               </div>
             </div>
-          )}
-
-          {/* VIEW 2A: BERITA ACARA & DAFTAR HADIR SISWA */}
-          {activeMenu === 'berita_acara' && (
-            <BeritaAcaraView
-              participants={participants}
-              packages={packages}
-              schedules={activeSchedules}
-              defaultProctorName={
-                proctorName ||
-                proctors?.[0]?.fullName ||
-                'DRS. H. AHMAD FAUZI, M.PD.'
-              }
-              defaultRoomName={
-                proctors?.[0]?.roomName || 'LAB KOMPUTER 1 (UTAMA)'
-              }
-              onShowNotice={showNotice}
-            />
           )}
 
           {/* VIEW 3: STATUS TES (Question Bank Management & Input Soal) */}

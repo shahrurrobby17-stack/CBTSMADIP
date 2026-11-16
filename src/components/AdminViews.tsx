@@ -74,7 +74,6 @@ import {
   downloadWordQuestionTemplate,
   downloadWordQuestionArchive,
 } from '../utils/wordQuestionParser';
-import { BeritaAcaraView } from './BeritaAcaraView';
 
 interface AdminLoginViewProps {
   onAdminLoginSuccess: (adminUsername: string) => void;
@@ -582,7 +581,6 @@ export const INITIAL_ADMIN_SCHEDULES: AdminScheduleItem[] = [
 
 type AdminSidebarMenuId =
   | 'beranda'
-  | 'berita_acara'
   | 'daftar_proktor'
   | 'status_peserta'
   | 'daftar_peserta'
@@ -1045,6 +1043,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const defaultAdminConfig = {
     namaSekolah: 'SMA Islam Diponegoro Wagir',
     namaKepalaSekolah: 'ROMEO GALISTRA, S.Pd.',
+    logoKartuPeserta: '',
     npsn: '20517890',
     namaUjian: 'SUMATIF AKHIR SEMESTER (SAS)',
     semester: 'Genap 2025/2026',
@@ -1128,6 +1127,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         return {
           ...defaultAdminConfig,
           ...parsed,
+          logoKartuPeserta:
+            parsed.logoKartuPeserta ||
+            localStorage.getItem('cbt_kartu_peserta_logo') ||
+            '',
           namaProktor: parsed.namaProktor || 'DRS. H. AHMAD FAUZI, M.PD.',
           adminNama: migratedAdminNama,
           adminList: migratedAdminList,
@@ -1141,8 +1144,100 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     } catch {
       // fallback
     }
-    return defaultAdminConfig;
+    return {
+      ...defaultAdminConfig,
+      logoKartuPeserta: localStorage.getItem('cbt_kartu_peserta_logo') || '',
+    };
   });
+
+  const logoKartuInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const handleUploadLogoKartuPeserta = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      showNotice('Format file harus berupa gambar (.png, .jpg, .jpeg, .webp, atau .svg)!');
+      e.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawDataUrl = reader.result as string;
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const maxSize = 240;
+          let width = img.width || maxSize;
+          let height = img.height || maxSize;
+          if (width > maxSize || height > maxSize) {
+            if (width > height) {
+              height = Math.round((height * maxSize) / width);
+              width = maxSize;
+            } else {
+              width = Math.round((width * maxSize) / height);
+              height = maxSize;
+            }
+          }
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          const ctx = canvas.getContext('2d');
+          let finalDataUrl = rawDataUrl;
+          if (ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            finalDataUrl = canvas.toDataURL('image/png');
+          }
+
+          setAppConfig((prev) => {
+            const updated = { ...prev, logoKartuPeserta: finalDataUrl };
+            try {
+              localStorage.setItem('cbt_kartu_peserta_logo', finalDataUrl);
+              localStorage.setItem('cbt_admin_settings', JSON.stringify(updated));
+            } catch {
+              // ignore storage quota warning
+            }
+            return updated;
+          });
+          showNotice('Logo Kop Kartu Peserta berhasil diunggah dan disimpan!');
+        } catch {
+          setAppConfig((prev) => {
+            const updated = { ...prev, logoKartuPeserta: rawDataUrl };
+            try {
+              localStorage.setItem('cbt_kartu_peserta_logo', rawDataUrl);
+              localStorage.setItem('cbt_admin_settings', JSON.stringify(updated));
+            } catch {
+              // ignore
+            }
+            return updated;
+          });
+          showNotice('Logo Kop Kartu Peserta berhasil diunggah dan disimpan!');
+        }
+      };
+      img.onerror = () => {
+        showNotice('Gagal membaca file gambar logo. Silakan pilih file gambar lain.');
+      };
+      img.src = rawDataUrl;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const handleRemoveLogoKartuPeserta = () => {
+    setAppConfig((prev) => {
+      const updated = { ...prev, logoKartuPeserta: '' };
+      try {
+        localStorage.removeItem('cbt_kartu_peserta_logo');
+        localStorage.setItem('cbt_admin_settings', JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
+    showNotice('Logo Kop Kartu Peserta berhasil dihapus.');
+  };
 
   const [editingProctor, setEditingProctor] = useState<AdminProctorItem | null>(null);
   const [editingProctorForm, setEditingProctorForm] = useState<AdminProctorItem | null>(null);
@@ -2897,7 +2992,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     icon: React.FC<{ className?: string }>;
   }[] = [
     { id: 'beranda', label: 'Beranda', breadcrumb: 'Beranda Administrator', icon: Home },
-    { id: 'berita_acara', label: 'Berita Acara', breadcrumb: 'Berita Acara & Daftar Hadir Siswa', icon: FileText },
     { id: 'daftar_proktor', label: 'Daftar Proktor', breadcrumb: 'List Daftar Proktor', icon: UserCog },
     { id: 'status_peserta', label: 'Status Peserta', breadcrumb: 'List Status Peserta', icon: ClipboardList },
     { id: 'daftar_peserta', label: 'Daftar Peserta', breadcrumb: 'Manajemen Daftar Peserta', icon: User },
@@ -3518,33 +3612,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </div>
           )}
 
-          {/* 2A. BERITA ACARA & DAFTAR HADIR SISWA */}
-          {activeMenu === 'berita_acara' && (
-            <BeritaAcaraView
-              participants={participants}
-              packages={packages}
-              schedules={schedules}
-              defaultProctorName={
-                appConfig?.namaProktor ||
-                proctors[0]?.fullName ||
-                'DRS. H. AHMAD FAUZI, M.PD.'
-              }
-              defaultRoomName={
-                proctors[0]?.roomName ||
-                appConfig?.ruangDefault ||
-                'LAB KOMPUTER 1 (UTAMA)'
-              }
-              namaSekolah={appConfig?.namaSekolah || 'SMA Islam Diponegoro Wagir'}
-              npsn={appConfig?.npsn || '20517890'}
-              namaKepalaSekolah={
-                appConfig?.namaKepalaSekolah || 'ROMEO GALISTRA, S.Pd.'
-              }
-              namaUjian={appConfig?.namaUjian || 'SUMATIF AKHIR SEMESTER (SAS)'}
-              semester={appConfig?.semester || 'Genap 2025/2026'}
-              onShowNotice={showNotice}
-            />
-          )}
-
           {/* 2B. DAFTAR PROKTOR */}
           {activeMenu === 'daftar_proktor' && (
             <div className="space-y-6">
@@ -4064,7 +4131,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           participants,
                           `Kartu_Peserta_SAS_2026_${(appConfig?.namaSekolah || 'SMA_Islam_Diponegoro_Wagir').replace(/\s+/g, '_')}.pdf`,
                           appConfig?.namaSekolah || 'SMA ISLAM DIPONEGORO WAGIR',
-                          appConfig?.namaKepalaSekolah || 'ROMEO GALISTRA, S.Pd.'
+                          appConfig?.namaKepalaSekolah || 'ROMEO GALISTRA, S.Pd.',
+                          appConfig?.logoKartuPeserta
                         );
                         showNotice(`File PDF Kartu Peserta (${participants.length} Siswa) berhasil diunduh!`);
                       }}
@@ -4850,6 +4918,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                       <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-50 text-[#001a6e] border border-blue-200">
                                         {groupName}
                                       </span>
+                                      {pkg.questions.length > 0 ? (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                          <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                                          <span>{pkg.questions.length} Soal</span>
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                                          <span>Belum Upload</span>
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="text-xs font-bold text-slate-800 mt-1.5 leading-snug">
                                       {cleanTitle}
@@ -4881,16 +4959,353 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </div>
               </div>
 
+              {/* TABEL STATUS CENTANG SOAL MATA PELAJARAN YANG SUDAH DIUPLOAD */}
+              {(() => {
+                const checklistPackages =
+                  statusTesKelas === 'Semua Kelas'
+                    ? displayPackages
+                    : displayPackages.filter(
+                        (p) => getPkgClass(p) === statusTesKelas
+                      );
+                const uploadedCount = checklistPackages.filter(
+                  (p) => Array.isArray(p.questions) && p.questions.length > 0
+                ).length;
+                const notUploadedCount =
+                  checklistPackages.length - uploadedCount;
+
+                return (
+                  <div className="bg-white rounded-xl border border-slate-200/80 shadow-2xs overflow-hidden">
+                    <div className="p-5 sm:p-6 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <ClipboardCheck className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-800">
+                            Tabel Status Centang Soal Mata Pelajaran ({statusTesKelas})
+                          </h3>
+                          <p className="text-[11.5px] text-slate-500">
+                            Daftar status kelengkapan upload bank soal untuk setiap mata pelajaran. Klik baris mata pelajaran untuk memilih atau mengunggah soal.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-100 text-slate-700 font-bold border border-slate-200">
+                          <span>Total Mapel:</span>
+                          <span className="font-mono">{checklistPackages.length}</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-bold border border-emerald-200">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Sudah Diupload:</span>
+                          <span className="font-mono">{uploadedCount}</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-50 text-rose-700 font-bold border border-rose-200">
+                          <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+                          <span>Belum Diupload:</span>
+                          <span className="font-mono">{notUploadedCount}</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto max-h-96">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead className="sticky top-0 z-10 bg-[#f8f9fc] border-b border-slate-200 text-slate-600 font-bold">
+                          <tr>
+                            <th className="py-3 px-4 w-12 text-center">No</th>
+                            <th className="py-3 px-4 text-center w-36">Status Centang</th>
+                            <th className="py-3 px-4">Kode Mapel</th>
+                            <th className="py-3 px-4">Mata Pelajaran</th>
+                            <th className="py-3 px-4 text-center">Kelas</th>
+                            <th className="py-3 px-4">Kategori</th>
+                            <th className="py-3 px-4 text-center">Jumlah Soal</th>
+                            <th className="py-3 px-4 text-right">Aksi</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {checklistPackages.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={8}
+                                className="py-8 px-4 text-center text-slate-400 italic"
+                              >
+                                Tidak ada mata pelajaran untuk filter {statusTesKelas}.
+                              </td>
+                            </tr>
+                          ) : (
+                            checklistPackages.map((pkg, idx) => {
+                              const qCount = Array.isArray(pkg.questions)
+                                ? pkg.questions.length
+                                : 0;
+                              const isUploaded = qCount > 0;
+                              const isSelected = selectedPackage.id === pkg.id;
+                              const pkgClass = getPkgClass(pkg);
+                              const cleanTitle = pkg.title
+                                .replace(/^Simulasi TKA\s*-\s*/i, '')
+                                .replace(/\s*\(SMA\/MA\/SMK\)/i, '');
+
+                              return (
+                                <tr
+                                  key={pkg.id}
+                                  onClick={() => setSelectedPkgId(pkg.id)}
+                                  className={`transition-colors cursor-pointer ${
+                                    isSelected
+                                      ? 'bg-blue-50/70 hover:bg-blue-50'
+                                      : 'hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <td className="py-3 px-4 text-center font-mono font-semibold text-slate-500">
+                                    {idx + 1}
+                                  </td>
+                                  <td className="py-3 px-4 text-center">
+                                    {isUploaded ? (
+                                      <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px]">
+                                        <span className="w-4 h-4 rounded bg-emerald-600 text-white inline-flex items-center justify-center text-[11px] font-extrabold leading-none shadow-2xs">
+                                          ✓
+                                        </span>
+                                        <span>Sudah Upload</span>
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-500 border border-slate-200 font-semibold text-[11px]">
+                                        <span className="w-4 h-4 rounded border border-slate-300 bg-white inline-flex items-center justify-center text-[10px] leading-none text-transparent">
+                                          ✓
+                                        </span>
+                                        <span>Belum Upload</span>
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-4 font-mono font-bold text-slate-700">
+                                    {pkg.code}
+                                  </td>
+                                  <td className="py-3 px-4 font-bold text-slate-800">
+                                    {cleanTitle}
+                                  </td>
+                                  <td className="py-3 px-4 text-center">
+                                    <span className="px-2 py-0.5 rounded bg-blue-50 text-[#001a6e] border border-blue-200 font-bold text-[11px]">
+                                      {pkgClass}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4 text-slate-600">
+                                    {pkg.subtest}
+                                  </td>
+                                  <td className="py-3 px-4 text-center">
+                                    {isUploaded ? (
+                                      <span className="font-mono font-extrabold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md">
+                                        {qCount} Soal
+                                      </span>
+                                    ) : (
+                                      <span className="font-mono text-slate-400">
+                                        0 Soal
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-4 text-right whitespace-nowrap space-x-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedPkgId(pkg.id);
+                                        triggerUploadWordFile();
+                                      }}
+                                      className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer shadow-2xs transition-colors"
+                                      title={`Upload file soal untuk ${cleanTitle}`}
+                                    >
+                                      <Upload className="w-3 h-3" />
+                                      <span>Upload Soal</span>
+                                    </button>
+                                    {isUploaded && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setSelectedPkgId(pkg.id);
+                                          setPreviewQuestionIdx(0);
+                                          setShowQuestionPreviewModal(true);
+                                        }}
+                                        className="px-2.5 py-1 rounded-md bg-blue-50 hover:bg-[#001a6e] text-[#001a6e] hover:text-white border border-blue-200 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                                        title={`Pratinjau soal ${cleanTitle}`}
+                                      >
+                                        <Eye className="w-3 h-3" />
+                                        <span>Lihat</span>
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* KARTU 1 (ATAS): TAMBAH BUTIR SOAL BARU & UPLOAD WORD */}
               <div className="bg-white p-6 rounded-xl border border-slate-200/80 shadow-2xs space-y-4">
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-                  <div className="flex items-center gap-2">
-                    <Plus className="w-4 h-4 text-[#0095ff]" />
-                    <h3 className="text-sm font-bold text-slate-800">
-                      Tambah Butir Soal Baru ({getQuestionTypeLabel(newQuestionType)})
-                    </h3>
+                <div className="space-y-3.5 pb-3.5 border-b border-slate-100">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Plus className="w-4 h-4 text-[#0095ff]" />
+                      <h3 className="text-sm font-bold text-slate-800">
+                        Tambah Butir Soal Baru ({getQuestionTypeLabel(newQuestionType)})
+                      </h3>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-slate-500 font-medium">Mapel Target:</span>
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 font-bold border border-emerald-200">
+                        {getPkgClass(selectedPackage)}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-md bg-blue-50 text-[#001a6e] font-semibold border border-blue-200">
+                        {selectedPackage.title
+                          .replace(/^Simulasi TKA\s*-\s*/i, '')
+                          .replace(/\s*\(SMA\/MA\/SMK\)/i, '')}
+                      </span>
+                    </div>
                   </div>
 
+                  {/* Baris Atas (Di Atas Tombol Upload Word): Kelas, Mata Pelajaran, Tipe Soal, Pratinjau Soal, Arsip Soal */}
+                  <div className="p-3.5 rounded-xl bg-slate-50/90 border border-slate-200/80 flex flex-wrap items-center gap-3 text-xs">
+                    {/* Dropdown Kelas */}
+                    <div className="flex items-center gap-1.5">
+                      <label className="font-semibold text-slate-700 whitespace-nowrap">
+                        Kelas:
+                      </label>
+                      <select
+                        value={statusTesKelas}
+                        onChange={(e) => {
+                          const newKelas = e.target.value;
+                          setStatusTesKelas(newKelas);
+                          if (newKelas !== 'Semua Kelas') {
+                            const matched = displayPackages.find(
+                              (p) => getPkgClass(p) === newKelas
+                            );
+                            if (matched) {
+                              setSelectedPkgId(matched.id);
+                            }
+                          }
+                        }}
+                        className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      >
+                        <option value="Semua Kelas">Semua Kelas</option>
+                        {STATUS_TES_CLASS_GROUPS.map((kls) => (
+                          <option key={kls} value={kls}>
+                            {kls}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Dropdown Mata Pelajaran (Dikelompokkan Sesuai Kelasnya) */}
+                    <div className="flex items-center gap-1.5">
+                      <label className="font-semibold text-slate-700 whitespace-nowrap">
+                        Mata Pelajaran:
+                      </label>
+                      <select
+                        value={selectedPackage.id}
+                        onChange={(e) => setSelectedPkgId(e.target.value)}
+                        className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      >
+                        {STATUS_TES_CLASS_GROUPS.filter(
+                          (groupName) =>
+                            statusTesKelas === 'Semua Kelas' ||
+                            statusTesKelas === groupName
+                        ).map((groupName) => {
+                          const groupPkgs = displayPackages.filter(
+                            (p) => getPkgClass(p) === groupName
+                          );
+                          if (groupPkgs.length === 0) return null;
+                          return (
+                            <optgroup
+                              key={groupName}
+                              label={`── ${groupName.toUpperCase()} (${groupPkgs.length} Mapel) ──`}
+                            >
+                              {groupPkgs.map((p) => {
+                                const cleanTitle = p.title
+                                  .replace(/^Simulasi TKA\s*-\s*/i, '')
+                                  .replace(/\s*\(SMA\/MA\/SMK\)/i, '');
+                                return (
+                                  <option key={p.id} value={p.id}>
+                                    [{groupName}] {cleanTitle} ({p.code})
+                                  </option>
+                                );
+                              })}
+                            </optgroup>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    {/* Dropdown Tipe Soal */}
+                    <div className="flex items-center gap-1.5">
+                      <label className="font-semibold text-slate-700 whitespace-nowrap">
+                        Tipe Soal:
+                      </label>
+                      <select
+                        value={statusTesTipeSoal}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setStatusTesTipeSoal(val);
+                          if (val !== 'Semua Tipe Soal') {
+                            setNewQuestionType(val as QuestionType);
+                          }
+                        }}
+                        className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
+                      >
+                        <option value="Semua Tipe Soal">Semua Tipe Soal</option>
+                        <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
+                        <option value="pilihan_ganda_kompleks">
+                          Pilihan Ganda Kompleks (PG Kompleks)
+                        </option>
+                        <option value="benar_salah">Benar / Salah</option>
+                        <option value="menjodohkan">Menjodohkan</option>
+                        <option value="isian_singkat">Isian Singkat / Uraian</option>
+                      </select>
+                    </div>
+
+                    {/* Tombol Pratinjau Soal */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPreviewQuestionIdx(0);
+                        setShowQuestionPreviewModal(true);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-[#001a6e] text-[#001a6e] hover:text-white border border-blue-200 hover:border-[#001a6e] text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors shadow-2xs"
+                      title="Pratinjau butir soal pada mata pelajaran ini"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>
+                        Pratinjau Soal (
+                        {
+                          selectedPackage.questions.filter((q) => {
+                            if (statusTesTipeSoal === 'Semua Tipe Soal') return true;
+                            return q.type === statusTesTipeSoal;
+                          }).length
+                        }
+                        )
+                      </span>
+                    </button>
+
+                    {/* Tombol Arsip Soal */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        downloadWordQuestionArchive(
+                          selectedPackage,
+                          statusTesTipeSoal
+                        );
+                        showNotice(
+                          `Arsip soal (${statusTesTipeSoal}) mata pelajaran ${selectedPackage.title} berhasil diunduh (.docx).`
+                        );
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white border border-emerald-300 hover:border-emerald-600 text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors shadow-2xs"
+                      title="Unduh butir soal yang sedang ditampilkan ke dalam dokumen Word (.docx) untuk arsip bank soal"
+                    >
+                      <Archive className="w-3.5 h-3.5" />
+                      <span>Arsip Soal</span>
+                    </button>
+                  </div>
+
+                  {/* Baris Bawah: Tombol Upload Word / File Soal & Template Word */}
                   <div className="flex flex-wrap items-center gap-2.5 text-xs">
                     {/* Input File Soal Tersembunyi (Mendukung Semua Format & Semua Tipe Soal) */}
                     <input
@@ -4903,7 +5318,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     <button
                       type="button"
                       onClick={triggerUploadWordFile}
-                      className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
+                      className="px-3.5 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
                       title="Upload file soal (.docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, .json) — otomatis mengenali semua jenis/tipe soal"
                     >
                       <Upload className="w-3.5 h-3.5" />
@@ -4914,65 +5329,32 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       onClick={() =>
                         downloadWordQuestionTemplate(selectedPackage.title)
                       }
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition-colors"
+                      className="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition-colors"
                       title="Unduh contoh format soal Word (.docx) dengan jawaban benar berwarna merah"
                     >
                       <FileText className="w-3.5 h-3.5 text-blue-600" />
                       Template Word
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        downloadWordQuestionArchive(selectedPackage, 'Semua Tipe Soal');
-                        showNotice(`Arsip soal mata pelajaran ${selectedPackage.title} berhasil diunduh (.docx).`);
-                      }}
-                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
-                      title="Unduh seluruh butir soal mata pelajaran ini beserta kunci jawaban ke format Word (.docx) sebagai cadangan/arsip"
-                    >
-                      <Archive className="w-3.5 h-3.5" />
-                      <span>Arsip Soal</span>
-                    </button>
 
-                    {/* Dropdown Tipe Soal + Tombol Pratinjau Soal di bawahnya */}
-                    <div className="flex flex-col items-start gap-1.5">
-                      <div className="flex items-center gap-1.5">
-                        <label className="font-semibold text-slate-700 whitespace-nowrap">
-                          Tipe Soal:
-                        </label>
-                        <select
-                          value={newQuestionType}
-                          onChange={(e) => setNewQuestionType(e.target.value as QuestionType)}
-                          className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
-                        >
-                          <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
-                          <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
-                          <option value="benar_salah">Benar / Salah</option>
-                          <option value="menjodohkan">Menjodohkan</option>
-                          <option value="isian_singkat">Isian Singkat / Uraian</option>
-                        </select>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPreviewQuestionIdx(0);
-                          setShowQuestionPreviewModal(true);
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-[#001a6e] hover:bg-[#00124d] text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
-                        title="Lihat tampilan pratinjau soal seperti pada layar ujian siswa"
+                    <div className="flex items-center gap-1.5 ml-auto">
+                      <label className="font-semibold text-slate-700 whitespace-nowrap">
+                        Jenis Input Manual:
+                      </label>
+                      <select
+                        value={newQuestionType}
+                        onChange={(e) =>
+                          setNewQuestionType(e.target.value as QuestionType)
+                        }
+                        className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
                       >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>Pratinjau Soal ({selectedPackage.questions.length})</span>
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-500 font-medium">Mapel Target:</span>
-                      <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 font-bold border border-emerald-200">
-                        {getPkgClass(selectedPackage)}
-                      </span>
-                      <span className="px-2.5 py-0.5 rounded-md bg-blue-50 text-[#001a6e] font-semibold border border-blue-200">
-                        {selectedPackage.title.replace(/^Simulasi TKA\s*-\s*/i, '').replace(/\s*\(SMA\/MA\/SMK\)/i, '')}
-                      </span>
+                        <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
+                        <option value="pilihan_ganda_kompleks">
+                          Pilihan Ganda Kompleks (PG Kompleks)
+                        </option>
+                        <option value="benar_salah">Benar / Salah</option>
+                        <option value="menjodohkan">Menjodohkan</option>
+                        <option value="isian_singkat">Isian Singkat / Uraian</option>
+                      </select>
                     </div>
                   </div>
                 </div>
@@ -5211,146 +5593,20 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       </h3>
                     </div>
 
-                  {/* Dropdown Kelas, Dropdown Mata Pelajaran (Sesuai Kelas), dan Dropdown Tipe Soal */}
-                  <div className="flex flex-wrap items-center gap-3">
-                    {/* Dropdown Kelas */}
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <label className="font-semibold text-slate-700 whitespace-nowrap">
-                        Kelas:
-                      </label>
-                      <select
-                        value={statusTesKelas}
-                        onChange={(e) => {
-                          const newKelas = e.target.value;
-                          setStatusTesKelas(newKelas);
-                          if (newKelas !== 'Semua Kelas') {
-                            const matched = displayPackages.find(
-                              (p) => getPkgClass(p) === newKelas
-                            );
-                            if (matched) {
-                              setSelectedPkgId(matched.id);
-                            }
-                          }
-                        }}
-                        className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
-                      >
-                        <option value="Semua Kelas">Semua Kelas</option>
-                        {STATUS_TES_CLASS_GROUPS.map((kls) => (
-                          <option key={kls} value={kls}>
-                            {kls}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Dropdown Mata Pelajaran (Dikelompokkan Sesuai Kelasnya) */}
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <label className="font-semibold text-slate-700 whitespace-nowrap">
-                        Mata Pelajaran:
-                      </label>
-                      <select
-                        value={selectedPackage.id}
-                        onChange={(e) => setSelectedPkgId(e.target.value)}
-                        className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
-                      >
-                        {STATUS_TES_CLASS_GROUPS.filter(
-                          (groupName) =>
-                            statusTesKelas === 'Semua Kelas' ||
-                            statusTesKelas === groupName
-                        ).map((groupName) => {
-                          const groupPkgs = displayPackages.filter(
-                            (p) => getPkgClass(p) === groupName
-                          );
-                          if (groupPkgs.length === 0) return null;
-                          return (
-                            <optgroup
-                              key={groupName}
-                              label={`── ${groupName.toUpperCase()} (${groupPkgs.length} Mapel) ──`}
-                            >
-                              {groupPkgs.map((p) => {
-                                const cleanTitle = p.title
-                                  .replace(/^Simulasi TKA\s*-\s*/i, '')
-                                  .replace(/\s*\(SMA\/MA\/SMK\)/i, '');
-                                return (
-                                  <option key={p.id} value={p.id}>
-                                    [{groupName}] {cleanTitle} ({p.code})
-                                  </option>
-                                );
-                              })}
-                            </optgroup>
-                          );
-                        })}
-                      </select>
-                    </div>
-
-                    {/* Dropdown Tipe Soal (Semua Tipe Soal) + Tombol Pratinjau Soal di bawahnya */}
-                    <div className="flex flex-col items-start gap-1.5 text-xs">
-                      <div className="flex items-center gap-1.5">
-                        <label className="font-semibold text-slate-700 whitespace-nowrap">
-                          Tipe Soal:
-                        </label>
-                        <select
-                          value={statusTesTipeSoal}
-                          onChange={(e) => setStatusTesTipeSoal(e.target.value)}
-                          className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
-                        >
-                          <option value="Semua Tipe Soal">Semua Tipe Soal</option>
-                          <option value="pilihan_ganda">Pilihan Ganda (PG)</option>
-                          <option value="pilihan_ganda_kompleks">Pilihan Ganda Kompleks (PG Kompleks)</option>
-                          <option value="benar_salah">Benar / Salah</option>
-                          <option value="menjodohkan">Menjodohkan</option>
-                          <option value="isian_singkat">Isian Singkat / Uraian</option>
-                        </select>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPreviewQuestionIdx(0);
-                          setShowQuestionPreviewModal(true);
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-[#001a6e] text-[#001a6e] hover:text-white border border-blue-200 hover:border-[#001a6e] text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors shadow-2xs"
-                        title="Pratinjau butir soal pada mata pelajaran ini"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>
-                          Pratinjau Soal (
-                          {
-                            selectedPackage.questions.filter((q) => {
-                              if (statusTesTipeSoal === 'Semua Tipe Soal') return true;
-                              return q.type === statusTesTipeSoal;
-                            }).length
-                          }
-                          )
-                        </span>
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        downloadWordQuestionArchive(selectedPackage, statusTesTipeSoal);
-                        showNotice(`Arsip soal (${statusTesTipeSoal}) mata pelajaran ${selectedPackage.title} berhasil diunduh (.docx).`);
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white border border-emerald-300 hover:border-emerald-600 text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors shadow-2xs"
-                      title="Unduh butir soal yang sedang ditampilkan ke dalam dokumen Word (.docx) untuk arsip bank soal"
-                    >
-                      <Archive className="w-3.5 h-3.5" />
-                      <span>Arsip Soal</span>
-                    </button>
-
                     {selectedPackage.questions.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleDeleteAllQuestions}
-                        className="px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors"
-                        title="Hapus semua butir soal pada daftar ini"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Hapus Semua Soal</span>
-                      </button>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleDeleteAllQuestions}
+                          className="px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 text-xs font-bold cursor-pointer flex items-center gap-1.5 transition-colors"
+                          title="Hapus semua butir soal pada daftar ini"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Hapus Semua Soal</span>
+                        </button>
+                      </div>
                     )}
                   </div>
-                </div>
 
                 <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto border border-slate-200 rounded-lg">
                   {selectedPackage.questions.filter((q) => {
@@ -5895,6 +6151,87 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         }
                         className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none"
                       />
+                    </div>
+                  </div>
+
+                  {/* Upload Logo untuk Kop di Kartu Peserta */}
+                  <div className="pt-4 mt-2 border-t border-slate-200">
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 bg-white border border-slate-200 rounded-xl p-4 shadow-2xs">
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-bold text-slate-800">
+                          Logo Sekolah / Instansi untuk Kop Kartu Peserta
+                        </label>
+                        <p className="text-[11px] text-slate-500 max-w-xl">
+                          Unggah logo sekolah atau yayasan (format PNG, JPG, WEBP, atau SVG). Logo ini akan otomatis ditampilkan pada bagian kiri Kop Kartu Peserta saat mencetak / mengunduh PDF Kartu Peserta.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                          <input
+                            ref={logoKartuInputRef}
+                            type="file"
+                            accept="image/*"
+                            onChange={handleUploadLogoKartuPeserta}
+                            className="hidden"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => logoKartuInputRef.current?.click()}
+                            className="px-3.5 py-2 bg-[#001a6e] hover:bg-[#00155a] text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-2 shadow-sm"
+                          >
+                            <Upload className="w-3.5 h-3.5 text-[#0095ff]" />
+                            <span>
+                              {appConfig.logoKartuPeserta
+                                ? 'Ganti Logo Kop Kartu Peserta'
+                                : 'Upload Logo Kop Kartu Peserta'}
+                            </span>
+                          </button>
+                          {appConfig.logoKartuPeserta && (
+                            <button
+                              type="button"
+                              onClick={handleRemoveLogoKartuPeserta}
+                              className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-semibold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Hapus Logo</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Pratinjau Kop Kartu Peserta */}
+                      <div className="w-full lg:w-[360px] shrink-0">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                          Pratinjau Kop Kartu Peserta:
+                        </div>
+                        <div className="border-2 border-slate-700 rounded-md bg-white p-2.5 flex items-center gap-2.5 shadow-2xs">
+                          <div className="w-12 h-12 rounded border border-slate-200 bg-slate-50 flex items-center justify-center shrink-0 overflow-hidden">
+                            {appConfig.logoKartuPeserta ? (
+                              <img
+                                src={appConfig.logoKartuPeserta}
+                                alt="Logo Kop Kartu Peserta"
+                                className="w-full h-full object-contain"
+                              />
+                            ) : (
+                              <span className="text-[9px] text-slate-400 font-semibold text-center leading-tight px-1">
+                                Tanpa Logo
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex-1 text-center leading-tight min-w-0">
+                            <div className="text-[10px] font-extrabold text-slate-900 uppercase truncate">
+                              KARTU PESERTA
+                            </div>
+                            <div className="text-[9px] font-bold text-slate-800 uppercase truncate">
+                              {appConfig.namaUjian || 'SUMATIF AKHIR SEMESTER (SAS)'}
+                            </div>
+                            <div className="text-[9px] font-bold text-slate-800 uppercase truncate">
+                              {appConfig.namaSekolah || 'SMA ISLAM DIPONEGORO WAGIR'}
+                            </div>
+                            <div className="text-[8px] font-medium text-slate-600">
+                              TAHUN PELAJARAN 2025/2026
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
