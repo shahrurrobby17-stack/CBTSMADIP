@@ -210,6 +210,32 @@ function sanitizeParticipantsList(
         row.lastResetAt = maxResetAt;
       }
 
+      if (
+        row.violationCount === undefined &&
+        typeof prevRow?.violationCount === 'number'
+      ) {
+        row.violationCount = prevRow.violationCount;
+      }
+      if (
+        row.draftAnswers === undefined &&
+        prevRow?.draftAnswers &&
+        typeof prevRow.draftAnswers === 'object'
+      ) {
+        row.draftAnswers = prevRow.draftAnswers;
+      }
+      if (
+        row.draftPackageId === undefined &&
+        typeof prevRow?.draftPackageId === 'string'
+      ) {
+        row.draftPackageId = prevRow.draftPackageId;
+      }
+      if (
+        row.draftRemainingSeconds === undefined &&
+        typeof prevRow?.draftRemainingSeconds === 'number'
+      ) {
+        row.draftRemainingSeconds = prevRow.draftRemainingSeconds;
+      }
+
       const vTimestamp =
         typeof row.violationTimestamp === 'number' ? row.violationTimestamp : 0;
       const isValidViolation =

@@ -17,6 +17,8 @@ export interface ViolationAlertInfo {
   fullName: string;
   reason: string;
   timestamp: string;
+  violationCount?: number;
+  answersWiped?: boolean;
 }
 
 interface LoginViewProps {
@@ -34,6 +36,7 @@ interface LoginViewProps {
 export const LoginView: React.FC<LoginViewProps> = ({
   onLoginSuccess,
   participants = [],
+  lastViolationInfo,
   onOpenProctorModal,
   onExitApp,
 }) => {
@@ -51,9 +54,30 @@ export const LoginView: React.FC<LoginViewProps> = ({
       p.namaPeserta.trim().toUpperCase() === cleanUpperUsername
   );
 
-  const isLockedByViolation = Boolean(
+  const fallbackLockedParticipant =
+    !matchedParticipant && lastViolationInfo
+      ? participants.find(
+          (p) =>
+            p.username.trim().toUpperCase() ===
+            lastViolationInfo.username.trim().toUpperCase()
+        )
+      : undefined;
+
+  const activeLockedParticipant =
     matchedParticipant && isParticipantLockedByViolation(matchedParticipant)
-  );
+      ? matchedParticipant
+      : fallbackLockedParticipant &&
+        isParticipantLockedByViolation(fallbackLockedParticipant)
+      ? fallbackLockedParticipant
+      : undefined;
+
+  const isLockedByViolation = Boolean(activeLockedParticipant);
+  const activeViolationCount =
+    activeLockedParticipant?.violationCount ||
+    lastViolationInfo?.violationCount ||
+    1;
+  const isMaxViolationReached =
+    activeViolationCount >= 6 || Boolean(lastViolationInfo?.answersWiped);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,28 +148,54 @@ export const LoginView: React.FC<LoginViewProps> = ({
         </p>
 
         {/* Peringatan Pelanggaran Keluar Sistem CBT */}
-        {isLockedByViolation && matchedParticipant && (
+        {isLockedByViolation && activeLockedParticipant && (
           <div className="mt-4 p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-2.5">
             <div className="flex items-start gap-2.5">
               <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <div className="text-xs font-extrabold uppercase tracking-wide text-rose-800">
-                  Pelanggaran Terdeteksi — Sesi Login Terkunci
+              <div className="space-y-1.5 w-full">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="text-xs font-extrabold uppercase tracking-wide text-rose-800">
+                    Pelanggaran Terdeteksi — Sesi Terkunci
+                  </div>
+                  <span
+                    className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-extrabold ${
+                      isMaxViolationReached
+                        ? 'bg-rose-600 text-white'
+                        : 'bg-amber-100 text-amber-900 border border-amber-300'
+                    }`}
+                  >
+                    Pelanggaran {Math.min(activeViolationCount, 6)}/6
+                  </span>
                 </div>
                 <p className="text-xs leading-relaxed text-rose-700">
-                  Peserta <strong>{matchedParticipant.namaPeserta}</strong> (
+                  Peserta <strong>{activeLockedParticipant.namaPeserta}</strong> (
                   <span className="font-mono font-bold">
-                    {matchedParticipant.username}
+                    {activeLockedParticipant.username}
                   </span>
                   ) terdeteksi melakukan pelanggaran keluar dari sistem CBT.
                   Untuk masuk kembali, Anda wajib meminta{' '}
                   <strong>Reset Login</strong> ke Proktor atau Administrator.
                 </p>
-                {matchedParticipant.violationReason && (
+                {isMaxViolationReached ? (
+                  <div className="p-2.5 rounded-lg bg-rose-600 text-white text-[11px] font-bold leading-relaxed">
+                    Batas Maksimal Pelanggaran (6/6) Tercapai! Seluruh jawaban
+                    ujian yang telah Anda kerjakan otomatis dihapus oleh sistem.
+                  </div>
+                ) : (
+                  <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[11px] font-semibold leading-relaxed">
+                    Jawaban yang sudah Anda kirim masih tersimpan aman.{' '}
+                    <span className="font-bold text-rose-700">
+                      Peringatan: Jika melanggar hingga 6 kali (saat ini{' '}
+                      {activeViolationCount}/6), maka seluruh jawaban Anda akan
+                      terhapus otomatis!
+                    </span>
+                  </div>
+                )}
+                {activeLockedParticipant.violationReason && (
                   <p className="text-[11px] font-medium text-rose-600">
-                    Keterangan: {matchedParticipant.violationReason}
-                    {matchedParticipant.violationAt
-                      ? ` (${matchedParticipant.violationAt})`
+                    Keterangan: {activeLockedParticipant.violationReason}
+                    {activeLockedParticipant.violationAt
+                      ? ` (${activeLockedParticipant.violationAt})`
                       : ''}
                   </p>
                 )}

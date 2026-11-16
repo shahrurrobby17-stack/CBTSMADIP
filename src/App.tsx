@@ -69,7 +69,65 @@ const STORAGE_KEYS = {
   PROCTORS: 'pusmendik_cbt_proctors_v1',
   TOKEN: 'pusmendik_cbt_token_v1',
   HISTORY: 'pusmendik_cbt_history_v1',
+  DRAFTS: 'pusmendik_cbt_student_drafts_v1',
 };
+
+const MAX_VIOLATION_LIMIT = 6;
+
+interface StudentExamDraft {
+  username: string;
+  packageId: string;
+  answers: Record<string, StudentAnswer>;
+  remainingSeconds?: number;
+  violationCount: number;
+  updatedAt: number;
+}
+
+function getDraftKey(username: string, packageId: string): string {
+  return `${username.trim().toUpperCase()}__${packageId.trim()}`;
+}
+
+function readAllStudentDrafts(): Record<string, StudentExamDraft> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.DRAFTS);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function readStudentDraftFromLocal(
+  username: string,
+  packageId: string
+): StudentExamDraft | null {
+  if (!username || !packageId) return null;
+  const all = readAllStudentDrafts();
+  return all[getDraftKey(username, packageId)] || null;
+}
+
+function writeStudentDraftToLocal(draft: StudentExamDraft): void {
+  if (!draft.username || !draft.packageId) return;
+  try {
+    const all = readAllStudentDrafts();
+    all[getDraftKey(draft.username, draft.packageId)] = draft;
+    localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(all));
+  } catch {
+    // ignore
+  }
+}
+
+function clearStudentDraftInLocal(username: string, packageId: string): void {
+  if (!username || !packageId) return;
+  try {
+    const all = readAllStudentDrafts();
+    delete all[getDraftKey(username, packageId)];
+    localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(all));
+  } catch {
+    // ignore
+  }
+}
 
 export default function App() {
   const [stage, setStage] = useState<AppStage>('login');
@@ -369,6 +427,13 @@ export default function App() {
   });
 
   const [answers, setAnswers] = useState<Record<string, StudentAnswer>>({});
+  const answersRef = useRef<Record<string, StudentAnswer>>(answers);
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+  const [examInitialRemainingSeconds, setExamInitialRemainingSeconds] =
+    useState<number | undefined>(undefined);
+  const examRemainingSecondsRef = useRef<number | undefined>(undefined);
   const [timeUsedSeconds, setTimeUsedSeconds] = useState(0);
   const [lastViolationInfo, setLastViolationInfo] =
     useState<ViolationAlertInfo | null>(null);
@@ -534,6 +599,10 @@ export default function App() {
                 prevRow.requestReset !== row.requestReset ||
                 prevRow.violationReason !== row.violationReason ||
                 prevRow.violationTimestamp !== row.violationTimestamp ||
+                prevRow.violationCount !== row.violationCount ||
+                prevRow.draftAnswers !== row.draftAnswers ||
+                prevRow.draftPackageId !== row.draftPackageId ||
+                prevRow.draftRemainingSeconds !== row.draftRemainingSeconds ||
                 prevRow.status !== row.status
               );
             })
@@ -551,6 +620,10 @@ export default function App() {
               violationAt: (row.violationAt ?? null) as any,
               violationSchema: (row.violationSchema ?? null) as any,
               violationTimestamp: (row.violationTimestamp ?? null) as any,
+              violationCount: row.violationCount ?? 0,
+              draftAnswers: (row.draftAnswers ?? null) as any,
+              draftPackageId: (row.draftPackageId ?? null) as any,
+              draftRemainingSeconds: (row.draftRemainingSeconds ?? null) as any,
               lastResetAt: row.lastResetAt,
             }));
 
@@ -1133,23 +1206,82 @@ export default function App() {
         minute: '2-digit',
         second: '2-digit',
       });
+      const cleanUser = participant.username.trim().toUpperCase();
+      const currentPkgId = selectedPackage.id;
+
+      // Hitung jumlah pelanggaran siswa pada mata pelajaran aktif (maksimal 6x)
+      const existingRow = participantsRef.current.find(
+        (r) => r.username.trim().toUpperCase() === cleanUser
+      );
+      const localDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
+
+      const prevRowVCount =
+        typeof existingRow?.violationCount === 'number' &&
+        existingRow.violationCount > 0 &&
+        existingRow.violationCount < MAX_VIOLATION_LIMIT
+          ? existingRow.violationCount
+          : 0;
+      const prevLocalVCount =
+        typeof localDraft?.violationCount === 'number' &&
+        localDraft.violationCount > 0 &&
+        localDraft.violationCount < MAX_VIOLATION_LIMIT
+          ? localDraft.violationCount
+          : 0;
+
+      const nextViolationCount = Math.max(prevRowVCount, prevLocalVCount) + 1;
+      const shouldWipeAnswers = nextViolationCount >= MAX_VIOLATION_LIMIT;
+
+      const currentAnswersSnapshot = { ...answersRef.current };
+      const currentRemainingSecs = examRemainingSecondsRef.current;
+
+      if (shouldWipeAnswers) {
+        // Pelanggaran mencapai 6x: hapus seluruh jawaban dan reset sisa waktu ujian
+        setAnswers({});
+        answersRef.current = {};
+        examRemainingSecondsRef.current = undefined;
+        setExamInitialRemainingSeconds(undefined);
+        clearStudentDraftInLocal(cleanUser, currentPkgId);
+      } else {
+        // Pelanggaran 1x s/d 5x: simpan draft jawaban dan sisa waktu agar tidak hilang saat Reset Login
+        writeStudentDraftToLocal({
+          username: cleanUser,
+          packageId: currentPkgId,
+          answers: currentAnswersSnapshot,
+          remainingSeconds: currentRemainingSecs,
+          violationCount: nextViolationCount,
+          updatedAt: nowTs,
+        });
+      }
+
+      const formattedReason = shouldWipeAnswers
+        ? `Pelanggaran ${nextViolationCount}/${MAX_VIOLATION_LIMIT} (Batas Maksimal — Seluruh Jawaban Dihapus Otomatis): ${reason}`
+        : `Pelanggaran ${nextViolationCount}/${MAX_VIOLATION_LIMIT}: ${reason}`;
 
       handleUpdateParticipants((prev) => {
         const exists = prev.some(
-          (row) =>
-            row.username.toUpperCase() === participant.username.toUpperCase()
+          (row) => row.username.trim().toUpperCase() === cleanUser
         );
         const nextList: ProctorParticipantRow[] = exists
           ? prev.map((row) =>
-              row.username.toUpperCase() === participant.username.toUpperCase()
+              row.username.trim().toUpperCase() === cleanUser
                 ? {
                     ...row,
                     loginState: 'Terkunci (Pelanggaran)',
                     requestReset: true,
-                    violationReason: reason,
+                    violationReason: formattedReason,
                     violationAt: timeStr,
                     violationSchema: 3,
                     violationTimestamp: nowTs,
+                    violationCount: nextViolationCount,
+                    draftAnswers: shouldWipeAnswers
+                      ? undefined
+                      : currentAnswersSnapshot,
+                    draftPackageId: shouldWipeAnswers
+                      ? undefined
+                      : currentPkgId,
+                    draftRemainingSeconds: shouldWipeAnswers
+                      ? undefined
+                      : currentRemainingSecs,
                   }
                 : row
             )
@@ -1159,16 +1291,24 @@ export default function App() {
                 selected: false,
                 status: 'Active',
                 kodeTes: 'SAS26SMADIP1',
-                username: participant.username.toUpperCase(),
+                username: cleanUser,
                 namaPeserta: participant.fullName,
                 kelompok: '1',
                 kelas: 'XII IPA',
                 loginState: 'Terkunci (Pelanggaran)',
                 requestReset: true,
-                violationReason: reason,
+                violationReason: formattedReason,
                 violationAt: timeStr,
                 violationSchema: 3,
                 violationTimestamp: nowTs,
+                violationCount: nextViolationCount,
+                draftAnswers: shouldWipeAnswers
+                  ? undefined
+                  : currentAnswersSnapshot,
+                draftPackageId: shouldWipeAnswers ? undefined : currentPkgId,
+                draftRemainingSeconds: shouldWipeAnswers
+                  ? undefined
+                  : currentRemainingSecs,
               },
               ...prev,
             ];
@@ -1176,14 +1316,21 @@ export default function App() {
       });
 
       setLastViolationInfo({
-        username: participant.username.toUpperCase(),
+        username: cleanUser,
         fullName: participant.fullName,
-        reason,
+        reason: formattedReason,
         timestamp: timeStr,
+        violationCount: nextViolationCount,
+        answersWiped: shouldWipeAnswers,
       });
       setStage('login');
     },
-    [handleUpdateParticipants, participant.fullName, participant.username]
+    [
+      handleUpdateParticipants,
+      participant.fullName,
+      participant.username,
+      selectedPackage.id,
+    ]
   );
 
   // Automatically enter fullscreen on laptop and mobile when in active exam
@@ -1461,35 +1608,165 @@ export default function App() {
   const handleStartExam = () => {
     examStartedAtRef.current = Date.now();
     requestCbtFullscreen();
+
+    const cleanUser = participant.username.trim().toUpperCase();
+    const currentPkgId = selectedPackage.id;
+    const matchedRow = participantsRef.current.find(
+      (r) => r.username.trim().toUpperCase() === cleanUser
+    );
+    const localDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
+
+    const rowVCount =
+      typeof matchedRow?.violationCount === 'number'
+        ? matchedRow.violationCount
+        : 0;
+    const localVCount =
+      typeof localDraft?.violationCount === 'number'
+        ? localDraft.violationCount
+        : 0;
+    const mergedViolationCount = Math.max(rowVCount, localVCount);
+
+    let restoredAnswers: Record<string, StudentAnswer> = {};
+    let restoredRemainingSecs: number | undefined = undefined;
+    let effectiveViolationCount = mergedViolationCount;
+
+    if (mergedViolationCount >= MAX_VIOLATION_LIMIT) {
+      // Siswa sebelumnya telah mencapai 6x pelanggaran: jawaban sudah dihapus, mulai dari awal (0/6)
+      effectiveViolationCount = 0;
+      clearStudentDraftInLocal(cleanUser, currentPkgId);
+    } else {
+      // Pulihkan jawaban dan sisa waktu jika siswa kembali masuk setelah Reset Login (pelanggaran 1x-5x)
+      const hasLocalAnswers =
+        localDraft &&
+        localDraft.packageId === currentPkgId &&
+        localDraft.answers &&
+        Object.keys(localDraft.answers).length > 0;
+      const hasRemoteAnswers =
+        matchedRow?.draftPackageId === currentPkgId &&
+        matchedRow?.draftAnswers &&
+        Object.keys(matchedRow.draftAnswers).length > 0;
+
+      if (hasLocalAnswers && hasRemoteAnswers) {
+        restoredAnswers = {
+          ...matchedRow!.draftAnswers!,
+          ...localDraft!.answers,
+        };
+      } else if (hasLocalAnswers) {
+        restoredAnswers = { ...localDraft!.answers };
+      } else if (hasRemoteAnswers) {
+        restoredAnswers = { ...matchedRow!.draftAnswers! };
+      }
+
+      if (
+        typeof localDraft?.remainingSeconds === 'number' &&
+        localDraft.remainingSeconds > 0
+      ) {
+        restoredRemainingSecs = localDraft.remainingSeconds;
+      } else if (
+        matchedRow?.draftPackageId === currentPkgId &&
+        typeof matchedRow?.draftRemainingSeconds === 'number' &&
+        matchedRow.draftRemainingSeconds > 0
+      ) {
+        restoredRemainingSecs = matchedRow.draftRemainingSeconds;
+      }
+    }
+
+    setAnswers(restoredAnswers);
+    answersRef.current = restoredAnswers;
+    setExamInitialRemainingSeconds(restoredRemainingSecs);
+    examRemainingSecondsRef.current = restoredRemainingSecs;
+    setTimeUsedSeconds(0);
+
     handleUpdateParticipants((prev) =>
       prev.map((row) =>
-        row.username.toUpperCase() === participant.username.toUpperCase()
+        row.username.trim().toUpperCase() === cleanUser
           ? {
               ...row,
               loginState: 'Sedang Mengerjakan',
               requestReset: false,
               violationReason: undefined,
               violationAt: undefined,
+              violationCount: effectiveViolationCount,
+              draftPackageId: currentPkgId,
+              draftAnswers: restoredAnswers,
+              draftRemainingSeconds: restoredRemainingSecs,
             }
           : row
       )
     );
-    setAnswers({});
-    setTimeUsedSeconds(0);
     setStage('exam_running');
   };
 
+  const handleRemainingSecondsChange = useCallback(
+    (secsLeft: number) => {
+      examRemainingSecondsRef.current = secsLeft;
+      const cleanUser = participant.username.trim().toUpperCase();
+      const currentPkgId = selectedPackage.id;
+      const matchedRow = participantsRef.current.find(
+        (r) => r.username.trim().toUpperCase() === cleanUser
+      );
+      const currentVCount =
+        typeof matchedRow?.violationCount === 'number'
+          ? matchedRow.violationCount
+          : 0;
+      writeStudentDraftToLocal({
+        username: cleanUser,
+        packageId: currentPkgId,
+        answers: answersRef.current,
+        remainingSeconds: secsLeft,
+        violationCount: currentVCount,
+        updatedAt: Date.now(),
+      });
+    },
+    [participant.username, selectedPackage.id]
+  );
+
   const handleUpdateAnswer = useCallback(
     (questionId: string, updater: (prev: StudentAnswer) => StudentAnswer) => {
+      const cleanUser = participant.username.trim().toUpperCase();
+      const currentPkgId = selectedPackage.id;
       setAnswers((prevMap) => {
         const current = prevMap[questionId] || { questionId };
-        return {
+        const nextMap = {
           ...prevMap,
           [questionId]: updater(current),
         };
+        answersRef.current = nextMap;
+
+        const matchedRow = participantsRef.current.find(
+          (r) => r.username.trim().toUpperCase() === cleanUser
+        );
+        const currentVCount =
+          typeof matchedRow?.violationCount === 'number'
+            ? matchedRow.violationCount
+            : 0;
+
+        writeStudentDraftToLocal({
+          username: cleanUser,
+          packageId: currentPkgId,
+          answers: nextMap,
+          remainingSeconds: examRemainingSecondsRef.current,
+          violationCount: currentVCount,
+          updatedAt: Date.now(),
+        });
+
+        handleUpdateParticipants((prev) =>
+          prev.map((row) =>
+            row.username.trim().toUpperCase() === cleanUser
+              ? {
+                  ...row,
+                  draftPackageId: currentPkgId,
+                  draftAnswers: nextMap,
+                  draftRemainingSeconds: examRemainingSecondsRef.current,
+                }
+              : row
+          )
+        );
+
+        return nextMap;
       });
     },
-    []
+    [handleUpdateParticipants, participant.username, selectedPackage.id]
   );
 
   const handleFinishExam = useCallback(
@@ -1535,15 +1812,24 @@ export default function App() {
         finalScore,
       };
 
+      const cleanUser = participant.username.trim().toUpperCase();
+      clearStudentDraftInLocal(cleanUser, selectedPackage.id);
+      examRemainingSecondsRef.current = undefined;
+      setExamInitialRemainingSeconds(undefined);
+
       handleUpdateParticipants((prev) =>
         prev.map((row) =>
-          row.username.toUpperCase() === participant.username.toUpperCase()
+          row.username.trim().toUpperCase() === cleanUser
             ? {
                 ...row,
                 loginState: 'Selesai',
                 requestReset: false,
                 violationReason: undefined,
                 violationAt: undefined,
+                violationCount: 0,
+                draftAnswers: undefined,
+                draftPackageId: undefined,
+                draftRemainingSeconds: undefined,
               }
             : row
         )
@@ -1562,7 +1848,8 @@ export default function App() {
 
   const handleLogout = () => {
     if (stage === 'exam_running') {
-      setAnswers({});
+      // Jangan panggil setAnswers({}) di sini agar lockStudentByViolation
+      // menyimpan jawaban untuk pelanggaran 1..5 dan hanya menghapus jika mencapai 6x
       lockStudentByViolation(
         'Keluar dari halaman soal CBT sebelum menyelesaikan ujian'
       );
@@ -1580,6 +1867,7 @@ export default function App() {
     }
     exitCbtFullscreen();
     setAnswers({});
+    answersRef.current = {};
     setStage('login');
   };
 
@@ -1786,6 +2074,15 @@ export default function App() {
           answers={answers}
           onUpdateAnswer={handleUpdateAnswer}
           onFinishExam={handleFinishExam}
+          initialRemainingSeconds={examInitialRemainingSeconds}
+          onRemainingSecondsChange={handleRemainingSecondsChange}
+          violationCount={
+            participants.find(
+              (p) =>
+                p.username.trim().toUpperCase() ===
+                participant.username.trim().toUpperCase()
+            )?.violationCount || 0
+          }
         />
       )}
 

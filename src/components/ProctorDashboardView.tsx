@@ -36,6 +36,7 @@ import {
   ExamResultSummary,
   Question,
   QuestionType,
+  StudentAnswer,
 } from '../types/cbt';
 import { getQuestionTypeLabel } from '../data/cbtData';
 import {
@@ -79,6 +80,10 @@ export interface ProctorParticipantRow {
   violationSchema?: number;
   violationTimestamp?: number;
   lastResetAt?: number;
+  violationCount?: number;
+  draftAnswers?: Record<string, StudentAnswer>;
+  draftPackageId?: string;
+  draftRemainingSeconds?: number;
 }
 
 export function normalizeKelasCode(raw?: string): string {
@@ -2713,9 +2718,26 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                             <td className="py-3.5 px-4 font-medium text-slate-700">
                               {isParticipantLockedByViolation(p) ? (
                                 <div className="space-y-1">
-                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-bold text-[11px]">
-                                    Terkunci (Pelanggaran Keluar CBT)
-                                  </span>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-bold text-[11px]">
+                                      Terkunci (Pelanggaran Keluar CBT)
+                                    </span>
+                                    {typeof p.violationCount === 'number' &&
+                                      p.violationCount > 0 && (
+                                        <span
+                                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-extrabold ${
+                                            p.violationCount >= 6
+                                              ? 'bg-rose-600 text-white'
+                                              : 'bg-amber-100 text-amber-800 border border-amber-300'
+                                          }`}
+                                        >
+                                          Pelanggaran {p.violationCount}/6
+                                          {p.violationCount >= 6
+                                            ? ' (Jawaban Dihapus)'
+                                            : ''}
+                                        </span>
+                                      )}
+                                  </div>
                                   {p.violationReason && (
                                     <div className="text-[11px] text-rose-600">
                                       {p.violationReason}
@@ -2724,7 +2746,15 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                                   )}
                                 </div>
                               ) : (
-                                p.loginState
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span>{p.loginState}</span>
+                                  {typeof p.violationCount === 'number' &&
+                                    p.violationCount > 0 && (
+                                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold">
+                                        Pelanggaran {p.violationCount}/6
+                                      </span>
+                                    )}
+                                </div>
                               )}
                             </td>
                             <td className="py-3.5 px-4 text-right space-x-2 whitespace-nowrap">

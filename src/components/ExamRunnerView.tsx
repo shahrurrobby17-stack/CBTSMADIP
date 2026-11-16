@@ -21,6 +21,9 @@ interface ExamRunnerViewProps {
   answers: Record<string, StudentAnswer>;
   onUpdateAnswer: (questionId: string, updater: (prev: StudentAnswer) => StudentAnswer) => void;
   onFinishExam: (timeUsedSeconds: number) => void;
+  initialRemainingSeconds?: number;
+  onRemainingSecondsChange?: (remainingSeconds: number) => void;
+  violationCount?: number;
 }
 
 type FontScale = 'sm' | 'md' | 'lg';
@@ -37,15 +40,25 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
   answers,
   onUpdateAnswer,
   onFinishExam,
+  initialRemainingSeconds,
+  onRemainingSecondsChange,
+  violationCount = 0,
 }) => {
   const questions = examPackage.questions;
   const totalDurationSeconds = Math.max(
     60,
     (Number(examPackage.durationMinutes) || 90) * 60
   );
+  const effectiveStartSeconds =
+    typeof initialRemainingSeconds === 'number' &&
+    initialRemainingSeconds > 0 &&
+    initialRemainingSeconds <= totalDurationSeconds
+      ? initialRemainingSeconds
+      : totalDurationSeconds;
+
   const [currentIndex, setCurrentIndex] = useState(0);
   const [fontScale, setFontScale] = useState<FontScale>('md');
-  const [remainingSeconds, setRemainingSeconds] = useState(totalDurationSeconds);
+  const [remainingSeconds, setRemainingSeconds] = useState(effectiveStartSeconds);
   const [showQuestionListModal, setShowQuestionListModal] = useState(false);
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [showFinishModal, setShowFinishModal] = useState(false);
@@ -58,14 +71,21 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
     onFinishExamRef.current = onFinishExam;
   }, [onFinishExam]);
 
-  const endTimeRef = useRef<number>(Date.now() + totalDurationSeconds * 1000);
+  const onRemainingSecondsChangeRef = useRef(onRemainingSecondsChange);
+  useEffect(() => {
+    onRemainingSecondsChangeRef.current = onRemainingSecondsChange;
+  }, [onRemainingSecondsChange]);
+
+  const lastReportedSecRef = useRef<number>(effectiveStartSeconds);
+  const endTimeRef = useRef<number>(Date.now() + effectiveStartSeconds * 1000);
   const hasFinishedRef = useRef<boolean>(false);
 
   useEffect(() => {
-    endTimeRef.current = Date.now() + totalDurationSeconds * 1000;
+    endTimeRef.current = Date.now() + effectiveStartSeconds * 1000;
+    lastReportedSecRef.current = effectiveStartSeconds;
     hasFinishedRef.current = false;
-    setRemainingSeconds(totalDurationSeconds);
-  }, [examPackage.id, totalDurationSeconds]);
+    setRemainingSeconds(effectiveStartSeconds);
+  }, [examPackage.id, effectiveStartSeconds]);
 
   // For matching question type: currently selected premise ID
   const [activePremiseId, setActivePremiseId] = useState<string | null>(null);
@@ -92,6 +112,11 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
       const diffMs = endTimeRef.current - Date.now();
       const secsLeft = Math.max(0, Math.ceil(diffMs / 1000));
       setRemainingSeconds(secsLeft);
+
+      if (secsLeft !== lastReportedSecRef.current) {
+        lastReportedSecRef.current = secsLeft;
+        onRemainingSecondsChangeRef.current?.(secsLeft);
+      }
 
       if (secsLeft <= 0 && !hasFinishedRef.current) {
         hasFinishedRef.current = true;
@@ -272,8 +297,17 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
             </div>
           </div>
 
-          {/* Right: Informasi Soal, Timer, Daftar Soal */}
+          {/* Right: Informasi Soal, Pelanggaran Badge, Timer, Daftar Soal */}
           <div className="flex flex-wrap items-center gap-2.5">
+            {violationCount > 0 && (
+              <div
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-xs font-bold"
+                title="Jika pelanggaran mencapai 6/6, seluruh jawaban akan dihapus otomatis"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                <span>Pelanggaran: {violationCount}/6</span>
+              </div>
+            )}
             <button
               type="button"
               onClick={() => setShowInfoModal(true)}
