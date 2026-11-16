@@ -18,6 +18,7 @@ import {
   ProctorDashboardView,
   ProctorParticipantRow,
   doesKelasMatch,
+  isDefaultDemoParticipantsList,
   isParticipantLockedByViolation,
   normalizeKelasCode,
   sanitizeParticipantRows,
@@ -72,6 +73,10 @@ const STORAGE_KEYS = {
 
 export default function App() {
   const [stage, setStage] = useState<AppStage>('login');
+  const stageRef = useRef<AppStage>(stage);
+  useEffect(() => {
+    stageRef.current = stage;
+  }, [stage]);
   const [isAuthSpinning, setIsAuthSpinning] = useState<boolean>(false);
   const authSpinTimerRef = useRef<number | null>(null);
   const [proctorSession, setProctorSession] = useState<{
@@ -496,7 +501,7 @@ export default function App() {
     ) => {
       lastLocalMutationAt.current = Date.now();
       setParticipants((prev) => {
-      const rawNext =
+        const rawNext =
           typeof updater === 'function' ? updater(prev) : updater;
         const nextParticipants = sanitizeParticipantRows(rawNext);
         participantsRef.current = nextParticipants;
@@ -508,9 +513,91 @@ export default function App() {
         } catch {
           // ignore
         }
+
+        const isAdminOrProctor =
+          stageRef.current === 'admin_dashboard' ||
+          stageRef.current === 'proctor_dashboard';
+
+        if (!isAdminOrProctor) {
+          // Student-side mutation: NEVER push the full participants array from a student browser.
+          // Only send a partial patch for the specific student row(s) that changed.
+          const prevByUser = new Map<string, ProctorParticipantRow>();
+          prev.forEach((p) => {
+            prevByUser.set(p.username.trim().toUpperCase(), p);
+          });
+          const changedPatches = nextParticipants
+            .filter((row) => {
+              const prevRow = prevByUser.get(row.username.trim().toUpperCase());
+              if (!prevRow) return true;
+              return (
+                prevRow.loginState !== row.loginState ||
+                prevRow.requestReset !== row.requestReset ||
+                prevRow.violationReason !== row.violationReason ||
+                prevRow.violationTimestamp !== row.violationTimestamp ||
+                prevRow.status !== row.status
+              );
+            })
+            .map((row) => ({
+              id: row.id,
+              username: row.username.trim().toUpperCase(),
+              namaPeserta: row.namaPeserta,
+              kelas: row.kelas,
+              kelompok: row.kelompok,
+              kodeTes: row.kodeTes,
+              status: row.status,
+              loginState: row.loginState,
+              requestReset: Boolean(row.requestReset),
+              violationReason: (row.violationReason ?? null) as any,
+              violationAt: (row.violationAt ?? null) as any,
+              violationSchema: (row.violationSchema ?? null) as any,
+              violationTimestamp: (row.violationTimestamp ?? null) as any,
+              lastResetAt: row.lastResetAt,
+            }));
+
+          if (changedPatches.length > 0) {
+            pendingPushCount.current += 1;
+            saveVercelStorage({
+              participantPatch: changedPatches,
+            })
+              .then((res) => {
+                if (res.ok) {
+                  if (typeof res.updatedAt === 'number') {
+                    latestUpdatedAtRef.current = Math.max(
+                      latestUpdatedAtRef.current,
+                      res.updatedAt
+                    );
+                  }
+                  markSyncedSuccess(res.engine);
+                }
+              })
+              .finally(() => {
+                pendingPushCount.current = Math.max(
+                  0,
+                  pendingPushCount.current - 1
+                );
+              });
+          }
+          return nextParticipants;
+        }
+
+        // Admin / Proctor mutation: block pushing 8 demo rows if initial cloud hydration hasn't completed
+        if (
+          !isHydratedFromCloud.current &&
+          isDefaultDemoParticipantsList(nextParticipants)
+        ) {
+          return nextParticipants;
+        }
+
+        const nextIdSet = new Set(nextParticipants.map((p) => p.id));
+        const deletedParticipantIds = prev
+          .filter((p) => !nextIdSet.has(p.id))
+          .map((p) => p.id);
+
         pendingPushCount.current += 1;
         saveVercelStorage({
           participants: nextParticipants,
+          deletedParticipantIds,
+          forceReplaceParticipants: true,
         })
           .then((res) => {
             if (res.ok) {
@@ -702,6 +789,53 @@ export default function App() {
           ? res.updatedAt
           : 0;
 
+      // Always keep activeToken synchronized from server even if updatedAt matches a local participant mutation
+      if (
+        typeof res.data.activeToken === 'string' &&
+        res.data.activeToken &&
+        res.data.activeToken !== activeTokenRef.current
+      ) {
+        activeTokenRef.current = res.data.activeToken;
+        tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
+        setActiveToken(res.data.activeToken);
+        setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
+      }
+
+      // Self-healing & Anti-Downgrade Guard:
+      // If this browser holds real uploaded participants (e.g., 135 students) in localStorage,
+      // and the server returned only the 8 default demo students (or empty after a serverless cold start),
+      // NEVER overwrite our 135 uploaded students with the 8 demo students! Instead, heal the server.
+      const localHasRealParticipants = !isDefaultDemoParticipantsList(
+        participantsRef.current
+      );
+      const remoteHasParticipants =
+        Array.isArray(res.data.participants) &&
+        res.data.participants.length > 0;
+      const remoteIsDemoOnly =
+        !remoteHasParticipants ||
+        isDefaultDemoParticipantsList(res.data.participants);
+
+      if (localHasRealParticipants && remoteIsDemoOnly) {
+        saveVercelStorage({
+          packages: packagesRef.current,
+          schedules: schedulesRef.current,
+          participants: sanitizeParticipantRows(participantsRef.current),
+          proctors: proctorsRef.current,
+          activeToken: activeTokenRef.current,
+          resultsHistory: resultsHistoryRef.current,
+          forceReplaceParticipants: true,
+        }).then((healRes) => {
+          if (healRes.ok && typeof healRes.updatedAt === 'number') {
+            latestUpdatedAtRef.current = Math.max(
+              latestUpdatedAtRef.current,
+              healRes.updatedAt
+            );
+          }
+        });
+        isHydratedFromCloud.current = true;
+        return;
+      }
+
       // Never overwrite newer client state with a stale serverless instance response
       if (
         isHydratedFromCloud.current &&
@@ -783,23 +917,32 @@ export default function App() {
         isApplyingRemoteUpdate.current = false;
       }, 150);
     } else if (!isHydratedFromCloud.current) {
-      // First boot on Vercel Storage: seed cloud storage with current sanitized state
-      const seedRes = await saveVercelStorage({
-        packages: packagesRef.current,
-        schedules: schedulesRef.current,
-        participants: sanitizeParticipantRows(participantsRef.current),
-        proctors: proctorsRef.current,
-        activeToken: activeTokenRef.current,
-        resultsHistory: resultsHistoryRef.current,
-      });
-      if (seedRes.ok) {
-        if (typeof seedRes.updatedAt === 'number') {
-          latestUpdatedAtRef.current = Math.max(
-            latestUpdatedAtRef.current,
-            seedRes.updatedAt
-          );
+      // Cold-start / empty server: Only seed participants if this browser holds real uploaded students
+      // or if the user is logged into the Administrator dashboard. Never let a fresh student device seed 8 demo rows!
+      const localHasRealParticipants = !isDefaultDemoParticipantsList(
+        participantsRef.current
+      );
+      const isAdminStage = stageRef.current === 'admin_dashboard';
+
+      if (localHasRealParticipants || isAdminStage) {
+        const seedRes = await saveVercelStorage({
+          packages: packagesRef.current,
+          schedules: schedulesRef.current,
+          participants: sanitizeParticipantRows(participantsRef.current),
+          proctors: proctorsRef.current,
+          activeToken: activeTokenRef.current,
+          resultsHistory: resultsHistoryRef.current,
+          forceReplaceParticipants: localHasRealParticipants,
+        });
+        if (seedRes.ok) {
+          if (typeof seedRes.updatedAt === 'number') {
+            latestUpdatedAtRef.current = Math.max(
+              latestUpdatedAtRef.current,
+              seedRes.updatedAt
+            );
+          }
+          setStorageEngine(seedRes.engine);
         }
-        setStorageEngine(seedRes.engine);
       }
     }
     isHydratedFromCloud.current = true;
@@ -818,15 +961,26 @@ export default function App() {
     lastLocalMutationAt.current = Date.now();
     pendingPushCount.current += 1;
     try {
+      const hasRealParticipants = !isDefaultDemoParticipantsList(participants);
       const res = await saveVercelStorage({
         packages,
         schedules,
-        participants,
+        ...(hasRealParticipants || isHydratedFromCloud.current
+          ? { participants, forceReplaceParticipants: hasRealParticipants }
+          : {}),
         proctors,
         activeToken,
         resultsHistory,
       });
       if (res.ok) {
+        if (
+          res.data?.participants &&
+          Array.isArray(res.data.participants) &&
+          !hasRealParticipants &&
+          !isDefaultDemoParticipantsList(res.data.participants)
+        ) {
+          setParticipants(sanitizeParticipantRows(res.data.participants));
+        }
         markSyncedSuccess(res.engine);
       }
     } finally {
@@ -852,9 +1006,11 @@ export default function App() {
         )?.kelas
     ) || 'X';
 
-  const currentStudentActiveSchedules = activeSchedules.filter((s) =>
+  const exactClassSchedules = activeSchedules.filter((s) =>
     doesKelasMatch(currentStudentKelas, s.kelas)
   );
+  const currentStudentActiveSchedules =
+    exactClassSchedules.length > 0 ? exactClassSchedules : activeSchedules;
 
   const matchedStudentSchedule =
     (participant.activeSubjectTitle

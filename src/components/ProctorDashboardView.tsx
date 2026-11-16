@@ -56,6 +56,7 @@ import {
   downloadWordQuestionTemplate,
   downloadWordQuestionArchive,
 } from '../utils/wordQuestionParser';
+import { BeritaAcaraView } from './BeritaAcaraView';
 
 export interface ProctorParticipantRow {
   id: string;
@@ -178,23 +179,78 @@ export function isParticipantStatusActive(status?: string): boolean {
   return s === 'active' || s === 'aktif';
 }
 
+export const DEFAULT_DEMO_PARTICIPANT_IDS = new Set([
+  'ap1',
+  'ap2',
+  'ap3',
+  'ap4',
+  'ap5',
+  'ap6',
+  'ap7',
+  'ap8',
+  'p1',
+  'p2',
+  'p3',
+  'p4',
+  'p5',
+  'p6',
+  'p7',
+  'p8',
+]);
+
+export const DEFAULT_DEMO_USERNAMES = new Set([
+  'SA20264821',
+  'SA20267394',
+  'SA20262918',
+  'SA20268563',
+  'SA20265147',
+  'SA20269302',
+  'SA20266475',
+  'SA20261839',
+  'P130100240',
+  'K020500118',
+  'TK1601',
+  'TK1610',
+]);
+
+export function isCustomUploadedParticipantRow(
+  row?: Partial<ProctorParticipantRow> | null
+): boolean {
+  if (!row || typeof row !== 'object') return false;
+  const id = String(row.id || '').trim();
+  return id.startsWith('excel_') || /^ap_\d+$/.test(id);
+}
+
+export function isDefaultDemoParticipantRow(
+  row?: Partial<ProctorParticipantRow> | null
+): boolean {
+  if (!row || typeof row !== 'object') return false;
+  if (isCustomUploadedParticipantRow(row)) return false;
+  const id = String(row.id || '').trim();
+  const username = shortenStudentUsername(String(row.username || ''));
+  return (
+    DEFAULT_DEMO_PARTICIPANT_IDS.has(id) ||
+    DEFAULT_DEMO_USERNAMES.has(username)
+  );
+}
+
+export function isDefaultDemoParticipantsList(
+  rows?: ProctorParticipantRow[] | null
+): boolean {
+  if (!Array.isArray(rows) || rows.length === 0) return true;
+  if (rows.length > 8) return false;
+  return rows.every((r) => isDefaultDemoParticipantRow(r));
+}
+
 export function sanitizeParticipantRows(
   rows: ProctorParticipantRow[]
 ): ProctorParticipantRow[] {
   if (!Array.isArray(rows)) return [];
-  const hasUploadedExcelRows = rows.some((r) =>
-    String(r?.id || '').startsWith('excel_')
-  );
+  const hasCustomRows = rows.some((r) => isCustomUploadedParticipantRow(r));
   let changed = false;
-  const filtered = hasUploadedExcelRows
+  const filtered = hasCustomRows
     ? rows.filter((r) => {
-        const u = String(r?.username || '').trim().toUpperCase();
-        const isLegacyPreset =
-          u === 'P130100240' ||
-          u === 'K020500118' ||
-          u === 'TK1601' ||
-          u === 'TK1610';
-        if (isLegacyPreset) {
+        if (isDefaultDemoParticipantRow(r)) {
           changed = true;
           return false;
         }
@@ -344,6 +400,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
 
 type SidebarMenuId =
   | 'beranda'
+  | 'berita_acara'
   | 'status_peserta'
   | 'daftar_peserta'
   | 'status_tes'
@@ -574,7 +631,6 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     setAppliedKodeTes('SEMUA');
     setAppliedKelompok('SEMUA');
     setSearchQuery('');
-    setParticipants(INITIAL_PARTICIPANT_ROWS);
     showNotice('Data filter telah di-reset ke Semua Status dan Semua Kelompok.');
   };
 
@@ -1152,6 +1208,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     icon: React.FC<{ className?: string }>;
   }[] = [
     { id: 'beranda', label: 'Beranda', breadcrumb: 'Dashboard Beranda', icon: Home },
+    { id: 'berita_acara', label: 'Berita Acara', breadcrumb: 'Berita Acara & Daftar Hadir Siswa', icon: FileText },
     { id: 'status_peserta', label: 'Status Peserta', breadcrumb: 'List Status Peserta', icon: ClipboardList },
     { id: 'daftar_peserta', label: 'Daftar Peserta', breadcrumb: 'Data Daftar Peserta', icon: User },
     { id: 'status_tes', label: 'Status Tes', breadcrumb: 'Manajemen Bank Soal', icon: ClipboardCheck },
@@ -1712,6 +1769,24 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                 </p>
               </div>
             </div>
+          )}
+
+          {/* VIEW 2A: BERITA ACARA & DAFTAR HADIR SISWA */}
+          {activeMenu === 'berita_acara' && (
+            <BeritaAcaraView
+              participants={participants}
+              packages={packages}
+              schedules={activeSchedules}
+              defaultProctorName={
+                proctorName ||
+                proctors?.[0]?.fullName ||
+                'DRS. H. AHMAD FAUZI, M.PD.'
+              }
+              defaultRoomName={
+                proctors?.[0]?.roomName || 'LAB KOMPUTER 1 (UTAMA)'
+              }
+              onShowNotice={showNotice}
+            />
           )}
 
           {/* VIEW 3: STATUS TES (Question Bank Management & Input Soal) */}

@@ -7,6 +7,7 @@ import {
   normalizeKelasCode,
 } from './ProctorDashboardView';
 import { getPkgClass } from './AdminViews';
+import { fetchVercelStorage } from '../utils/vercelStorage';
 
 export function resolvePackageForSchedule(
   sch: AdminScheduleItem | undefined,
@@ -103,14 +104,16 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
     return normalizeKelasCode(rawKelas) || 'X';
   }, [initialProfile.kelas, matchedParticipant]);
 
-  // Filter active schedules strictly to those matching the student's class
-  const studentActiveSchedules = useMemo(
-    () =>
-      activeSchedules.filter((sch) => doesKelasMatch(studentKelas, sch.kelas)),
-    [activeSchedules, studentKelas]
-  );
-
-  const isStudentScheduleActive = studentActiveSchedules.length > 0;
+  // Prefer active schedules matching the student's class; if none match specifically, fall back to all active schedules
+  const studentActiveSchedules = useMemo(() => {
+    const exactClassSchedules = activeSchedules.filter((sch) =>
+      doesKelasMatch(studentKelas, sch.kelas)
+    );
+    if (exactClassSchedules.length > 0) {
+      return exactClassSchedules;
+    }
+    return activeSchedules;
+  }, [activeSchedules, studentKelas]);
 
   const [selectedScheduleId, setSelectedScheduleId] = useState<string>(
     studentActiveSchedules[0]?.id || ''
@@ -147,55 +150,122 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   );
   const availablePackages = nonTkaPackages.length > 0 ? nonTkaPackages : packages;
 
+  // Fallback package when no schedule is explicitly active yet
+  const fallbackClassPackage = useMemo(() => {
+    const byClass = availablePackages.find((pkg) =>
+      doesKelasMatch(getPkgClass(pkg), studentKelas)
+    );
+    return byClass || availablePackages[0];
+  }, [availablePackages, studentKelas]);
+
   const activePackage = useMemo(
-    () => resolvePackageForSchedule(selectedSchedule, availablePackages),
-    [selectedSchedule, availablePackages]
+    () =>
+      selectedSchedule
+        ? resolvePackageForSchedule(selectedSchedule, availablePackages)
+        : fallbackClassPackage,
+    [selectedSchedule, availablePackages, fallbackClassPackage]
   );
 
   const [enteredToken, setEnteredToken] = useState('');
   const [error, setError] = useState('');
+  const [isVerifyingToken, setIsVerifyingToken] = useState(false);
 
-  useEffect(() => {
-    if (!isStudentScheduleActive) {
-      setEnteredToken('');
-    }
-  }, [isStudentScheduleActive]);
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isStudentScheduleActive || !selectedSchedule) {
-      setError(
-        `Anda belum dapat mengerjakan ujian. Mata pelajaran untuk Kelas ${studentKelas} pada menu Jadwal belum diaktifkan oleh Administrator.`
-      );
-      return;
-    }
-    if (!enteredToken.trim()) {
+    const cleanInput = enteredToken.replace(/\s+/g, '').toUpperCase();
+    if (!cleanInput) {
       setError('Silakan masukkan Token ujian terlebih dahulu.');
       return;
     }
-    if (enteredToken.trim().toUpperCase() !== activeToken.toUpperCase()) {
-      setError('Token yang Anda masukkan tidak sesuai dengan token ujian aktif saat ini.');
+
+    const cleanActiveProp = (activeToken || '').replace(/\s+/g, '').toUpperCase();
+    let storedLocalToken = '';
+    try {
+      storedLocalToken = (
+        localStorage.getItem('pusmendik_cbt_token_v1') || ''
+      )
+        .replace(/\s+/g, '')
+        .toUpperCase();
+    } catch {
+      // ignore
+    }
+
+    let isTokenValid =
+      cleanInput === cleanActiveProp ||
+      (storedLocalToken.length > 0 && cleanInput === storedLocalToken);
+
+    let remoteActiveSchedule: AdminScheduleItem | undefined = selectedSchedule;
+
+    // If token doesn't match local state yet, check live server storage immediately
+    if (!isTokenValid || !remoteActiveSchedule) {
+      setIsVerifyingToken(true);
+      try {
+        const res = await fetchVercelStorage();
+        if (res.ok && res.data) {
+          const serverToken = String(res.data.activeToken || '')
+            .replace(/\s+/g, '')
+            .toUpperCase();
+          if (serverToken && cleanInput === serverToken) {
+            isTokenValid = true;
+            try {
+              localStorage.setItem('pusmendik_cbt_token_v1', serverToken);
+            } catch {
+              // ignore
+            }
+          }
+          if (
+            !remoteActiveSchedule &&
+            Array.isArray(res.data.schedules) &&
+            res.data.schedules.length > 0
+          ) {
+            const remoteActiveList = res.data.schedules.filter(
+              (s) => s.isActive
+            );
+            remoteActiveSchedule =
+              remoteActiveList.find((s) =>
+                doesKelasMatch(studentKelas, s.kelas)
+              ) ||
+              remoteActiveList[0] ||
+              res.data.schedules[0];
+          }
+        }
+      } catch {
+        // ignore network error
+      } finally {
+        setIsVerifyingToken(false);
+      }
+    }
+
+    if (!isTokenValid) {
+      setError(
+        'Token yang Anda masukkan tidak sesuai dengan token ujian aktif saat ini. Pastikan token sesuai dengan yang tampil di Beranda Proktor/Administrator.'
+      );
       return;
     }
+
     setError('');
+    const resolvedSubjectTitle =
+      remoteActiveSchedule?.mapel ||
+      activePackage?.title ||
+      initialProfile.activeSubjectTitle ||
+      'Ujian SAS';
+
     onSubmitProfile({
       ...initialProfile,
       fullName: resolvedFullName,
       kelas: studentKelas,
-      activeSubjectTitle: selectedSchedule.mapel,
+      activeSubjectTitle: resolvedSubjectTitle,
       selectedPackageId:
         activePackage?.id ||
         initialProfile.selectedPackageId ||
         availablePackages[0]?.id ||
         '',
-      enteredToken: enteredToken.trim().toUpperCase(),
+      enteredToken: cleanInput,
     });
   };
 
   const activeSubjectLabel =
-    isStudentScheduleActive && selectedSchedule
-      ? selectedSchedule.mapel || activePackage?.title || '-'
-      : '-';
+    selectedSchedule?.mapel || activePackage?.title || '-';
 
   return (
     <main className="flex-1 max-w-[1200px] w-full mx-auto px-4 sm:px-8 py-8">
@@ -236,7 +306,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             </div>
           </div>
 
-          {/* Mata Pelajaran (Hanya menampilkan mata pelajaran yang aktif sesuai kelas siswa) */}
+          {/* Mata Pelajaran */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
             <label className="text-xs font-semibold text-slate-500">
               Mata Pelajaran
@@ -272,7 +342,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             </div>
           </div>
 
-          {/* Token Input (Satu-satunya kolom yang diisi oleh siswa) */}
+          {/* Token Input (Selalu aktif agar siswa dapat langsung mengetikkan token) */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5">
             <label htmlFor="tokenInput" className="text-xs font-semibold text-slate-600">
               Token
@@ -281,22 +351,17 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               <input
                 id="tokenInput"
                 type="text"
-                disabled={!isStudentScheduleActive}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="characters"
+                spellCheck={false}
                 value={enteredToken}
                 onChange={(e) => {
                   setEnteredToken(e.target.value.toUpperCase());
                   setError('');
                 }}
-                placeholder={
-                  isStudentScheduleActive
-                    ? 'Ketikkan token di sini'
-                    : `Token belum keluar (Mapel Kelas ${studentKelas} belum aktif)`
-                }
-                className={`w-full px-3.5 py-2 font-mono text-sm font-bold tracking-widest uppercase border rounded-lg focus:outline-none transition-colors ${
-                  isStudentScheduleActive
-                    ? 'text-slate-900 bg-slate-50 border-slate-200 focus:border-blue-600 focus:bg-white'
-                    : 'text-slate-400 bg-slate-100 border-slate-200 cursor-not-allowed'
-                }`}
+                placeholder="Ketikkan token ujian di sini"
+                className="w-full px-3.5 py-2 font-mono text-sm font-bold tracking-widest uppercase border rounded-lg text-slate-900 bg-slate-50 border-slate-300 focus:border-blue-600 focus:bg-white focus:outline-none transition-colors"
               />
             </div>
           </div>
@@ -304,16 +369,10 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
           <div className="pt-4">
             <button
               type="submit"
-              disabled={!isStudentScheduleActive}
-              className={`w-full py-2.5 px-6 rounded-full text-sm font-semibold transition-all ${
-                isStudentScheduleActive
-                  ? 'bg-[#0066ff] hover:bg-[#0052cc] text-white shadow-[0_6px_16px_rgba(0,102,255,0.28)] cursor-pointer'
-                  : 'bg-slate-200 text-slate-500 cursor-not-allowed'
-              }`}
+              disabled={isVerifyingToken}
+              className="w-full py-2.5 px-6 rounded-full text-sm font-semibold transition-all bg-[#0066ff] hover:bg-[#0052cc] text-white shadow-[0_6px_16px_rgba(0,102,255,0.28)] cursor-pointer disabled:opacity-60"
             >
-              {isStudentScheduleActive
-                ? 'Submit'
-                : `Tidak Dapat Mengerjakan (Mapel Kelas ${studentKelas} Belum Diaktifkan)`}
+              {isVerifyingToken ? 'Memverifikasi Token...' : 'Submit'}
             </button>
           </div>
         </form>

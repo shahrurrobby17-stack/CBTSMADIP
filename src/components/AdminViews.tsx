@@ -57,6 +57,8 @@ import { getQuestionTypeLabel } from '../data/cbtData';
 import {
   ProctorParticipantRow,
   doesKelasMatch,
+  isDefaultDemoParticipantRow,
+  isDefaultDemoParticipantsList,
   isParticipantLockedByViolation,
   isParticipantStatusActive,
   sanitizeParticipantRows,
@@ -72,6 +74,7 @@ import {
   downloadWordQuestionTemplate,
   downloadWordQuestionArchive,
 } from '../utils/wordQuestionParser';
+import { BeritaAcaraView } from './BeritaAcaraView';
 
 interface AdminLoginViewProps {
   onAdminLoginSuccess: (adminUsername: string) => void;
@@ -579,6 +582,7 @@ export const INITIAL_ADMIN_SCHEDULES: AdminScheduleItem[] = [
 
 type AdminSidebarMenuId =
   | 'beranda'
+  | 'berita_acara'
   | 'daftar_proktor'
   | 'status_peserta'
   | 'daftar_peserta'
@@ -1964,8 +1968,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     setAppliedKodeTes('SEMUA');
     setAppliedKelompok('SEMUA');
     setSearchQuery('');
-    setParticipants(INITIAL_ADMIN_PARTICIPANTS);
-    showNotice('Filter dan daftar peserta telah di-reset ke Semua Status dan Semua Kelompok.');
+    showNotice('Filter telah di-reset ke Semua Status dan Semua Kelompok.');
   };
 
   const handleAddParticipant = (e: React.FormEvent) => {
@@ -2144,16 +2147,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         // maka upload pertama menggantikan data contoh awal.
         // Namun jika sudah ada data kelas hasil upload / tambah sebelumnya,
         // upload kelas berikutnya otomatis melanjutkan di bawah kelas sebelumnya (tidak menimpa).
-        const initialDefaultIds = new Set(
-          INITIAL_ADMIN_PARTICIPANTS.map((p) => p.id)
-        );
         const isStillInitialDefaultOnly =
-          participants.length > 0 &&
-          participants.every((p) => initialDefaultIds.has(p.id));
+          isDefaultDemoParticipantsList(participants);
 
         const baseParticipants = isStillInitialDefaultOnly
           ? []
-          : participants.filter((p) => !initialDefaultIds.has(p.id));
+          : participants.filter((p) => !isDefaultDemoParticipantRow(p));
 
         // Hasilkan angka acak unik untuk format username SA2026(ANGKA ACAK)
         const usedUsernames = new Set<string>(
@@ -2898,6 +2897,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     icon: React.FC<{ className?: string }>;
   }[] = [
     { id: 'beranda', label: 'Beranda', breadcrumb: 'Beranda Administrator', icon: Home },
+    { id: 'berita_acara', label: 'Berita Acara', breadcrumb: 'Berita Acara & Daftar Hadir Siswa', icon: FileText },
     { id: 'daftar_proktor', label: 'Daftar Proktor', breadcrumb: 'List Daftar Proktor', icon: UserCog },
     { id: 'status_peserta', label: 'Status Peserta', breadcrumb: 'List Status Peserta', icon: ClipboardList },
     { id: 'daftar_peserta', label: 'Daftar Peserta', breadcrumb: 'Manajemen Daftar Peserta', icon: User },
@@ -3516,6 +3516,33 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </div>
               </div>
             </div>
+          )}
+
+          {/* 2A. BERITA ACARA & DAFTAR HADIR SISWA */}
+          {activeMenu === 'berita_acara' && (
+            <BeritaAcaraView
+              participants={participants}
+              packages={packages}
+              schedules={schedules}
+              defaultProctorName={
+                appConfig?.namaProktor ||
+                proctors[0]?.fullName ||
+                'DRS. H. AHMAD FAUZI, M.PD.'
+              }
+              defaultRoomName={
+                proctors[0]?.roomName ||
+                appConfig?.ruangDefault ||
+                'LAB KOMPUTER 1 (UTAMA)'
+              }
+              namaSekolah={appConfig?.namaSekolah || 'SMA Islam Diponegoro Wagir'}
+              npsn={appConfig?.npsn || '20517890'}
+              namaKepalaSekolah={
+                appConfig?.namaKepalaSekolah || 'ROMEO GALISTRA, S.Pd.'
+              }
+              namaUjian={appConfig?.namaUjian || 'SUMATIF AKHIR SEMESTER (SAS)'}
+              semester={appConfig?.semester || 'Genap 2025/2026'}
+              onShowNotice={showNotice}
+            />
           )}
 
           {/* 2B. DAFTAR PROKTOR */}
