@@ -10,48 +10,107 @@ import {
 import { getPkgClass } from './AdminViews';
 import { fetchVercelStorage } from '../utils/vercelStorage';
 
+function cleanMapelTitle(raw?: string): string {
+  return String(raw || '')
+    .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .trim()
+    .toLowerCase();
+}
+
+function findMatchingPkgInPool(
+  pool: ExamPackage[],
+  sch: AdminScheduleItem,
+  targetMapelLower: string
+): ExamPackage | undefined {
+  if (pool.length === 0) return undefined;
+
+  // 1. Exact title + class match
+  if (targetMapelLower) {
+    const exactTitleAndClass = pool.find(
+      (pkg) =>
+        cleanMapelTitle(pkg.title) === targetMapelLower &&
+        doesKelasMatch(getPkgClass(pkg), sch.kelas)
+    );
+    if (exactTitleAndClass) return exactTitleAndClass;
+  }
+
+  // 2. Exact title match
+  if (targetMapelLower) {
+    const exactTitle = pool.find(
+      (pkg) => cleanMapelTitle(pkg.title) === targetMapelLower
+    );
+    if (exactTitle) return exactTitle;
+  }
+
+  // 3. Partial title + class match
+  if (targetMapelLower) {
+    const partialTitleAndClass = pool.find((pkg) => {
+      const pTitle = cleanMapelTitle(pkg.title);
+      return (
+        doesKelasMatch(getPkgClass(pkg), sch.kelas) &&
+        pTitle.length > 0 &&
+        (pTitle.includes(targetMapelLower) || targetMapelLower.includes(pTitle))
+      );
+    });
+    if (partialTitleAndClass) return partialTitleAndClass;
+  }
+
+  // 4. Partial title match (any class)
+  if (targetMapelLower) {
+    const partialTitle = pool.find((pkg) => {
+      const pTitle = cleanMapelTitle(pkg.title);
+      return (
+        pTitle.length > 0 &&
+        (pTitle.includes(targetMapelLower) || targetMapelLower.includes(pTitle))
+      );
+    });
+    if (partialTitle) return partialTitle;
+  }
+
+  // 5. Class match
+  if (sch.kelas) {
+    const classMatch = pool.find((pkg) =>
+      doesKelasMatch(getPkgClass(pkg), sch.kelas)
+    );
+    if (classMatch) return classMatch;
+  }
+
+  return undefined;
+}
+
 export function resolvePackageForSchedule(
   sch: AdminScheduleItem | undefined,
   packages: ExamPackage[]
 ): ExamPackage | undefined {
   if (packages.length === 0) return undefined;
-  if (!sch) return packages[0];
 
-  const targetMapelLower = (sch.mapel || '').trim().toLowerCase();
-  const parsedDuration = parseInt(String(sch.durasi || ''), 10);
-
-  // 1. Exact title + class match
-  let matched = packages.find(
-    (pkg) =>
-      pkg.title.trim().toLowerCase() === targetMapelLower &&
-      doesKelasMatch(getPkgClass(pkg), sch.kelas)
+  const pkgsWithQuestions = packages.filter(
+    (p) =>
+      Array.isArray(p?.questions) &&
+      p.questions.filter((q) => !String(q?.id || '').startsWith('q_default_'))
+        .length > 0
   );
 
-  // 2. Exact title match
-  if (!matched && targetMapelLower) {
-    matched = packages.find(
-      (pkg) => pkg.title.trim().toLowerCase() === targetMapelLower
-    );
+  if (!sch) {
+    return pkgsWithQuestions[0] || packages[0];
   }
 
-  // 3. Partial title + class match
-  if (!matched && targetMapelLower) {
-    matched = packages.find(
-      (pkg) =>
-        doesKelasMatch(getPkgClass(pkg), sch.kelas) &&
-        (pkg.title.trim().toLowerCase().includes(targetMapelLower) ||
-          targetMapelLower.includes(pkg.title.trim().toLowerCase()))
-    );
+  const targetMapelLower = cleanMapelTitle(sch.mapel);
+  const parsedDuration = parseInt(String(sch.durasi || ''), 10);
+
+  // ALWAYS prioritize packages that actually have uploaded questions first
+  let matched = findMatchingPkgInPool(
+    pkgsWithQuestions,
+    sch,
+    targetMapelLower
+  );
+
+  // If no package with questions matched, search all packages
+  if (!matched) {
+    matched = findMatchingPkgInPool(packages, sch, targetMapelLower);
   }
 
-  // 4. Class match
-  if (!matched && sch.kelas) {
-    matched = packages.find((pkg) =>
-      doesKelasMatch(getPkgClass(pkg), sch.kelas)
-    );
-  }
-
-  const basePkg = matched || packages[0];
+  const basePkg = matched || pkgsWithQuestions[0] || packages[0];
   const normKelas = normalizeKelasCode(sch.kelas) || sch.kelas;
 
   return {
@@ -73,6 +132,11 @@ interface ParticipantConfirmationProps {
   isScheduleActive: boolean;
   activeSchedules: AdminScheduleItem[];
   onRefreshToken: () => void;
+  onSyncRemoteData?: (data: {
+    packages?: ExamPackage[];
+    schedules?: AdminScheduleItem[];
+    activeToken?: string;
+  }) => void;
   onSubmitProfile: (profile: ParticipantProfile) => void;
 }
 
@@ -82,6 +146,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   participants = [],
   activeToken,
   activeSchedules,
+  onSyncRemoteData,
   onSubmitProfile,
 }) => {
   // Resolve the logged-in student's registered name and class (read-only)
@@ -156,8 +221,17 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   );
   const availablePackages = nonTkaPackages.length > 0 ? nonTkaPackages : packages;
 
-  // Fallback package when no schedule is explicitly active yet
+  // Fallback package when no schedule is explicitly active yet (prioritize packages with questions)
   const fallbackClassPackage = useMemo(() => {
+    const withQuestions = availablePackages.filter(
+      (pkg) => Array.isArray(pkg.questions) && pkg.questions.length > 0
+    );
+    const byClassWithQuestions = withQuestions.find((pkg) =>
+      doesKelasMatch(getPkgClass(pkg), studentKelas)
+    );
+    if (byClassWithQuestions) return byClassWithQuestions;
+    if (withQuestions.length > 0) return withQuestions[0];
+
     const byClass = availablePackages.find((pkg) =>
       doesKelasMatch(getPkgClass(pkg), studentKelas)
     );
@@ -201,13 +275,23 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       (storedLocalToken.length > 0 && cleanInput === storedLocalToken);
 
     let remoteActiveSchedule: AdminScheduleItem | undefined = selectedSchedule;
+    let resolvedPkg: ExamPackage | undefined = activePackage;
+    const localHasQuestions =
+      Array.isArray(activePackage?.questions) &&
+      activePackage.questions.length > 0;
 
-    // If token doesn't match local state yet, check live server storage immediately
-    if (!isTokenValid || !remoteActiveSchedule) {
+    // If token doesn't match local state yet OR local package has 0 questions, check live server storage immediately
+    if (!isTokenValid || !remoteActiveSchedule || !localHasQuestions) {
       setIsVerifyingToken(true);
       try {
         const res = await fetchVercelStorage();
         if (res.ok && res.data) {
+          onSyncRemoteData?.({
+            packages: res.data.packages,
+            schedules: res.data.schedules,
+            activeToken: res.data.activeToken,
+          });
+
           const serverToken = String(res.data.activeToken || '')
             .replace(/\s+/g, '')
             .toUpperCase();
@@ -234,6 +318,22 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               remoteActiveList[0] ||
               res.data.schedules[0];
           }
+          if (
+            Array.isArray(res.data.packages) &&
+            res.data.packages.length > 0
+          ) {
+            const remoteMatchedPkg = resolvePackageForSchedule(
+              remoteActiveSchedule,
+              res.data.packages
+            );
+            if (
+              remoteMatchedPkg &&
+              Array.isArray(remoteMatchedPkg.questions) &&
+              remoteMatchedPkg.questions.length > 0
+            ) {
+              resolvedPkg = remoteMatchedPkg;
+            }
+          }
         }
       } catch {
         // ignore network error
@@ -252,7 +352,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
     setError('');
     const resolvedSubjectTitle =
       remoteActiveSchedule?.mapel ||
-      activePackage?.title ||
+      resolvedPkg?.title ||
       initialProfile.activeSubjectTitle ||
       'Ujian SAS';
 
@@ -262,7 +362,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       kelas: studentKelas,
       activeSubjectTitle: resolvedSubjectTitle,
       selectedPackageId:
-        activePackage?.id ||
+        resolvedPkg?.id ||
         initialProfile.selectedPackageId ||
         availablePackages[0]?.id ||
         '',

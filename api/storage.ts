@@ -93,6 +93,7 @@ function isDefaultInactiveSchedulesList(list: unknown): boolean {
 function resolveIncomingSchedules(
   incomingList: unknown,
   existingList: unknown,
+  deletedScheduleIdsInput?: unknown,
   forceReplace?: boolean
 ): Record<string, any>[] | undefined {
   const hasExisting = Array.isArray(existingList) && existingList.length > 0;
@@ -102,17 +103,24 @@ function resolveIncomingSchedules(
     return hasExisting ? (existingList as Record<string, any>[]) : undefined;
   }
 
+  const deletedIds = new Set<string>(
+    Array.isArray(deletedScheduleIdsInput)
+      ? deletedScheduleIdsInput
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      : []
+  );
+
   const existingHasActiveOrCustom =
     hasExisting && !isDefaultInactiveSchedulesList(existingList);
   const incomingIsDefaultInactive = isDefaultInactiveSchedulesList(incomingList);
 
   // Never allow an unhydrated tab's default inactive schedules to wipe out active schedules or custom schedules
-  // unless the Admin explicitly toggled/modified schedules (forceReplace = true)
   if (existingHasActiveOrCustom && incomingIsDefaultInactive && !forceReplace) {
     return existingList as Record<string, any>[];
   }
 
-  if (!forceReplace && hasExisting) {
+  if (hasExisting) {
     const existingActiveIds = new Set<string>();
     const customExistingRows: Record<string, any>[] = [];
     const incomingIds = new Set<string>(
@@ -124,19 +132,26 @@ function resolveIncomingSchedules(
     for (const row of existingList as any[]) {
       if (!row || typeof row !== 'object') continue;
       const id = String(row.id || '').trim();
-      if (row.isActive && id) {
+      if (!id || deletedIds.has(id)) continue;
+
+      if (row.isActive) {
         existingActiveIds.add(id);
       }
-      if (id && !DEFAULT_DEMO_SCHEDULE_IDS.has(id) && !incomingIds.has(id)) {
+      // Preserve custom schedules (sch_...) that were not explicitly deleted
+      if (!DEFAULT_DEMO_SCHEDULE_IDS.has(id) && !incomingIds.has(id)) {
         customExistingRows.push(row);
       }
     }
 
     const merged = (incomingList as any[])
-      .filter((s) => s && typeof s === 'object')
+      .filter((s) => {
+        if (!s || typeof s !== 'object') return false;
+        const id = String(s.id || '').trim();
+        return !id || !deletedIds.has(id);
+      })
       .map((s) => {
         const id = String(s.id || '').trim();
-        if (id && existingActiveIds.has(id)) {
+        if (!forceReplace && id && existingActiveIds.has(id)) {
           return { ...s, isActive: true };
         }
         return s;
@@ -146,6 +161,143 @@ function resolveIncomingSchedules(
   }
 
   return incomingList as Record<string, any>[];
+}
+
+function getPackageMatchKey(pkg: Record<string, any>): string {
+  const title = String(pkg.title || '')
+    .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .trim()
+    .toLowerCase();
+  const targetClass = normalizeServerKelas(pkg.targetClass || '');
+  return `${title}__${targetClass}`;
+}
+
+function resolveIncomingPackages(
+  incomingList: unknown,
+  existingList: unknown,
+  deletedPackageIdsInput?: unknown,
+  forceReplace?: boolean
+): Record<string, any>[] | undefined {
+  const hasExisting = Array.isArray(existingList) && existingList.length > 0;
+  const hasIncoming = Array.isArray(incomingList) && incomingList.length > 0;
+
+  if (!hasIncoming) {
+    return hasExisting ? (existingList as Record<string, any>[]) : undefined;
+  }
+  if (!hasExisting) {
+    return incomingList as Record<string, any>[];
+  }
+
+  const deletedSet = new Set<string>(
+    Array.isArray(deletedPackageIdsInput)
+      ? deletedPackageIdsInput
+          .map((id) => String(id || '').trim().toUpperCase())
+          .filter(Boolean)
+      : []
+  );
+
+  const existingById = new Map<string, Record<string, any>>();
+  const existingByCode = new Map<string, Record<string, any>>();
+  const existingByTitleClass = new Map<string, Record<string, any>>();
+
+  for (const item of existingList as any[]) {
+    if (!item || typeof item !== 'object') continue;
+    const id = String(item.id || '').trim();
+    const code = String(item.code || '')
+      .trim()
+      .toUpperCase();
+    const tk = getPackageMatchKey(item);
+    if (id) existingById.set(id, item);
+    if (code) existingByCode.set(code, item);
+    if (tk) existingByTitleClass.set(tk, item);
+  }
+
+  const matchedExistingIds = new Set<string>();
+  const mergedIncoming = (incomingList as any[])
+    .filter((pkg) => pkg && typeof pkg === 'object')
+    .map((pkg) => {
+      const id = String(pkg.id || '').trim();
+      const code = String(pkg.code || '')
+        .trim()
+        .toUpperCase();
+      const tk = getPackageMatchKey(pkg);
+
+      const existMatch =
+        (id ? existingById.get(id) : undefined) ||
+        (code ? existingByCode.get(code) : undefined) ||
+        (tk ? existingByTitleClass.get(tk) : undefined);
+
+      if (existMatch) {
+        const existId = String(existMatch.id || '').trim();
+        if (existId) matchedExistingIds.add(existId);
+
+        const incQuestions = Array.isArray(pkg.questions)
+          ? pkg.questions.filter(
+              (q: any) => !String(q?.id || '').startsWith('q_default_')
+            )
+          : [];
+        const existQuestions = Array.isArray(existMatch.questions)
+          ? existMatch.questions.filter(
+              (q: any) => !String(q?.id || '').startsWith('q_default_')
+            )
+          : [];
+
+        // NEVER allow a 0-question package from a student/unhydrated browser to wipe out uploaded questions
+        // unless the Admin explicitly deleted questions (forceReplace === true)
+        if (
+          !forceReplace &&
+          existQuestions.length > 0 &&
+          incQuestions.length < existQuestions.length
+        ) {
+          return {
+            ...pkg,
+            questions: existQuestions,
+          };
+        }
+      }
+      return pkg;
+    });
+
+  // Also preserve any existing packages that have uploaded questions (or custom packages) and were not deleted
+  const preservedExisting: Record<string, any>[] = [];
+  for (const existPkg of existingList as any[]) {
+    if (!existPkg || typeof existPkg !== 'object') continue;
+    const existId = String(existPkg.id || '').trim();
+    const existCode = String(existPkg.code || '')
+      .trim()
+      .toUpperCase();
+    if (
+      (existId && deletedSet.has(existId.toUpperCase())) ||
+      (existCode && deletedSet.has(existCode))
+    ) {
+      continue;
+    }
+    if (existId && matchedExistingIds.has(existId)) {
+      continue;
+    }
+    const tk = getPackageMatchKey(existPkg);
+    const alreadyInMerged = mergedIncoming.some((m) => {
+      const mCode = String(m.code || '')
+        .trim()
+        .toUpperCase();
+      return (
+        (existCode && mCode === existCode) ||
+        (tk && getPackageMatchKey(m) === tk)
+      );
+    });
+    if (alreadyInMerged) continue;
+
+    const existQuestions = Array.isArray(existPkg.questions)
+      ? existPkg.questions.filter(
+          (q: any) => !String(q?.id || '').startsWith('q_default_')
+        )
+      : [];
+    if (existQuestions.length > 0 || !forceReplace) {
+      preservedExisting.push(existPkg);
+    }
+  }
+
+  return [...mergedIncoming, ...preservedExisting];
 }
 
 function getLocalFilePath(): string {
@@ -765,10 +917,50 @@ export default async function handler(req: any, res: any) {
         nextSchedules = resolveIncomingSchedules(
           body.schedules,
           existing.schedules,
+          body.deletedScheduleIds,
           Boolean(body.forceReplaceSchedules)
         );
       } else if (Array.isArray(existing.schedules)) {
         nextSchedules = existing.schedules as Record<string, any>[];
+      }
+
+      let nextPackages: Record<string, any>[] | undefined;
+      if (Array.isArray(body.packages)) {
+        nextPackages = resolveIncomingPackages(
+          body.packages,
+          existing.packages,
+          body.deletedPackageIds,
+          Boolean(body.forceReplacePackages)
+        );
+      } else if (Array.isArray(existing.packages)) {
+        nextPackages = existing.packages as Record<string, any>[];
+      }
+
+      let nextResultsHistory: Record<string, any>[] | undefined;
+      if (Array.isArray(body.resultsHistory)) {
+        if (
+          body.resultsHistory.length > 0 &&
+          Array.isArray(existing.resultsHistory) &&
+          existing.resultsHistory.length > 0
+        ) {
+          const seenIds = new Set<string>();
+          const combinedHistory: Record<string, any>[] = [];
+          for (const item of [
+            ...body.resultsHistory,
+            ...existing.resultsHistory,
+          ]) {
+            if (!item || typeof item !== 'object') continue;
+            const id = String((item as any).id || '').trim();
+            if (id && seenIds.has(id)) continue;
+            if (id) seenIds.add(id);
+            combinedHistory.push(item as Record<string, any>);
+          }
+          nextResultsHistory = combinedHistory;
+        } else {
+          nextResultsHistory = body.resultsHistory;
+        }
+      } else if (Array.isArray(existing.resultsHistory)) {
+        nextResultsHistory = existing.resultsHistory as Record<string, any>[];
       }
 
       // Strip transient transport keys before persisting
@@ -776,16 +968,23 @@ export default async function handler(req: any, res: any) {
         participantPatch: _ignorePatch,
         deletedParticipantIds: _ignoreDeleted,
         forceReplaceParticipants: _ignoreForce,
+        deletedScheduleIds: _ignoreDeletedSchedules,
         forceReplaceSchedules: _ignoreForceSchedules,
+        deletedPackageIds: _ignoreDeletedPackages,
+        forceReplacePackages: _ignoreForcePackages,
         ...cleanBody
       } = body as Record<string, unknown>;
 
       const merged: Record<string, unknown> = {
         ...existing,
         ...cleanBody,
+        ...(nextPackages !== undefined ? { packages: nextPackages } : {}),
         ...(nextSchedules !== undefined ? { schedules: nextSchedules } : {}),
         ...(nextParticipants !== undefined
           ? { participants: nextParticipants }
+          : {}),
+        ...(nextResultsHistory !== undefined
+          ? { resultsHistory: nextResultsHistory }
           : {}),
         updatedAt: Date.now(),
       };

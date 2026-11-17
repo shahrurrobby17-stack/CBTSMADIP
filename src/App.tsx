@@ -66,6 +66,7 @@ type AppStage =
 
 const STORAGE_KEYS = {
   PACKAGES: 'pusmendik_cbt_packages_v1',
+  PACKAGES_BACKUP: 'pusmendik_cbt_packages_backup_v1',
   SCHEDULES: 'pusmendik_cbt_schedules_v1',
   SCHEDULES_BACKUP: 'pusmendik_cbt_schedules_backup_v1',
   PARTICIPANTS: 'pusmendik_cbt_participants_v1',
@@ -88,6 +89,165 @@ function isDefaultInactiveSchedulesList(
   return rows.every((s) =>
     DEFAULT_DEMO_SCHEDULE_IDS.has(String(s?.id || '').trim())
   );
+}
+
+function getRealQuestionsCount(pkg?: ExamPackage | null): number {
+  if (!pkg || !Array.isArray(pkg.questions)) return 0;
+  return pkg.questions.filter(
+    (q) => !String(q?.id || '').startsWith('q_default_')
+  ).length;
+}
+
+function getTotalUploadedQuestionsCount(pkgs?: ExamPackage[] | null): number {
+  if (!Array.isArray(pkgs)) return 0;
+  return pkgs.reduce((acc, pkg) => acc + getRealQuestionsCount(pkg), 0);
+}
+
+function hasAnyUploadedQuestions(pkgs?: ExamPackage[] | null): boolean {
+  return getTotalUploadedQuestionsCount(pkgs) > 0;
+}
+
+function getPkgMatchKey(pkg: ExamPackage): string {
+  const title = String(pkg.title || '')
+    .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .trim()
+    .toLowerCase();
+  const cls = normalizeKelasCode(pkg.targetClass || '');
+  return `${title}__${cls}`;
+}
+
+function readLocalDeletedMapelSets(): {
+  deletedCodes: Set<string>;
+  deletedNames: Set<string>;
+  isCustomMapelConfigured: boolean;
+} {
+  const deletedCodes = new Set<string>();
+  const deletedNames = new Set<string>();
+  let isCustomMapelConfigured = false;
+  try {
+    const rawSettings = localStorage.getItem('cbt_admin_settings');
+    if (rawSettings) {
+      const parsedSettings = JSON.parse(rawSettings);
+      if (parsedSettings && typeof parsedSettings === 'object') {
+        if (parsedSettings.customMapelConfigured) {
+          isCustomMapelConfigured = true;
+        }
+        if (Array.isArray(parsedSettings.deletedMapelCodes)) {
+          parsedSettings.deletedMapelCodes.forEach((c: any) => {
+            if (typeof c === 'string' && c.trim()) {
+              deletedCodes.add(c.trim().toUpperCase());
+            }
+          });
+        }
+        if (Array.isArray(parsedSettings.deletedMapelNames)) {
+          parsedSettings.deletedMapelNames.forEach((n: any) => {
+            if (typeof n === 'string' && n.trim()) {
+              deletedNames.add(n.trim().toLowerCase());
+            }
+          });
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { deletedCodes, deletedNames, isCustomMapelConfigured };
+}
+
+function mergePackagesPreservingQuestions(
+  incomingList: ExamPackage[],
+  localList: ExamPackage[]
+): ExamPackage[] {
+  const { deletedCodes, deletedNames } = readLocalDeletedMapelSets();
+
+  const localById = new Map<string, ExamPackage>();
+  const localByCode = new Map<string, ExamPackage>();
+  const localByTitleClass = new Map<string, ExamPackage>();
+
+  for (const lPkg of localList) {
+    if (!lPkg || typeof lPkg !== 'object') continue;
+    const id = String(lPkg.id || '').trim();
+    const code = String(lPkg.code || '')
+      .trim()
+      .toUpperCase();
+    const tk = getPkgMatchKey(lPkg);
+    if (id) localById.set(id, lPkg);
+    if (code) localByCode.set(code, lPkg);
+    if (tk) localByTitleClass.set(tk, lPkg);
+  }
+
+  const matchedLocalIds = new Set<string>();
+
+  const merged = incomingList
+    .filter((pkg) => {
+      if (!pkg || typeof pkg !== 'object') return false;
+      const pCode = String(pkg.code || '')
+        .trim()
+        .toUpperCase();
+      const pTitle = String(pkg.title || '')
+        .replace(/^Simulasi TKA\s*-\s*/i, '')
+        .trim()
+        .toLowerCase();
+      if (pCode && deletedCodes.has(pCode)) return false;
+      if (pTitle && deletedNames.has(pTitle)) return false;
+      return true;
+    })
+    .map((pkg) => {
+      const id = String(pkg.id || '').trim();
+      const code = String(pkg.code || '')
+        .trim()
+        .toUpperCase();
+      const tk = getPkgMatchKey(pkg);
+
+      const localMatch =
+        (id ? localById.get(id) : undefined) ||
+        (code ? localByCode.get(code) : undefined) ||
+        (tk ? localByTitleClass.get(tk) : undefined);
+
+      if (localMatch) {
+        if (localMatch.id) matchedLocalIds.add(localMatch.id);
+        const incQCount = getRealQuestionsCount(pkg);
+        const localQCount = getRealQuestionsCount(localMatch);
+        // Never overwrite local uploaded questions with an empty/smaller remote question list
+        if (localQCount > 0 && incQCount < localQCount) {
+          return {
+            ...pkg,
+            questions: localMatch.questions.filter(
+              (q) => !String(q?.id || '').startsWith('q_default_')
+            ),
+          };
+        }
+      }
+      return pkg;
+    });
+
+  // Also preserve any local packages that have uploaded questions (or custom mapel) missing from incomingList
+  for (const lPkg of localList) {
+    if (!lPkg || typeof lPkg !== 'object') continue;
+    const lCode = String(lPkg.code || '')
+      .trim()
+      .toUpperCase();
+    const lTitle = String(lPkg.title || '')
+      .replace(/^Simulasi TKA\s*-\s*/i, '')
+      .trim()
+      .toLowerCase();
+    if (lCode && deletedCodes.has(lCode)) continue;
+    if (lTitle && deletedNames.has(lTitle)) continue;
+    if (lPkg.id && matchedLocalIds.has(lPkg.id)) continue;
+
+    const tk = getPkgMatchKey(lPkg);
+    const alreadyExists = merged.some((m) => {
+      const mCode = String(m.code || '')
+        .trim()
+        .toUpperCase();
+      return (lCode && mCode === lCode) || (tk && getPkgMatchKey(m) === tk);
+    });
+    if (!alreadyExists && getRealQuestionsCount(lPkg) > 0) {
+      merged.push(lPkg);
+    }
+  }
+
+  return merged;
 }
 
 const MAX_VIOLATION_LIMIT = 6;
@@ -307,42 +467,29 @@ export default function App() {
 
   const [packages, setPackages] = useState<ExamPackage[]>(() => {
     try {
-      let isCustomMapelConfigured = false;
-      const deletedCodes = new Set<string>();
-      const deletedNames = new Set<string>();
+      const { deletedCodes, deletedNames, isCustomMapelConfigured } =
+        readLocalDeletedMapelSets();
+
+      let backupList: ExamPackage[] = [];
       try {
-        const rawSettings = localStorage.getItem('cbt_admin_settings');
-        if (rawSettings) {
-          const parsedSettings = JSON.parse(rawSettings);
-          if (parsedSettings && typeof parsedSettings === 'object') {
-            if (parsedSettings.customMapelConfigured) {
-              isCustomMapelConfigured = true;
-            }
-            if (Array.isArray(parsedSettings.deletedMapelCodes)) {
-              parsedSettings.deletedMapelCodes.forEach((c: any) => {
-                if (typeof c === 'string' && c.trim()) {
-                  deletedCodes.add(c.trim().toUpperCase());
-                }
-              });
-            }
-            if (Array.isArray(parsedSettings.deletedMapelNames)) {
-              parsedSettings.deletedMapelNames.forEach((n: any) => {
-                if (typeof n === 'string' && n.trim()) {
-                  deletedNames.add(n.trim().toLowerCase());
-                }
-              });
-            }
+        const backupRaw = localStorage.getItem(STORAGE_KEYS.PACKAGES_BACKUP);
+        if (backupRaw) {
+          const parsedBackup = JSON.parse(backupRaw);
+          if (Array.isArray(parsedBackup)) {
+            backupList = parsedBackup.filter(
+              (pkg: ExamPackage) => pkg && typeof pkg === 'object'
+            );
           }
         }
       } catch {
-        // ignore settings parse error
+        // ignore backup parse error
       }
 
       const saved = localStorage.getItem(STORAGE_KEYS.PACKAGES);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          const list = parsed
+          let list = parsed
             .filter((pkg: ExamPackage) => pkg && typeof pkg === 'object')
             .map((pkg: ExamPackage) => ({
               ...pkg,
@@ -360,6 +507,11 @@ export default function App() {
               if (pTitle && deletedNames.has(pTitle)) return false;
               return true;
             });
+
+          // Restore any uploaded questions from PACKAGES_BACKUP if primary was overwritten with 0 questions
+          if (backupList.length > 0) {
+            list = mergePackagesPreservingQuestions(list, backupList);
+          }
 
           if (isCustomMapelConfigured || deletedCodes.size > 0 || deletedNames.size > 0) {
             return list;
@@ -383,6 +535,12 @@ export default function App() {
             return list;
           }
         }
+      }
+      if (backupList.length > 0) {
+        return mergePackagesPreservingQuestions(
+          INITIAL_EXAM_PACKAGES,
+          backupList
+        );
       }
     } catch {
       // Fallback to initial packages
@@ -575,6 +733,12 @@ export default function App() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.PACKAGES, JSON.stringify(packages));
+      if (hasAnyUploadedQuestions(packages)) {
+        localStorage.setItem(
+          STORAGE_KEYS.PACKAGES_BACKUP,
+          JSON.stringify(packages)
+        );
+      }
     } catch {
       // ignore
     }
@@ -655,9 +819,33 @@ export default function App() {
           typeof updater === 'function' ? updater(prev) : updater;
         const nextPackages = filterOutSimulasiTka(rawNext);
         packagesRef.current = nextPackages;
+
+        const nextIds = new Set(
+          nextPackages.map((p) => String(p.id || '').trim().toUpperCase())
+        );
+        const nextCodes = new Set(
+          nextPackages.map((p) => String(p.code || '').trim().toUpperCase())
+        );
+        const deletedPackageIds: string[] = [];
+        prev.forEach((p) => {
+          const pId = String(p.id || '').trim().toUpperCase();
+          const pCode = String(p.code || '').trim().toUpperCase();
+          if (pId && !nextIds.has(pId)) deletedPackageIds.push(pId);
+          if (pCode && !nextCodes.has(pCode)) deletedPackageIds.push(pCode);
+        });
+
+        const prevQuestionsTotal = getTotalUploadedQuestionsCount(prev);
+        const nextQuestionsTotal = getTotalUploadedQuestionsCount(nextPackages);
+        const explicitDeleteOrReduce =
+          deletedPackageIds.length > 0 || nextQuestionsTotal < prevQuestionsTotal;
+
         try {
           localStorage.setItem(
             STORAGE_KEYS.PACKAGES,
+            JSON.stringify(nextPackages)
+          );
+          localStorage.setItem(
+            STORAGE_KEYS.PACKAGES_BACKUP,
             JSON.stringify(nextPackages)
           );
         } catch {
@@ -666,6 +854,8 @@ export default function App() {
         pendingPushCount.current += 1;
         saveVercelStorage({
           packages: nextPackages,
+          deletedPackageIds,
+          forceReplacePackages: explicitDeleteOrReduce,
         })
           .then((res) => {
             if (res.ok) {
@@ -845,6 +1035,12 @@ export default function App() {
         const nextSchedules =
           typeof updater === 'function' ? updater(prev) : updater;
         schedulesRef.current = nextSchedules;
+
+        const nextIdSet = new Set(nextSchedules.map((s) => s.id));
+        const deletedScheduleIds = prev
+          .filter((s) => !nextIdSet.has(s.id))
+          .map((s) => s.id);
+
         try {
           localStorage.setItem(
             STORAGE_KEYS.SCHEDULES,
@@ -860,6 +1056,7 @@ export default function App() {
         pendingPushCount.current += 1;
         saveVercelStorage({
           schedules: nextSchedules,
+          deletedScheduleIds,
           forceReplaceSchedules: true,
         })
           .then((res) => {
@@ -1024,6 +1221,10 @@ export default function App() {
       //    NEVER overwrite our 127 uploaded students with the 8 demo students!
       // 2) If this browser holds active/custom schedules (so the exam token is active),
       //    and the server returned default inactive schedules, NEVER deactivate our schedules or hide our token!
+      const isAdminOrProctorStage =
+        stageRef.current === 'admin_dashboard' ||
+        stageRef.current === 'proctor_dashboard';
+
       const localHasRealParticipants = !isDefaultDemoParticipantsList(
         participantsRef.current
       );
@@ -1043,19 +1244,39 @@ export default function App() {
         !remoteHasSchedules ||
         isDefaultInactiveSchedulesList(res.data.schedules);
 
+      const localHasQuestions = hasAnyUploadedQuestions(packagesRef.current);
+      const remoteHasQuestions = hasAnyUploadedQuestions(res.data.packages);
+
       if (
         (localHasRealParticipants && remoteIsDemoOnly) ||
-        (localHasActiveOrCustomSchedules && remoteIsDefaultInactiveSchedules)
+        (isAdminOrProctorStage &&
+          localHasActiveOrCustomSchedules &&
+          remoteIsDefaultInactiveSchedules) ||
+        (isAdminOrProctorStage && localHasQuestions && !remoteHasQuestions)
       ) {
+        // CRITICAL: A student browser must NEVER push packages, schedules, or proctors during self-healing!
         saveVercelStorage({
-          packages: packagesRef.current,
-          schedules: schedulesRef.current,
-          participants: sanitizeParticipantRows(participantsRef.current),
-          proctors: proctorsRef.current,
-          activeToken: activeTokenRef.current,
-          resultsHistory: resultsHistoryRef.current,
-          forceReplaceParticipants: localHasRealParticipants,
-          forceReplaceSchedules: localHasActiveOrCustomSchedules,
+          ...(isAdminOrProctorStage && localHasQuestions
+            ? { packages: packagesRef.current }
+            : {}),
+          ...(isAdminOrProctorStage && localHasActiveOrCustomSchedules
+            ? {
+                schedules: schedulesRef.current,
+                forceReplaceSchedules: true,
+              }
+            : {}),
+          ...(localHasRealParticipants
+            ? {
+                participants: sanitizeParticipantRows(participantsRef.current),
+                forceReplaceParticipants: true,
+              }
+            : {}),
+          ...(isAdminOrProctorStage
+            ? {
+                proctors: proctorsRef.current,
+                activeToken: activeTokenRef.current,
+              }
+            : {}),
         }).then((healRes) => {
           if (healRes.ok && typeof healRes.updatedAt === 'number') {
             latestUpdatedAtRef.current = Math.max(
@@ -1064,7 +1285,15 @@ export default function App() {
             );
           }
         });
-        // Still apply any non-downgrading remote updates (e.g. if remote has real participants while we healed schedules, or vice versa)
+        // Still apply any non-downgrading remote updates (e.g. student browser receives packages & schedules while healing participants)
+        if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
+          const cleanedRemotePkgs = filterOutSimulasiTka(res.data.packages);
+          const mergedPkgs = mergePackagesPreservingQuestions(
+            cleanedRemotePkgs,
+            packagesRef.current
+          );
+          setPackages(mergedPkgs);
+        }
         if (!remoteIsDemoOnly && Array.isArray(res.data.participants)) {
           setParticipants(sanitizeParticipantRows(res.data.participants));
         }
@@ -1101,8 +1330,23 @@ export default function App() {
 
       isApplyingRemoteUpdate.current = true;
       if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
-        const cleanedPackages = filterOutSimulasiTka(res.data.packages);
-        setPackages(cleanedPackages);
+        const cleanedRemotePackages = filterOutSimulasiTka(res.data.packages);
+        const mergedPackages = mergePackagesPreservingQuestions(
+          cleanedRemotePackages,
+          packagesRef.current
+        );
+        setPackages(mergedPackages);
+
+        // If local had uploaded questions that were missing on a cold-started server instance, heal the server
+        if (
+          isAdminOrProctorStage &&
+          getTotalUploadedQuestionsCount(mergedPackages) >
+            getTotalUploadedQuestionsCount(cleanedRemotePackages)
+        ) {
+          saveVercelStorage({
+            packages: mergedPackages,
+          });
+        }
       }
       if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
         if (
@@ -1110,12 +1354,43 @@ export default function App() {
           isDefaultInactiveSchedulesList(res.data.schedules)
         ) {
           // Keep local active schedules and heal server
-          saveVercelStorage({
-            schedules: schedulesRef.current,
-            forceReplaceSchedules: true,
-          });
+          if (isAdminOrProctorStage) {
+            saveVercelStorage({
+              schedules: schedulesRef.current,
+              forceReplaceSchedules: true,
+            });
+          }
         } else {
-          setSchedules(res.data.schedules);
+          // Merge any local custom schedules (sch_...) so newly added schedules never disappear during split-brain polling
+          const remoteScheduleIds = new Set(
+            res.data.schedules.map((s) => String(s?.id || '').trim())
+          );
+          const missingLocalCustomSchedules = schedulesRef.current.filter(
+            (s) => {
+              const id = String(s?.id || '').trim();
+              return (
+                id &&
+                !DEFAULT_DEMO_SCHEDULE_IDS.has(id) &&
+                !remoteScheduleIds.has(id)
+              );
+            }
+          );
+          const mergedSchedules =
+            missingLocalCustomSchedules.length > 0
+              ? [...res.data.schedules, ...missingLocalCustomSchedules]
+              : res.data.schedules;
+
+          setSchedules(mergedSchedules);
+
+          if (
+            isAdminOrProctorStage &&
+            missingLocalCustomSchedules.length > 0
+          ) {
+            saveVercelStorage({
+              schedules: mergedSchedules,
+              forceReplaceSchedules: true,
+            });
+          }
         }
       }
       if (
@@ -1226,29 +1501,47 @@ export default function App() {
         isApplyingRemoteUpdate.current = false;
       }, 150);
     } else if (!isHydratedFromCloud.current) {
-      // Cold-start / empty server: Only seed if this browser holds real uploaded students
-      // or active/custom schedules. NEVER let a fresh browser (even on Admin Dashboard) seed 8 demo rows or default inactive schedules!
+      // Cold-start / empty server: Only seed from Admin/Proctor or if local holds real data.
+      // NEVER let a student device seed empty packages or default schedules!
+      const isAdminOrProctorStage =
+        stageRef.current === 'admin_dashboard' ||
+        stageRef.current === 'proctor_dashboard';
       const localHasRealParticipants = !isDefaultDemoParticipantsList(
         participantsRef.current
       );
       const localHasActiveOrCustomSchedules = !isDefaultInactiveSchedulesList(
         schedulesRef.current
       );
+      const localHasQuestions = hasAnyUploadedQuestions(packagesRef.current);
 
-      if (localHasRealParticipants || localHasActiveOrCustomSchedules) {
+      if (
+        localHasRealParticipants ||
+        (isAdminOrProctorStage &&
+          (localHasActiveOrCustomSchedules || localHasQuestions))
+      ) {
         const seedRes = await saveVercelStorage({
-          packages: packagesRef.current,
-          schedules: schedulesRef.current,
+          ...(isAdminOrProctorStage && localHasQuestions
+            ? { packages: packagesRef.current }
+            : {}),
+          ...(isAdminOrProctorStage && localHasActiveOrCustomSchedules
+            ? {
+                schedules: schedulesRef.current,
+                forceReplaceSchedules: true,
+              }
+            : {}),
           ...(localHasRealParticipants
             ? {
                 participants: sanitizeParticipantRows(participantsRef.current),
                 forceReplaceParticipants: true,
               }
             : {}),
-          proctors: proctorsRef.current,
-          activeToken: activeTokenRef.current,
-          resultsHistory: resultsHistoryRef.current,
-          forceReplaceSchedules: localHasActiveOrCustomSchedules,
+          ...(isAdminOrProctorStage
+            ? {
+                proctors: proctorsRef.current,
+                activeToken: activeTokenRef.current,
+                resultsHistory: resultsHistoryRef.current,
+              }
+            : {}),
         });
         if (seedRes.ok) {
           if (typeof seedRes.updatedAt === 'number') {
@@ -1340,10 +1633,25 @@ export default function App() {
         )
       : undefined) || currentStudentActiveSchedules[0];
 
+  const pkgBySelectedId = packages.find(
+    (p) => p.id === participant.selectedPackageId
+  );
+  const pkgBySchedule = matchedStudentSchedule
+    ? resolvePackageForSchedule(matchedStudentSchedule, packages)
+    : undefined;
+
   const selectedPackage: ExamPackage =
-    (matchedStudentSchedule
-      ? resolvePackageForSchedule(matchedStudentSchedule, packages)
-      : packages.find((p) => p.id === participant.selectedPackageId)) ||
+    (pkgBySchedule && getRealQuestionsCount(pkgBySchedule) > 0
+      ? pkgBySchedule
+      : pkgBySelectedId && getRealQuestionsCount(pkgBySelectedId) > 0
+      ? {
+          ...pkgBySelectedId,
+          title:
+            matchedStudentSchedule?.mapel?.trim() || pkgBySelectedId.title,
+        }
+      : pkgBySchedule ||
+        pkgBySelectedId ||
+        packages.find((p) => getRealQuestionsCount(p) > 0)) ||
     packages[0] ||
     INITIAL_EXAM_PACKAGES[0] ||
     FALLBACK_EMPTY_PACKAGE;
@@ -2303,6 +2611,25 @@ export default function App() {
           isScheduleActive={isScheduleActive}
           activeSchedules={activeSchedules}
           onRefreshToken={handleRefreshToken}
+          onSyncRemoteData={({ packages: remotePkgs, schedules: remoteSchs, activeToken: remoteTok }) => {
+            if (Array.isArray(remotePkgs) && remotePkgs.length > 0) {
+              const cleaned = filterOutSimulasiTka(remotePkgs);
+              const merged = mergePackagesPreservingQuestions(
+                cleaned,
+                packagesRef.current
+              );
+              packagesRef.current = merged;
+              setPackages(merged);
+            }
+            if (Array.isArray(remoteSchs) && remoteSchs.length > 0) {
+              schedulesRef.current = remoteSchs;
+              setSchedules(remoteSchs);
+            }
+            if (typeof remoteTok === 'string' && remoteTok) {
+              activeTokenRef.current = remoteTok;
+              setActiveToken(remoteTok);
+            }
+          }}
           onSubmitProfile={handleConfirmParticipant}
         />
       )}
