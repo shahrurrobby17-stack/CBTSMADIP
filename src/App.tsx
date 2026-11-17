@@ -18,6 +18,7 @@ import {
   ProctorDashboardView,
   ProctorParticipantRow,
   doesKelasMatch,
+  isDefaultDemoParticipantRow,
   isDefaultDemoParticipantsList,
   isParticipantLockedByViolation,
   normalizeKelasCode,
@@ -65,12 +66,28 @@ type AppStage =
 const STORAGE_KEYS = {
   PACKAGES: 'pusmendik_cbt_packages_v1',
   SCHEDULES: 'pusmendik_cbt_schedules_v1',
+  SCHEDULES_BACKUP: 'pusmendik_cbt_schedules_backup_v1',
   PARTICIPANTS: 'pusmendik_cbt_participants_v1',
+  PARTICIPANTS_BACKUP: 'pusmendik_cbt_participants_backup_v1',
   PROCTORS: 'pusmendik_cbt_proctors_v1',
   TOKEN: 'pusmendik_cbt_token_v1',
   HISTORY: 'pusmendik_cbt_history_v1',
   DRAFTS: 'pusmendik_cbt_student_drafts_v1',
 };
+
+const DEFAULT_DEMO_SCHEDULE_IDS = new Set(['s1', 's2', 's3', 's4', 's5']);
+
+function isDefaultInactiveSchedulesList(
+  rows?: AdminScheduleItem[] | null
+): boolean {
+  if (!Array.isArray(rows) || rows.length === 0) return true;
+  const hasAnyActive = rows.some((s) => Boolean(s && s.isActive));
+  if (hasAnyActive) return false;
+  if (rows.length > 5) return false;
+  return rows.every((s) =>
+    DEFAULT_DEMO_SCHEDULE_IDS.has(String(s?.id || '').trim())
+  );
+}
 
 const MAX_VIOLATION_LIMIT = 6;
 
@@ -186,7 +203,31 @@ export default function App() {
       const saved = localStorage.getItem(STORAGE_KEYS.SCHEDULES);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          if (!isDefaultInactiveSchedulesList(parsed)) {
+            return parsed;
+          }
+          // Check backup if primary schedule list is all-inactive default
+          const backupRaw = localStorage.getItem(STORAGE_KEYS.SCHEDULES_BACKUP);
+          if (backupRaw) {
+            const backupParsed = JSON.parse(backupRaw);
+            if (
+              Array.isArray(backupParsed) &&
+              backupParsed.length > 0 &&
+              !isDefaultInactiveSchedulesList(backupParsed)
+            ) {
+              return backupParsed;
+            }
+          }
+          return parsed;
+        }
+      }
+      const backupRaw = localStorage.getItem(STORAGE_KEYS.SCHEDULES_BACKUP);
+      if (backupRaw) {
+        const backupParsed = JSON.parse(backupRaw);
+        if (Array.isArray(backupParsed) && backupParsed.length > 0) {
+          return backupParsed;
+        }
       }
     } catch {
       // Fallback to initial schedules
@@ -200,7 +241,30 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return sanitizeParticipantRows(parsed);
+          const sanitized = sanitizeParticipantRows(parsed);
+          if (!isDefaultDemoParticipantsList(sanitized)) {
+            return sanitized;
+          }
+          // If primary storage only has the 8 demo students, check automatic backup of real uploaded students
+          const backupRaw = localStorage.getItem(STORAGE_KEYS.PARTICIPANTS_BACKUP);
+          if (backupRaw) {
+            const backupParsed = JSON.parse(backupRaw);
+            if (
+              Array.isArray(backupParsed) &&
+              backupParsed.length > 0 &&
+              !isDefaultDemoParticipantsList(backupParsed)
+            ) {
+              return sanitizeParticipantRows(backupParsed);
+            }
+          }
+          return sanitized;
+        }
+      }
+      const backupRaw = localStorage.getItem(STORAGE_KEYS.PARTICIPANTS_BACKUP);
+      if (backupRaw) {
+        const backupParsed = JSON.parse(backupRaw);
+        if (Array.isArray(backupParsed) && backupParsed.length > 0) {
+          return sanitizeParticipantRows(backupParsed);
         }
       }
     } catch {
@@ -518,6 +582,12 @@ export default function App() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.SCHEDULES, JSON.stringify(schedules));
+      if (!isDefaultInactiveSchedulesList(schedules)) {
+        localStorage.setItem(
+          STORAGE_KEYS.SCHEDULES_BACKUP,
+          JSON.stringify(schedules)
+        );
+      }
     } catch {
       // ignore
     }
@@ -529,6 +599,12 @@ export default function App() {
         STORAGE_KEYS.PARTICIPANTS,
         JSON.stringify(participants)
       );
+      if (!isDefaultDemoParticipantsList(participants)) {
+        localStorage.setItem(
+          STORAGE_KEYS.PARTICIPANTS_BACKUP,
+          JSON.stringify(participants)
+        );
+      }
     } catch {
       // ignore
     }
@@ -630,6 +706,12 @@ export default function App() {
             STORAGE_KEYS.PARTICIPANTS,
             JSON.stringify(nextParticipants)
           );
+          if (!isDefaultDemoParticipantsList(nextParticipants)) {
+            localStorage.setItem(
+              STORAGE_KEYS.PARTICIPANTS_BACKUP,
+              JSON.stringify(nextParticipants)
+            );
+          }
         } catch {
           // ignore
         }
@@ -767,12 +849,17 @@ export default function App() {
             STORAGE_KEYS.SCHEDULES,
             JSON.stringify(nextSchedules)
           );
+          localStorage.setItem(
+            STORAGE_KEYS.SCHEDULES_BACKUP,
+            JSON.stringify(nextSchedules)
+          );
         } catch {
           // ignore
         }
         pendingPushCount.current += 1;
         saveVercelStorage({
           schedules: nextSchedules,
+          forceReplaceSchedules: true,
         })
           .then((res) => {
             if (res.ok) {
@@ -931,9 +1018,11 @@ export default function App() {
       }
 
       // Self-healing & Anti-Downgrade Guard:
-      // If this browser holds real uploaded participants (e.g., 135 students) in localStorage,
-      // and the server returned only the 8 default demo students (or empty after a serverless cold start),
-      // NEVER overwrite our 135 uploaded students with the 8 demo students! Instead, heal the server.
+      // 1) If this browser holds real uploaded participants (e.g., 127 students) in localStorage,
+      //    and the server returned only the 8 default demo students (or empty after a serverless cold start),
+      //    NEVER overwrite our 127 uploaded students with the 8 demo students!
+      // 2) If this browser holds active/custom schedules (so the exam token is active),
+      //    and the server returned default inactive schedules, NEVER deactivate our schedules or hide our token!
       const localHasRealParticipants = !isDefaultDemoParticipantsList(
         participantsRef.current
       );
@@ -944,7 +1033,19 @@ export default function App() {
         !remoteHasParticipants ||
         isDefaultDemoParticipantsList(res.data.participants);
 
-      if (localHasRealParticipants && remoteIsDemoOnly) {
+      const localHasActiveOrCustomSchedules = !isDefaultInactiveSchedulesList(
+        schedulesRef.current
+      );
+      const remoteHasSchedules =
+        Array.isArray(res.data.schedules) && res.data.schedules.length > 0;
+      const remoteIsDefaultInactiveSchedules =
+        !remoteHasSchedules ||
+        isDefaultInactiveSchedulesList(res.data.schedules);
+
+      if (
+        (localHasRealParticipants && remoteIsDemoOnly) ||
+        (localHasActiveOrCustomSchedules && remoteIsDefaultInactiveSchedules)
+      ) {
         saveVercelStorage({
           packages: packagesRef.current,
           schedules: schedulesRef.current,
@@ -952,7 +1053,8 @@ export default function App() {
           proctors: proctorsRef.current,
           activeToken: activeTokenRef.current,
           resultsHistory: resultsHistoryRef.current,
-          forceReplaceParticipants: true,
+          forceReplaceParticipants: localHasRealParticipants,
+          forceReplaceSchedules: localHasActiveOrCustomSchedules,
         }).then((healRes) => {
           if (healRes.ok && typeof healRes.updatedAt === 'number') {
             latestUpdatedAtRef.current = Math.max(
@@ -961,6 +1063,16 @@ export default function App() {
             );
           }
         });
+        // Still apply any non-downgrading remote updates (e.g. if remote has real participants while we healed schedules, or vice versa)
+        if (!remoteIsDemoOnly && Array.isArray(res.data.participants)) {
+          setParticipants(sanitizeParticipantRows(res.data.participants));
+        }
+        if (
+          !remoteIsDefaultInactiveSchedules &&
+          Array.isArray(res.data.schedules)
+        ) {
+          setSchedules(res.data.schedules);
+        }
         isHydratedFromCloud.current = true;
         return;
       }
@@ -992,7 +1104,18 @@ export default function App() {
         setPackages(cleanedPackages);
       }
       if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
-        setSchedules(res.data.schedules);
+        if (
+          localHasActiveOrCustomSchedules &&
+          isDefaultInactiveSchedulesList(res.data.schedules)
+        ) {
+          // Keep local active schedules and heal server
+          saveVercelStorage({
+            schedules: schedulesRef.current,
+            forceReplaceSchedules: true,
+          });
+        } else {
+          setSchedules(res.data.schedules);
+        }
       }
       if (
         Array.isArray(res.data.participants) &&
@@ -1008,7 +1131,7 @@ export default function App() {
           }
           localSelectedMap.set(u, Boolean(p.selected));
         });
-        const mergedRemoteParticipants = sanitizeParticipantRows(
+        let mergedRemoteParticipants = sanitizeParticipantRows(
           res.data.participants.map((row) => {
             const u = (row.username || '').trim().toUpperCase();
             const localReset = localResetMap.get(u);
@@ -1026,6 +1149,36 @@ export default function App() {
             };
           })
         );
+
+        // Additive protection: if this browser holds more real custom students (e.g. 127 students)
+        // than what returned from a split-brain serverless instance, preserve all local non-demo students
+        if (localHasRealParticipants) {
+          const remoteUserSet = new Set(
+            mergedRemoteParticipants.map((p) =>
+              (p.username || '').trim().toUpperCase()
+            )
+          );
+          const remoteIdSet = new Set(
+            mergedRemoteParticipants.map((p) => String(p.id || '').trim())
+          );
+          const missingLocalCustom = participantsRef.current.filter((p) => {
+            if (isDefaultDemoParticipantRow(p)) return false;
+            const u = (p.username || '').trim().toUpperCase();
+            const id = String(p.id || '').trim();
+            return !remoteUserSet.has(u) && !remoteIdSet.has(id);
+          });
+          if (missingLocalCustom.length > 0) {
+            mergedRemoteParticipants = sanitizeParticipantRows([
+              ...mergedRemoteParticipants,
+              ...missingLocalCustom,
+            ]);
+            saveVercelStorage({
+              participants: mergedRemoteParticipants,
+              forceReplaceParticipants: true,
+            });
+          }
+        }
+
         setParticipants(mergedRemoteParticipants);
       }
       if (Array.isArray(res.data.proctors) && res.data.proctors.length > 0) {
@@ -1055,22 +1208,29 @@ export default function App() {
         isApplyingRemoteUpdate.current = false;
       }, 150);
     } else if (!isHydratedFromCloud.current) {
-      // Cold-start / empty server: Only seed participants if this browser holds real uploaded students
-      // or if the user is logged into the Administrator dashboard. Never let a fresh student device seed 8 demo rows!
+      // Cold-start / empty server: Only seed if this browser holds real uploaded students
+      // or active/custom schedules. NEVER let a fresh browser (even on Admin Dashboard) seed 8 demo rows or default inactive schedules!
       const localHasRealParticipants = !isDefaultDemoParticipantsList(
         participantsRef.current
       );
-      const isAdminStage = stageRef.current === 'admin_dashboard';
+      const localHasActiveOrCustomSchedules = !isDefaultInactiveSchedulesList(
+        schedulesRef.current
+      );
 
-      if (localHasRealParticipants || isAdminStage) {
+      if (localHasRealParticipants || localHasActiveOrCustomSchedules) {
         const seedRes = await saveVercelStorage({
           packages: packagesRef.current,
           schedules: schedulesRef.current,
-          participants: sanitizeParticipantRows(participantsRef.current),
+          ...(localHasRealParticipants
+            ? {
+                participants: sanitizeParticipantRows(participantsRef.current),
+                forceReplaceParticipants: true,
+              }
+            : {}),
           proctors: proctorsRef.current,
           activeToken: activeTokenRef.current,
           resultsHistory: resultsHistoryRef.current,
-          forceReplaceParticipants: localHasRealParticipants,
+          forceReplaceSchedules: localHasActiveOrCustomSchedules,
         });
         if (seedRes.ok) {
           if (typeof seedRes.updatedAt === 'number') {
@@ -1100,9 +1260,12 @@ export default function App() {
     pendingPushCount.current += 1;
     try {
       const hasRealParticipants = !isDefaultDemoParticipantsList(participants);
+      const hasActiveOrCustomSchedules =
+        !isDefaultInactiveSchedulesList(schedules);
       const res = await saveVercelStorage({
         packages,
         schedules,
+        forceReplaceSchedules: hasActiveOrCustomSchedules,
         ...(hasRealParticipants || isHydratedFromCloud.current
           ? { participants, forceReplaceParticipants: hasRealParticipants }
           : {}),

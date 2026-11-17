@@ -254,25 +254,27 @@ export const DEFAULT_DEMO_USERNAMES = new Set([
   'TK1610',
 ]);
 
-export function isCustomUploadedParticipantRow(
-  row?: Partial<ProctorParticipantRow> | null
-): boolean {
-  if (!row || typeof row !== 'object') return false;
-  const id = String(row.id || '').trim();
-  return id.startsWith('excel_') || /^ap_\d+$/.test(id);
-}
-
 export function isDefaultDemoParticipantRow(
   row?: Partial<ProctorParticipantRow> | null
 ): boolean {
   if (!row || typeof row !== 'object') return false;
-  if (isCustomUploadedParticipantRow(row)) return false;
   const id = String(row.id || '').trim();
+  if (id.startsWith('excel_') || /^ap_\d+$/.test(id)) return false;
   const username = shortenStudentUsername(String(row.username || ''));
   return (
     DEFAULT_DEMO_PARTICIPANT_IDS.has(id) ||
     DEFAULT_DEMO_USERNAMES.has(username)
   );
+}
+
+export function isCustomUploadedParticipantRow(
+  row?: Partial<ProctorParticipantRow> | null
+): boolean {
+  if (!row || typeof row !== 'object') return false;
+  const id = String(row.id || '').trim();
+  const username = String(row.username || '').trim();
+  if (!id && !username) return false;
+  return !isDefaultDemoParticipantRow(row);
 }
 
 export function isDefaultDemoParticipantsList(

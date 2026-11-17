@@ -9,6 +9,7 @@ import { AdminProctorItem } from '../components/AdminViews';
 export interface CBTCloudPayload {
   packages?: ExamPackage[];
   schedules?: AdminScheduleItem[];
+  forceReplaceSchedules?: boolean;
   participants?: ProctorParticipantRow[];
   participantPatch?: Partial<ProctorParticipantRow> | Partial<ProctorParticipantRow>[];
   deletedParticipantIds?: string[];

@@ -43,16 +43,18 @@ const DEFAULT_DEMO_USERNAMES = new Set([
   'TK1610',
 ]);
 
-function isCustomUploadedRow(item: unknown): boolean {
-  if (!item || typeof item !== 'object') return false;
-  const id = String((item as Record<string, unknown>).id || '').trim();
-  return id.startsWith('excel_') || /^ap_\d+$/.test(id);
-}
+const DEFAULT_DEMO_SCHEDULE_IDS = new Set([
+  'sch_1',
+  'sch_2',
+  'sch_3',
+  'sch_4',
+  'sch_5',
+]);
 
 function isDefaultDemoRow(item: unknown): boolean {
   if (!item || typeof item !== 'object') return false;
-  if (isCustomUploadedRow(item)) return false;
   const id = String((item as Record<string, unknown>).id || '').trim();
+  if (id.startsWith('excel_') || /^ap_\d+$/.test(id)) return false;
   const username = String((item as Record<string, unknown>).username || '')
     .trim()
     .toUpperCase();
@@ -61,10 +63,89 @@ function isDefaultDemoRow(item: unknown): boolean {
   );
 }
 
+function isCustomUploadedRow(item: unknown): boolean {
+  if (!item || typeof item !== 'object') return false;
+  if (!isDefaultDemoRow(item)) return true;
+  const id = String((item as Record<string, unknown>).id || '').trim();
+  return id.startsWith('excel_') || /^ap_\d+$/.test(id);
+}
+
 function isDefaultDemoParticipantsList(list: unknown): boolean {
   if (!Array.isArray(list) || list.length === 0) return true;
   if (list.length > 8) return false;
   return list.every((item) => isDefaultDemoRow(item));
+}
+
+function isDefaultInactiveSchedulesList(list: unknown): boolean {
+  if (!Array.isArray(list) || list.length === 0) return true;
+  const hasAnyActive = list.some(
+    (s) => s && typeof s === 'object' && Boolean((s as any).isActive)
+  );
+  if (hasAnyActive) return false;
+  return list.every(
+    (s) =>
+      s &&
+      typeof s === 'object' &&
+      DEFAULT_DEMO_SCHEDULE_IDS.has(String((s as any).id || '').trim())
+  );
+}
+
+function resolveIncomingSchedules(
+  incomingList: unknown,
+  existingList: unknown,
+  forceReplace?: boolean
+): Record<string, any>[] | undefined {
+  const hasExisting = Array.isArray(existingList) && existingList.length > 0;
+  const hasIncoming = Array.isArray(incomingList) && incomingList.length > 0;
+
+  if (!hasIncoming) {
+    return hasExisting ? (existingList as Record<string, any>[]) : undefined;
+  }
+
+  const existingHasActiveOrCustom =
+    hasExisting && !isDefaultInactiveSchedulesList(existingList);
+  const incomingIsDefaultInactive = isDefaultInactiveSchedulesList(incomingList);
+
+  // Never allow an unhydrated tab's default inactive schedules to wipe out active schedules or custom schedules
+  // unless the Admin explicitly toggled/modified schedules (forceReplace = true)
+  if (existingHasActiveOrCustom && incomingIsDefaultInactive && !forceReplace) {
+    return existingList as Record<string, any>[];
+  }
+
+  if (!forceReplace && hasExisting) {
+    const existingActiveIds = new Set<string>();
+    const customExistingRows: Record<string, any>[] = [];
+    const incomingIds = new Set<string>(
+      (incomingList as any[])
+        .filter((s) => s && typeof s === 'object')
+        .map((s) => String(s.id || '').trim())
+    );
+
+    for (const row of existingList as any[]) {
+      if (!row || typeof row !== 'object') continue;
+      const id = String(row.id || '').trim();
+      if (row.isActive && id) {
+        existingActiveIds.add(id);
+      }
+      if (id && !DEFAULT_DEMO_SCHEDULE_IDS.has(id) && !incomingIds.has(id)) {
+        customExistingRows.push(row);
+      }
+    }
+
+    const merged = (incomingList as any[])
+      .filter((s) => s && typeof s === 'object')
+      .map((s) => {
+        const id = String(s.id || '').trim();
+        if (id && existingActiveIds.has(id)) {
+          return { ...s, isActive: true };
+        }
+        return s;
+      });
+
+    return [...merged, ...customExistingRows];
+  }
+
+  return incomingList as Record<string, any>[];
 }
 
 function getLocalFilePath(): string {
@@ -498,17 +579,30 @@ export default async function handler(req: any, res: any) {
         nextParticipants = sanitizeParticipantsList(existing.participants);
       }
 
+      let nextSchedules: Record<string, any>[] | undefined;
+      if (Array.isArray(body.schedules)) {
+        nextSchedules = resolveIncomingSchedules(
+          body.schedules,
+          existing.schedules,
+          Boolean(body.forceReplaceSchedules)
+        );
+      } else if (Array.isArray(existing.schedules)) {
+        nextSchedules = existing.schedules as Record<string, any>[];
+      }
+
       // Strip transient transport keys before persisting
       const {
         participantPatch: _ignorePatch,
         deletedParticipantIds: _ignoreDeleted,
         forceReplaceParticipants: _ignoreForce,
+        forceReplaceSchedules: _ignoreForceSchedules,
         ...cleanBody
       } = body as Record<string, unknown>;
 
       const merged: Record<string, unknown> = {
         ...existing,
         ...cleanBody,
+        ...(nextSchedules !== undefined ? { schedules: nextSchedules } : {}),
         ...(nextParticipants !== undefined
           ? { participants: nextParticipants }
           : {}),
