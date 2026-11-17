@@ -694,12 +694,16 @@ export default function App() {
     }
   })());
 
-  const tokenEndTimeRef = useRef<number>(
-    Date.now() + TOKEN_DURATION_SECONDS * 1000
-  );
+  const initialTokenEndMs =
+    tokenUpdatedAtRef.current > 0 &&
+    tokenUpdatedAtRef.current + TOKEN_DURATION_SECONDS * 1000 > Date.now()
+      ? tokenUpdatedAtRef.current + TOKEN_DURATION_SECONDS * 1000
+      : Date.now() + TOKEN_DURATION_SECONDS * 1000;
 
-  const [tokenSecondsLeft, setTokenSecondsLeft] = useState<number>(
-    TOKEN_DURATION_SECONDS
+  const tokenEndTimeRef = useRef<number>(initialTokenEndMs);
+
+  const [tokenSecondsLeft, setTokenSecondsLeft] = useState<number>(() =>
+    Math.max(0, Math.ceil((initialTokenEndMs - Date.now()) / 1000))
   );
 
   const [resultsHistory, setResultsHistory] = useState<ExamResultSummary[]>(() => {
@@ -726,6 +730,7 @@ export default function App() {
   const draftSyncTimerRef = useRef<number | null>(null);
   const isSyncInFlightRef = useRef<boolean>(false);
   const lastSyncAttemptAtRef = useRef<number>(0);
+  const resultsClearedAtRef = useRef<number>(0);
 
   const packagesRef = useRef<ExamPackage[]>(packages);
   useEffect(() => {
@@ -767,7 +772,7 @@ export default function App() {
   );
 
   const handleUpdateToken = useCallback(
-    (nextToken: string) => {
+    (nextToken: string, isManualUpdate = true) => {
       const cleanToken = nextToken.trim().toUpperCase() || DEFAULT_EXAM_TOKEN;
       const nowTs = Date.now();
       lastLocalMutationAt.current = nowTs;
@@ -783,7 +788,11 @@ export default function App() {
         // ignore
       }
       pendingPushCount.current += 1;
-      saveVercelStorage({ activeToken: cleanToken, tokenUpdatedAt: nowTs })
+      saveVercelStorage({
+        activeToken: cleanToken,
+        tokenUpdatedAt: nowTs,
+        forceTokenUpdate: isManualUpdate,
+      })
         .then((res) => {
           if (res.ok) markSyncedSuccess(res.engine);
         })
@@ -794,23 +803,25 @@ export default function App() {
     [markSyncedSuccess]
   );
 
-  // Automatic 10-minute token countdown timer (wall-clock based, never rotates early)
+  // Automatic 10-minute token countdown timer (wall-clock based, single primary authority on Admin)
   useEffect(() => {
     const tick = () => {
       const diffMs = tokenEndTimeRef.current - Date.now();
       const secsLeft = Math.max(0, Math.ceil(diffMs / 1000));
       setTokenSecondsLeft(secsLeft);
 
-      if (secsLeft <= 0) {
-        tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
-        setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
-        // Only rotate token on server when schedule is active and user is in Admin/Proctor dashboard
-        if (
-          isScheduleActive &&
-          (stage === 'admin_dashboard' || stage === 'proctor_dashboard')
-        ) {
+      if (isScheduleActive) {
+        // Admin rotates immediately when 10:00 hits; Proctor only acts as fallback 15s later if Admin is offline
+        const shouldAdminRotate =
+          stage === 'admin_dashboard' && diffMs <= 0;
+        const shouldProctorFallbackRotate =
+          stage === 'proctor_dashboard' && diffMs <= -15_000;
+
+        if (shouldAdminRotate || shouldProctorFallbackRotate) {
+          tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
+          setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
           const next = generateRandomToken();
-          handleUpdateToken(next);
+          handleUpdateToken(next, false);
         }
       }
     };
@@ -979,11 +990,41 @@ export default function App() {
         } catch {
           // ignore
         }
+        let adminSettingsSnapshot:
+          | (Record<string, unknown> & { updatedAt?: number })
+          | undefined;
+        if (
+          stageRef.current === 'admin_dashboard' ||
+          stageRef.current === 'proctor_dashboard'
+        ) {
+          try {
+            const rawCfg = localStorage.getItem('cbt_admin_settings');
+            if (rawCfg) {
+              const parsedCfg = JSON.parse(rawCfg);
+              if (parsedCfg && typeof parsedCfg === 'object') {
+                adminSettingsSnapshot = {
+                  ...parsedCfg,
+                  updatedAt: Date.now(),
+                };
+                localStorage.setItem(
+                  'cbt_admin_settings',
+                  JSON.stringify(adminSettingsSnapshot)
+                );
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
         pendingPushCount.current += 1;
         saveVercelStorage({
           packages: nextPackages,
           deletedPackageIds,
           forceReplacePackages: explicitDeleteOrReduce,
+          ...(adminSettingsSnapshot
+            ? { adminSettings: adminSettingsSnapshot }
+            : {}),
         })
           .then((res) => {
             if (res.ok) {
@@ -1015,7 +1056,6 @@ export default function App() {
         | ((prevRows: ProctorParticipantRow[]) => ProctorParticipantRow[])
     ) => {
       const nowTs = Date.now();
-      lastLocalMutationAt.current = nowTs;
       setParticipants((prev) => {
         const rawNext =
           typeof updater === 'function' ? updater(prev) : updater;
@@ -1027,12 +1067,15 @@ export default function App() {
           prevById.set(p.id, p);
         });
 
+        let hasAnyRealFieldOrRowChange = rawNext.length !== prev.length;
+
         // Stamp monotonic CRDT timestamps on any modified fields so concurrent polls never revert changes
         const stampedNext = rawNext.map((row) => {
           const prevRow =
             prevById.get(row.id) ||
             prevByUser.get(row.username.trim().toUpperCase());
           if (!prevRow) {
+            hasAnyRealFieldOrRowChange = true;
             return {
               ...row,
               metaUpdatedAt: row.metaUpdatedAt || nowTs,
@@ -1044,11 +1087,19 @@ export default function App() {
             prevRow.kelompok !== row.kelompok ||
             prevRow.kelas !== row.kelas ||
             prevRow.namaPeserta !== row.namaPeserta;
-          const loginChanged = prevRow.loginState !== row.loginState;
+          const loginChanged =
+            prevRow.loginState !== row.loginState ||
+            Boolean(prevRow.requestReset) !== Boolean(row.requestReset) ||
+            prevRow.violationTimestamp !== row.violationTimestamp ||
+            prevRow.lastResetAt !== row.lastResetAt;
           const draftChanged =
             prevRow.draftAnswers !== row.draftAnswers ||
             prevRow.draftPackageId !== row.draftPackageId ||
             prevRow.draftRemainingSeconds !== row.draftRemainingSeconds;
+
+          if (metaChanged || loginChanged || draftChanged) {
+            hasAnyRealFieldOrRowChange = true;
+          }
 
           return {
             ...row,
@@ -1066,6 +1117,13 @@ export default function App() {
 
         const nextParticipants = sanitizeParticipantRows(stampedNext);
         participantsRef.current = nextParticipants;
+
+        // If ONLY UI checkbox `selected` state changed, keep it purely local without flooding /api/storage
+        if (!hasAnyRealFieldOrRowChange) {
+          return nextParticipants;
+        }
+
+        lastLocalMutationAt.current = nowTs;
         try {
           localStorage.setItem(
             STORAGE_KEYS.PARTICIPANTS,
@@ -1085,50 +1143,56 @@ export default function App() {
           stageRef.current === 'admin_dashboard' ||
           stageRef.current === 'proctor_dashboard';
 
+        const changedPatches = nextParticipants
+          .filter((row) => {
+            const prevRow =
+              prevById.get(row.id) ||
+              prevByUser.get(row.username.trim().toUpperCase());
+            if (!prevRow) return true;
+            return (
+              prevRow.loginState !== row.loginState ||
+              prevRow.requestReset !== row.requestReset ||
+              prevRow.violationReason !== row.violationReason ||
+              prevRow.violationTimestamp !== row.violationTimestamp ||
+              prevRow.violationCount !== row.violationCount ||
+              prevRow.lastResetAt !== row.lastResetAt ||
+              prevRow.draftAnswers !== row.draftAnswers ||
+              prevRow.draftPackageId !== row.draftPackageId ||
+              prevRow.draftRemainingSeconds !== row.draftRemainingSeconds ||
+              prevRow.status !== row.status ||
+              prevRow.ruang !== row.ruang ||
+              prevRow.kelompok !== row.kelompok ||
+              prevRow.kelas !== row.kelas ||
+              prevRow.namaPeserta !== row.namaPeserta
+            );
+          })
+          .map((row) => ({
+            id: row.id,
+            username: row.username.trim().toUpperCase(),
+            namaPeserta: row.namaPeserta,
+            kelas: row.kelas,
+            kelompok: row.kelompok,
+            ruang: row.ruang,
+            kodeTes: row.kodeTes,
+            status: row.status,
+            loginState: row.loginState,
+            requestReset: Boolean(row.requestReset),
+            violationReason: (row.violationReason ?? null) as any,
+            violationAt: (row.violationAt ?? null) as any,
+            violationSchema: (row.violationSchema ?? null) as any,
+            violationTimestamp: (row.violationTimestamp ?? null) as any,
+            violationCount: row.violationCount ?? 0,
+            draftAnswers: (row.draftAnswers ?? null) as any,
+            draftPackageId: (row.draftPackageId ?? null) as any,
+            draftRemainingSeconds: (row.draftRemainingSeconds ?? null) as any,
+            lastResetAt: row.lastResetAt,
+            loginUpdatedAt: row.loginUpdatedAt,
+            metaUpdatedAt: row.metaUpdatedAt,
+            draftUpdatedAt: row.draftUpdatedAt,
+          }));
+
         if (!isAdminOrProctor) {
           // Student-side mutation: NEVER push the full participants array from a student browser.
-          // Only send a partial patch for the specific student row(s) that changed.
-          const changedPatches = nextParticipants
-            .filter((row) => {
-              const prevRow = prevByUser.get(row.username.trim().toUpperCase());
-              if (!prevRow) return true;
-              return (
-                prevRow.loginState !== row.loginState ||
-                prevRow.requestReset !== row.requestReset ||
-                prevRow.violationReason !== row.violationReason ||
-                prevRow.violationTimestamp !== row.violationTimestamp ||
-                prevRow.violationCount !== row.violationCount ||
-                prevRow.draftAnswers !== row.draftAnswers ||
-                prevRow.draftPackageId !== row.draftPackageId ||
-                prevRow.draftRemainingSeconds !== row.draftRemainingSeconds ||
-                prevRow.status !== row.status
-              );
-            })
-            .map((row) => ({
-              id: row.id,
-              username: row.username.trim().toUpperCase(),
-              namaPeserta: row.namaPeserta,
-              kelas: row.kelas,
-              kelompok: row.kelompok,
-              ruang: row.ruang,
-              kodeTes: row.kodeTes,
-              status: row.status,
-              loginState: row.loginState,
-              requestReset: Boolean(row.requestReset),
-              violationReason: (row.violationReason ?? null) as any,
-              violationAt: (row.violationAt ?? null) as any,
-              violationSchema: (row.violationSchema ?? null) as any,
-              violationTimestamp: (row.violationTimestamp ?? null) as any,
-              violationCount: row.violationCount ?? 0,
-              draftAnswers: (row.draftAnswers ?? null) as any,
-              draftPackageId: (row.draftPackageId ?? null) as any,
-              draftRemainingSeconds: (row.draftRemainingSeconds ?? null) as any,
-              lastResetAt: row.lastResetAt,
-              loginUpdatedAt: row.loginUpdatedAt,
-              metaUpdatedAt: row.metaUpdatedAt,
-              draftUpdatedAt: row.draftUpdatedAt,
-            }));
-
           if (changedPatches.length > 0) {
             pendingPushCount.current += 1;
             saveVercelStorage({
@@ -1172,12 +1236,26 @@ export default function App() {
           newlyDeletedIds
         );
 
+        // If no rows were added/deleted and only <= 10 rows changed (e.g. Reset Login 1 student, Assign/Move a few),
+        // use lightweight delta participantPatch so we never overwrite concurrent student drafts/finishes
+        const hasAddedRow = nextParticipants.some(
+          (p) => !prevById.has(p.id) && !prevByUser.has(p.username.trim().toUpperCase())
+        );
+
         pendingPushCount.current += 1;
-        saveVercelStorage({
-          participants: nextParticipants,
-          deletedParticipantIds,
-          forceReplaceParticipants: true,
-        })
+        const payloadToSave =
+          newlyDeletedIds.length === 0 &&
+          !hasAddedRow &&
+          changedPatches.length > 0 &&
+          changedPatches.length <= 10
+            ? { participantPatch: changedPatches }
+            : {
+                participants: nextParticipants,
+                deletedParticipantIds,
+                forceReplaceParticipants: true,
+              };
+
+        saveVercelStorage(payloadToSave)
           .then((res) => {
             if (res.ok) {
               if (typeof res.updatedAt === 'number') {
@@ -1339,11 +1417,16 @@ export default function App() {
         | ExamResultSummary[]
         | ((prevHistory: ExamResultSummary[]) => ExamResultSummary[])
     ) => {
-      lastLocalMutationAt.current = Date.now();
+      const nowTs = Date.now();
+      lastLocalMutationAt.current = nowTs;
       setResultsHistory((prev) => {
         const nextHistory =
           typeof updater === 'function' ? updater(prev) : updater;
         resultsHistoryRef.current = nextHistory;
+        const isExplicitClear = nextHistory.length === 0;
+        if (isExplicitClear) {
+          resultsClearedAtRef.current = nowTs;
+        }
         try {
           localStorage.setItem(
             STORAGE_KEYS.HISTORY,
@@ -1353,9 +1436,11 @@ export default function App() {
           // ignore
         }
         pendingPushCount.current += 1;
-        saveVercelStorage({
-          resultsHistory: nextHistory,
-        })
+        saveVercelStorage(
+          isExplicitClear
+            ? { resultsHistory: [], resultsClearedAt: nowTs }
+            : { resultsHistory: nextHistory }
+        )
           .then((res) => {
             if (res.ok) {
               if (typeof res.updatedAt === 'number') {
@@ -1460,7 +1545,7 @@ export default function App() {
             );
           }
 
-          // 1. Token CRDT reconciliation by tokenUpdatedAt
+          // 1. Token CRDT reconciliation by tokenUpdatedAt (preserving remaining 10-minute window)
           const remoteTokenTs =
             typeof res.data.tokenUpdatedAt === 'number'
               ? res.data.tokenUpdatedAt
@@ -1479,10 +1564,16 @@ export default function App() {
                 tokenUpdatedAtRef.current,
                 remoteTokenTs
               );
-              tokenEndTimeRef.current =
-                Date.now() + TOKEN_DURATION_SECONDS * 1000;
+              const syncedEndMs =
+                remoteTokenTs > 0 &&
+                remoteTokenTs + TOKEN_DURATION_SECONDS * 1000 > Date.now()
+                  ? remoteTokenTs + TOKEN_DURATION_SECONDS * 1000
+                  : Date.now() + TOKEN_DURATION_SECONDS * 1000;
+              tokenEndTimeRef.current = syncedEndMs;
               setActiveToken(res.data.activeToken);
-              setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
+              setTokenSecondsLeft(
+                Math.max(0, Math.ceil((syncedEndMs - Date.now()) / 1000))
+              );
               try {
                 localStorage.setItem(STORAGE_KEYS.TOKEN, res.data.activeToken);
                 if (remoteTokenTs > 0) {
@@ -1499,6 +1590,31 @@ export default function App() {
                 activeToken: activeTokenRef.current,
                 tokenUpdatedAt: tokenUpdatedAtRef.current,
               });
+            }
+          }
+
+          // Sync remote adminSettings (deleted/custom mapel config) if newer than local
+          if (
+            res.data.adminSettings &&
+            typeof res.data.adminSettings === 'object'
+          ) {
+            try {
+              const rawLocalCfg = localStorage.getItem('cbt_admin_settings');
+              const localCfg = rawLocalCfg ? JSON.parse(rawLocalCfg) : null;
+              const localCfgTs =
+                typeof localCfg?.updatedAt === 'number' ? localCfg.updatedAt : 0;
+              const remoteCfgTs =
+                typeof res.data.adminSettings.updatedAt === 'number'
+                  ? res.data.adminSettings.updatedAt
+                  : 0;
+              if (!localCfg || remoteCfgTs > localCfgTs) {
+                localStorage.setItem(
+                  'cbt_admin_settings',
+                  JSON.stringify(res.data.adminSettings)
+                );
+              }
+            } catch {
+              // ignore
             }
           }
 
@@ -1669,8 +1785,28 @@ export default function App() {
           ) {
             setProctors(res.data.proctors);
           }
-          if (Array.isArray(res.data.resultsHistory)) {
-            setResultsHistory(res.data.resultsHistory);
+
+          const remoteClearedAt =
+            typeof res.data.resultsClearedAt === 'number'
+              ? res.data.resultsClearedAt
+              : 0;
+          if (remoteClearedAt > resultsClearedAtRef.current) {
+            resultsClearedAtRef.current = remoteClearedAt;
+            resultsHistoryRef.current = [];
+            setResultsHistory([]);
+          } else if (Array.isArray(res.data.resultsHistory)) {
+            const seenIds = new Set<string>();
+            const mergedHistory: ExamResultSummary[] = [];
+            for (const item of [
+              ...res.data.resultsHistory,
+              ...resultsHistoryRef.current,
+            ]) {
+              if (!item || !item.id || seenIds.has(item.id)) continue;
+              seenIds.add(item.id);
+              mergedHistory.push(item);
+            }
+            resultsHistoryRef.current = mergedHistory;
+            setResultsHistory(mergedHistory);
           }
           setLastSyncedLabel(
             new Date().toLocaleTimeString('id-ID', {
@@ -1820,6 +1956,20 @@ export default function App() {
       const hasRealParticipants = !isDefaultDemoParticipantsList(participants);
       const hasActiveOrCustomSchedules =
         !isDefaultInactiveSchedulesList(schedules);
+      let localAdminSettings:
+        | (Record<string, unknown> & { updatedAt?: number })
+        | undefined;
+      try {
+        const rawCfg = localStorage.getItem('cbt_admin_settings');
+        if (rawCfg) {
+          const parsedCfg = JSON.parse(rawCfg);
+          if (parsedCfg && typeof parsedCfg === 'object') {
+            localAdminSettings = parsedCfg;
+          }
+        }
+      } catch {
+        // ignore
+      }
       const res = await saveVercelStorage({
         packages,
         schedules,
@@ -1829,7 +1979,9 @@ export default function App() {
           : {}),
         proctors,
         activeToken,
+        tokenUpdatedAt: tokenUpdatedAtRef.current || Date.now(),
         resultsHistory,
+        ...(localAdminSettings ? { adminSettings: localAdminSettings } : {}),
       });
       if (res.ok) {
         if (
@@ -2597,7 +2749,8 @@ export default function App() {
       }
       setTimeUsedSeconds(usedSeconds);
 
-      // Compute summary for Proctor History
+      // Compute summary using answersRef.current so timer auto-finish always captures latest answers
+      const latestAnswers = answersRef.current || answers;
       const questions = Array.isArray(selectedPackage?.questions)
         ? selectedPackage.questions
         : [];
@@ -2607,7 +2760,7 @@ export default function App() {
       let answeredCount = 0;
 
       questions.forEach((q) => {
-        const ans = answers[q.id];
+        const ans = latestAnswers[q.id];
         maxPoints += q.points;
         if (isQuestionAnswered(q, ans)) answeredCount += 1;
         const { isCorrect, earnedPoints } = evaluateQuestionScore(q, ans);
@@ -2618,8 +2771,9 @@ export default function App() {
       const finalScore =
         maxPoints > 0 ? Math.round((totalPoints / maxPoints) * 100) : 0;
 
+      const nowTs = Date.now();
       const summary: ExamResultSummary = {
-        id: `res_${Date.now()}`,
+        id: `res_${nowTs}_${Math.random().toString(36).slice(2, 6)}`,
         participant,
         packageTitle: selectedPackage?.title || FALLBACK_EMPTY_PACKAGE.title,
         completedAt: new Date().toLocaleString('id-ID', {
@@ -2639,42 +2793,117 @@ export default function App() {
       };
 
       const cleanUser = participant.username.trim().toUpperCase();
-      clearStudentDraftInLocal(cleanUser, selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id);
+      clearStudentDraftInLocal(
+        cleanUser,
+        selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id
+      );
       examRemainingSecondsRef.current = undefined;
       setExamInitialRemainingSeconds(undefined);
-      const nowTs = Date.now();
+      lastLocalMutationAt.current = nowTs;
 
-      handleUpdateParticipants((prev) =>
-        prev.map((row) =>
-          row.username.trim().toUpperCase() === cleanUser
-            ? {
-                ...row,
-                loginState: 'Selesai',
-                requestReset: false,
-                violationReason: undefined,
-                violationAt: undefined,
-                violationSchema: undefined,
-                violationTimestamp: undefined,
-                violationCount: 0,
-                loginUpdatedAt: nowTs,
-                draftAnswers: undefined,
-                draftPackageId: undefined,
-                draftRemainingSeconds: undefined,
-                draftUpdatedAt: nowTs,
-              }
-            : row
-        )
+      const existingParticipantRow = participantsRef.current.find(
+        (row) => row.username.trim().toUpperCase() === cleanUser
       );
-      handleUpdateResultsHistory((prev) => [summary, ...prev]);
+      const finishedPatchRow: Partial<ProctorParticipantRow> | null =
+        existingParticipantRow
+          ? {
+              id: existingParticipantRow.id,
+              username: existingParticipantRow.username.trim().toUpperCase(),
+              namaPeserta: existingParticipantRow.namaPeserta,
+              kelas: existingParticipantRow.kelas,
+              kelompok: existingParticipantRow.kelompok,
+              ruang: existingParticipantRow.ruang,
+              kodeTes: existingParticipantRow.kodeTes,
+              status: existingParticipantRow.status,
+              loginState: 'Selesai',
+              requestReset: false,
+              violationReason: null as any,
+              violationAt: null as any,
+              violationSchema: null as any,
+              violationTimestamp: null as any,
+              violationCount: 0,
+              draftAnswers: null as any,
+              draftPackageId: null as any,
+              draftRemainingSeconds: null as any,
+              lastResetAt: existingParticipantRow.lastResetAt,
+              loginUpdatedAt: nowTs,
+              metaUpdatedAt: existingParticipantRow.metaUpdatedAt,
+              draftUpdatedAt: nowTs,
+            }
+          : null;
+
+      setParticipants((prev) => {
+        const nextList = sanitizeParticipantRows(
+          prev.map((row) =>
+            row.username.trim().toUpperCase() === cleanUser
+              ? {
+                  ...row,
+                  loginState: 'Selesai',
+                  requestReset: false,
+                  violationReason: undefined,
+                  violationAt: undefined,
+                  violationSchema: undefined,
+                  violationTimestamp: undefined,
+                  violationCount: 0,
+                  loginUpdatedAt: nowTs,
+                  draftAnswers: undefined,
+                  draftPackageId: undefined,
+                  draftRemainingSeconds: undefined,
+                  draftUpdatedAt: nowTs,
+                }
+              : row
+          )
+        );
+        participantsRef.current = nextList;
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.PARTICIPANTS,
+            JSON.stringify(nextList)
+          );
+        } catch {
+          // ignore
+        }
+        return nextList;
+      });
+
+      setResultsHistory((prev) => {
+        const nextHistory = [summary, ...prev];
+        resultsHistoryRef.current = nextHistory;
+        try {
+          localStorage.setItem(
+            STORAGE_KEYS.HISTORY,
+            JSON.stringify(nextHistory)
+          );
+        } catch {
+          // ignore
+        }
+        return nextHistory;
+      });
+
+      // Send ONE atomic POST containing both participantPatch ('Selesai') and resultAppend
+      pendingPushCount.current += 1;
+      saveVercelStorage({
+        ...(finishedPatchRow ? { participantPatch: [finishedPatchRow] } : {}),
+        resultAppend: summary,
+      })
+        .then((res) => {
+          if (res.ok) {
+            if (typeof res.updatedAt === 'number') {
+              latestUpdatedAtRef.current = Math.max(
+                latestUpdatedAtRef.current,
+                res.updatedAt
+              );
+            }
+            markSyncedSuccess(res.engine);
+          }
+        })
+        .finally(() => {
+          pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
+        });
+
       setStage('exam_result');
     },
-    [
-      answers,
-      handleUpdateParticipants,
-      handleUpdateResultsHistory,
-      participant,
-      selectedPackage,
-    ]
+    [answers, markSyncedSuccess, participant, selectedPackage]
   );
 
   const handleLogout = () => {
@@ -2785,6 +3014,7 @@ export default function App() {
           onExitApp={handleExitApp}
           participants={participants}
           activeSchedules={activeSchedules}
+          resultsHistory={resultsHistory}
           lastViolationInfo={lastViolationInfo}
           onRequestResetLogin={handleRequestResetFromLogin}
           onRefreshParticipants={() => syncFromVercelCloud({ force: true })}

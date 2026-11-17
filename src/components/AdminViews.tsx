@@ -78,6 +78,7 @@ import {
   downloadWordQuestionTemplate,
   downloadWordQuestionArchive,
 } from '../utils/wordQuestionParser';
+import { saveVercelStorage } from '../utils/vercelStorage';
 
 interface AdminLoginViewProps {
   onAdminLoginSuccess: (adminUsername: string) => void;
@@ -2021,8 +2022,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const handleSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
+    const stampedConfig = { ...appConfig, updatedAt: Date.now() };
+    setAppConfig(stampedConfig);
     try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(appConfig));
+      localStorage.setItem('cbt_admin_settings', JSON.stringify(stampedConfig));
+      saveVercelStorage({ adminSettings: stampedConfig });
       if (appConfig.namaProktor && proctors.length > 0) {
         setProctors((prev) =>
           prev.map((pr, idx) =>
@@ -2050,9 +2054,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   };
 
   const handleResetSettings = () => {
-    setAppConfig(defaultAdminConfig);
+    const stampedDefault = { ...defaultAdminConfig, updatedAt: Date.now() };
+    setAppConfig(stampedDefault);
     try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(defaultAdminConfig));
+      localStorage.setItem('cbt_admin_settings', JSON.stringify(stampedDefault));
+      saveVercelStorage({ adminSettings: stampedDefault });
     } catch {
       // ignore
     }

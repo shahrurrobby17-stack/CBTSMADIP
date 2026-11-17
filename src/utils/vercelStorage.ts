@@ -22,7 +22,11 @@ export interface CBTCloudPayload {
   proctors?: AdminProctorItem[];
   activeToken?: string;
   tokenUpdatedAt?: number;
+  forceTokenUpdate?: boolean;
   resultsHistory?: ExamResultSummary[];
+  resultAppend?: ExamResultSummary;
+  resultsClearedAt?: number;
+  adminSettings?: Record<string, unknown> & { updatedAt?: number };
   updatedAt?: number;
   schemaVersion?: number;
 }

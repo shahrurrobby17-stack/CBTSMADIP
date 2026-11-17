@@ -79,13 +79,17 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
   const lastReportedSecRef = useRef<number>(effectiveStartSeconds);
   const endTimeRef = useRef<number>(Date.now() + effectiveStartSeconds * 1000);
   const hasFinishedRef = useRef<boolean>(false);
+  const timerInitializedRef = useRef<boolean>(false);
 
   useEffect(() => {
-    endTimeRef.current = Date.now() + effectiveStartSeconds * 1000;
-    lastReportedSecRef.current = effectiveStartSeconds;
-    hasFinishedRef.current = false;
-    setRemainingSeconds(effectiveStartSeconds);
-  }, [examPackage.id, effectiveStartSeconds]);
+    if (!timerInitializedRef.current) {
+      timerInitializedRef.current = true;
+      endTimeRef.current = Date.now() + effectiveStartSeconds * 1000;
+      lastReportedSecRef.current = effectiveStartSeconds;
+      hasFinishedRef.current = false;
+      setRemainingSeconds(effectiveStartSeconds);
+    }
+  }, [effectiveStartSeconds]);
 
   // For matching question type: currently selected premise ID
   const [activePremiseId, setActivePremiseId] = useState<string | null>(null);

@@ -7,10 +7,12 @@ import {
 } from 'lucide-react';
 import {
   ProctorParticipantRow,
+  doesKelasMatch,
   isParticipantLockedByViolation,
+  normalizeKelasCode,
   shortenStudentUsername,
 } from './ProctorDashboardView';
-import { AdminScheduleItem } from '../types/cbt';
+import { AdminScheduleItem, ExamResultSummary } from '../types/cbt';
 
 export interface ViolationAlertInfo {
   username: string;
@@ -28,6 +30,7 @@ interface LoginViewProps {
   onQuickLoginProctor?: () => void;
   participants?: ProctorParticipantRow[];
   activeSchedules?: AdminScheduleItem[];
+  resultsHistory?: ExamResultSummary[];
   lastViolationInfo?: ViolationAlertInfo | null;
   onRequestResetLogin?: (username: string) => void;
   onRefreshParticipants?: () => Promise<ProctorParticipantRow[]>;
@@ -37,6 +40,8 @@ interface LoginViewProps {
 export const LoginView: React.FC<LoginViewProps> = ({
   onLoginSuccess,
   participants = [],
+  activeSchedules = [],
+  resultsHistory = [],
   lastViolationInfo,
   onRefreshParticipants,
   onOpenProctorModal,
@@ -104,7 +109,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
     let row = findMatched(participants);
     if (
       onRefreshParticipants &&
-      (!row || isParticipantLockedByViolation(row) || row.status !== 'Active')
+      (!row ||
+        isParticipantLockedByViolation(row) ||
+        row.status !== 'Active' ||
+        row.loginState === 'Selesai')
     ) {
       setIsCheckingLogin(true);
       try {
@@ -134,6 +142,34 @@ export const LoginView: React.FC<LoginViewProps> = ({
         'Akses Login Ditolak: Status peserta Anda masih Non Active pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator untuk mengaktifkan status peserta.'
       );
       return;
+    }
+    if (row.loginState === 'Selesai') {
+      const rowUsername = row.username.trim().toUpperCase();
+      const rowKelas = normalizeKelasCode(row.kelas);
+      const classSchedules = activeSchedules.filter((s) =>
+        doesKelasMatch(rowKelas, s.kelas)
+      );
+      const relevantSchedules =
+        classSchedules.length > 0 ? classSchedules : activeSchedules;
+      const completedTitles = new Set(
+        resultsHistory
+          .filter(
+            (r) =>
+              r?.participant?.username?.trim().toUpperCase() === rowUsername
+          )
+          .map((r) => String(r.packageTitle || '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const hasUncompletedActiveSubject = relevantSchedules.some((s) => {
+        const mapelLower = String(s.mapel || '').trim().toLowerCase();
+        return mapelLower && !completedTitles.has(mapelLower);
+      });
+      if (!hasUncompletedActiveSubject) {
+        setErrorMsg(
+          'Akses Login Ditolak: Anda sudah menyelesaikan ujian pada mata pelajaran aktif saat ini. Hubungi Proktor atau Administrator apabila membutuhkan Reset Login.'
+        );
+        return;
+      }
     }
 
     // Opsi B: Seketika masuk mode Fullscreen saat tombol Login diklik

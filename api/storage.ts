@@ -1187,34 +1187,53 @@ export default async function handler(req: any, res: any) {
         nextPackages = existing.packages as Record<string, any>[];
       }
 
+      const existResultsClearedAt =
+        typeof existing.resultsClearedAt === 'number'
+          ? existing.resultsClearedAt
+          : 0;
+      const incResultsClearedAt =
+        typeof body.resultsClearedAt === 'number' ? body.resultsClearedAt : 0;
+      const resolvedResultsClearedAt = Math.max(
+        existResultsClearedAt,
+        incResultsClearedAt
+      );
+
       let nextResultsHistory: Record<string, any>[] | undefined;
-      if (Array.isArray(body.resultsHistory)) {
-        if (
-          body.resultsHistory.length > 0 &&
-          Array.isArray(existing.resultsHistory) &&
-          existing.resultsHistory.length > 0
-        ) {
+      if (incResultsClearedAt > 0 && incResultsClearedAt >= existResultsClearedAt) {
+        nextResultsHistory = [];
+      } else {
+        const baseExistingHistory = Array.isArray(existing.resultsHistory)
+          ? (existing.resultsHistory as Record<string, any>[])
+          : [];
+        const incomingHistory = Array.isArray(body.resultsHistory)
+          ? (body.resultsHistory as Record<string, any>[])
+          : [];
+        const appendedItem =
+          body.resultAppend && typeof body.resultAppend === 'object'
+            ? (body.resultAppend as Record<string, any>)
+            : null;
+
+        if (appendedItem || incomingHistory.length > 0 || baseExistingHistory.length > 0) {
           const seenIds = new Set<string>();
           const combinedHistory: Record<string, any>[] = [];
-          for (const item of [
-            ...body.resultsHistory,
-            ...existing.resultsHistory,
-          ]) {
+          const candidates = [
+            ...(appendedItem ? [appendedItem] : []),
+            ...incomingHistory,
+            ...baseExistingHistory,
+          ];
+          for (const item of candidates) {
             if (!item || typeof item !== 'object') continue;
             const id = String((item as any).id || '').trim();
             if (id && seenIds.has(id)) continue;
             if (id) seenIds.add(id);
-            combinedHistory.push(item as Record<string, any>);
+            combinedHistory.push(item);
           }
           nextResultsHistory = combinedHistory;
-        } else {
-          nextResultsHistory = body.resultsHistory;
         }
-      } else if (Array.isArray(existing.resultsHistory)) {
-        nextResultsHistory = existing.resultsHistory as Record<string, any>[];
       }
 
-      // Resolve activeToken by tokenUpdatedAt so stale instances never revert token rotation
+      // Resolve activeToken by tokenUpdatedAt so stale instances never revert token rotation,
+      // and guard against two dashboards double-rotating automatically within 30 seconds
       const existTokenTs =
         typeof existing.tokenUpdatedAt === 'number'
           ? existing.tokenUpdatedAt
@@ -1224,9 +1243,45 @@ export default async function handler(req: any, res: any) {
       let resolvedActiveToken = existing.activeToken;
       let resolvedTokenUpdatedAt = existTokenTs;
       if (typeof body.activeToken === 'string' && body.activeToken.trim()) {
-        if (incTokenTs >= existTokenTs || !existing.activeToken) {
-          resolvedActiveToken = body.activeToken.trim().toUpperCase();
+        const cleanIncToken = body.activeToken.trim().toUpperCase();
+        const isDuplicateAutoRotate =
+          !body.forceTokenUpdate &&
+          Boolean(existing.activeToken) &&
+          existTokenTs > 0 &&
+          incTokenTs > 0 &&
+          Math.abs(incTokenTs - existTokenTs) < 30_000 &&
+          cleanIncToken !== String(existing.activeToken).trim().toUpperCase();
+
+        if (!isDuplicateAutoRotate && (incTokenTs >= existTokenTs || !existing.activeToken)) {
+          resolvedActiveToken = cleanIncToken;
           resolvedTokenUpdatedAt = Math.max(incTokenTs, existTokenTs, Date.now());
+        }
+      }
+
+      // Resolve adminSettings (deleted/custom mapel config) by updatedAt timestamp
+      const existAdminSettings =
+        existing.adminSettings && typeof existing.adminSettings === 'object'
+          ? (existing.adminSettings as Record<string, any>)
+          : undefined;
+      const incAdminSettings =
+        body.adminSettings && typeof body.adminSettings === 'object'
+          ? (body.adminSettings as Record<string, any>)
+          : undefined;
+      let resolvedAdminSettings = existAdminSettings;
+      if (incAdminSettings) {
+        const existCfgTs =
+          typeof existAdminSettings?.updatedAt === 'number'
+            ? existAdminSettings.updatedAt
+            : 0;
+        const incCfgTs =
+          typeof incAdminSettings.updatedAt === 'number'
+            ? incAdminSettings.updatedAt
+            : 0;
+        if (!existAdminSettings || incCfgTs >= existCfgTs) {
+          resolvedAdminSettings = {
+            ...incAdminSettings,
+            updatedAt: Math.max(incCfgTs, Date.now()),
+          };
         }
       }
 
@@ -1236,6 +1291,8 @@ export default async function handler(req: any, res: any) {
         forceReplaceParticipants: _ignoreForce,
         forceReplaceSchedules: _ignoreForceSchedules,
         forceReplacePackages: _ignoreForcePackages,
+        resultAppend: _ignoreResultAppend,
+        forceTokenUpdate: _ignoreForceToken,
         ...cleanBody
       } = body as Record<string, unknown>;
 
@@ -1248,6 +1305,9 @@ export default async function handler(req: any, res: any) {
               tokenUpdatedAt: resolvedTokenUpdatedAt,
             }
           : {}),
+        ...(resolvedAdminSettings
+          ? { adminSettings: resolvedAdminSettings }
+          : {}),
         ...(nextPackages !== undefined ? { packages: nextPackages } : {}),
         ...(nextSchedules !== undefined ? { schedules: nextSchedules } : {}),
         ...(nextParticipants !== undefined
@@ -1255,6 +1315,9 @@ export default async function handler(req: any, res: any) {
           : {}),
         ...(nextResultsHistory !== undefined
           ? { resultsHistory: nextResultsHistory }
+          : {}),
+        ...(resolvedResultsClearedAt > 0
+          ? { resultsClearedAt: resolvedResultsClearedAt }
           : {}),
         deletedParticipantIds: combinedDeletedParticipantIds,
         deletedScheduleIds: combinedDeletedScheduleIds,
