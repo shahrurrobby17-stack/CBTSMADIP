@@ -81,6 +81,9 @@ export interface ProctorParticipantRow {
   violationSchema?: number;
   violationTimestamp?: number;
   lastResetAt?: number;
+  loginUpdatedAt?: number;
+  metaUpdatedAt?: number;
+  draftUpdatedAt?: number;
   violationCount?: number;
   draftAnswers?: Record<string, StudentAnswer>;
   draftPackageId?: string;
@@ -306,12 +309,12 @@ function getLoginStatePriority(
   state?: ProctorParticipantRow['loginState']
 ): number {
   if (state === 'Selesai') return 4;
-  if (state === 'Sedang Mengerjakan') return 3;
-  if (state === 'Terkunci (Pelanggaran)') return 2;
+  if (state === 'Terkunci (Pelanggaran)') return 3;
+  if (state === 'Sedang Mengerjakan') return 2;
   return 1;
 }
 
-function mergeDuplicateParticipantRows(
+export function reconcileParticipantRow(
   existing: ProctorParticipantRow,
   incoming: ProctorParticipantRow
 ): ProctorParticipantRow {
@@ -327,8 +330,47 @@ function mergeDuplicateParticipantRows(
   const existingIsActive = isParticipantStatusActive(existing.status);
   const incomingIsActive = isParticipantStatusActive(incoming.status);
 
-  // Prefer the identity (id/username/password) of whichever record has exam progress or is already Active
+  const existMetaTs =
+    typeof existing.metaUpdatedAt === 'number' ? existing.metaUpdatedAt : 0;
+  const incMetaTs =
+    typeof incoming.metaUpdatedAt === 'number' ? incoming.metaUpdatedAt : 0;
+  const maxMetaUpdatedAt = Math.max(existMetaTs, incMetaTs);
+
+  const existLoginTs =
+    typeof existing.loginUpdatedAt === 'number' ? existing.loginUpdatedAt : 0;
+  const incLoginTs =
+    typeof incoming.loginUpdatedAt === 'number' ? incoming.loginUpdatedAt : 0;
+  const maxLoginUpdatedAt = Math.max(existLoginTs, incLoginTs);
+
+  const existDraftTs =
+    typeof existing.draftUpdatedAt === 'number' ? existing.draftUpdatedAt : 0;
+  const incDraftTs =
+    typeof incoming.draftUpdatedAt === 'number' ? incoming.draftUpdatedAt : 0;
+  const maxDraftUpdatedAt = Math.max(existDraftTs, incDraftTs);
+
+  const existViolationTs =
+    existing.violationSchema === 3 &&
+    typeof existing.violationTimestamp === 'number'
+      ? existing.violationTimestamp
+      : 0;
+  const incViolationTs =
+    incoming.violationSchema === 3 &&
+    typeof incoming.violationTimestamp === 'number'
+      ? incoming.violationTimestamp
+      : 0;
+  const maxViolationTs = Math.max(existViolationTs, incViolationTs);
+
+  const existResetAt =
+    typeof existing.lastResetAt === 'number' ? existing.lastResetAt : 0;
+  const incResetAt =
+    typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0;
+  const maxResetAt = Math.max(existResetAt, incResetAt);
+
+  // Prefer the identity (id/username/password) of whichever record has newer timestamps, exam progress, or Active status
   const preferIncomingIdentity =
+    incMetaTs > existMetaTs ||
+    incLoginTs > existLoginTs ||
+    incViolationTs > existViolationTs ||
     incomingPriority > existingPriority ||
     (incomingPriority === existingPriority &&
       incomingDraftCount > existingDraftCount) ||
@@ -339,26 +381,123 @@ function mergeDuplicateParticipantRows(
   const primary = preferIncomingIdentity ? incoming : existing;
   const secondary = preferIncomingIdentity ? existing : incoming;
 
+  // Resolve status & ruang by metaUpdatedAt
+  let resolvedStatus: 'Active' | 'Non Active';
+  if (incMetaTs !== existMetaTs) {
+    resolvedStatus =
+      incMetaTs > existMetaTs ? incoming.status : existing.status;
+  } else {
+    resolvedStatus =
+      existingIsActive || incomingIsActive ? 'Active' : primary.status;
+  }
+
   const existingRuang = resolveParticipantRuang(existing);
   const incomingRuang = resolveParticipantRuang(incoming);
-  const resolvedRuang =
-    existingRuang !== 'Ruang 1'
-      ? existingRuang
-      : incomingRuang !== 'Ruang 1'
-      ? incomingRuang
-      : primary.ruang || 'Ruang 1';
+  let resolvedRuang: string;
+  if (incMetaTs !== existMetaTs) {
+    resolvedRuang = incMetaTs > existMetaTs ? incomingRuang : existingRuang;
+  } else {
+    resolvedRuang =
+      existingRuang !== 'Ruang 1'
+        ? existingRuang
+        : incomingRuang !== 'Ruang 1'
+        ? incomingRuang
+        : primary.ruang || 'Ruang 1';
+  }
 
-  const maxResetAt = Math.max(
-    typeof existing.lastResetAt === 'number' ? existing.lastResetAt : 0,
-    typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0
-  );
+  // Resolve draft answers by draftUpdatedAt or answer count
+  const preferIncomingDraft =
+    incDraftTs > existDraftTs ||
+    (incDraftTs === existDraftTs && incomingDraftCount >= existingDraftCount);
+  const draftSource = preferIncomingDraft ? incoming : existing;
+  const fallbackDraftSource = preferIncomingDraft ? existing : incoming;
 
   const bestDraftAnswers =
-    incomingDraftCount > existingDraftCount
-      ? incoming.draftAnswers
-      : existingDraftCount > 0
-      ? existing.draftAnswers
-      : incoming.draftAnswers || existing.draftAnswers;
+    draftSource.draftAnswers &&
+    Object.keys(draftSource.draftAnswers).length > 0
+      ? draftSource.draftAnswers
+      : fallbackDraftSource.draftAnswers;
+  const bestDraftPackageId =
+    draftSource.draftPackageId || fallbackDraftSource.draftPackageId;
+  const bestDraftRemainingSeconds =
+    typeof draftSource.draftRemainingSeconds === 'number'
+      ? draftSource.draftRemainingSeconds
+      : fallbackDraftSource.draftRemainingSeconds;
+
+  // Resolve violation lock vs reset login vs normal login state
+  const finishedAfterViolation =
+    (existing.loginState === 'Selesai' && existLoginTs > maxViolationTs) ||
+    (incoming.loginState === 'Selesai' && incLoginTs > maxViolationTs);
+
+  const isLocked =
+    !finishedAfterViolation &&
+    maxViolationTs > 0 &&
+    maxViolationTs > maxResetAt;
+
+  let resolvedLoginState: ProctorParticipantRow['loginState'] = 'Belum Login';
+  let resolvedRequestReset = false;
+  let resolvedViolationReason: string | undefined = undefined;
+  let resolvedViolationAt: string | undefined = undefined;
+  let resolvedViolationSchema: number | undefined = undefined;
+  let resolvedViolationTimestamp: number | undefined = undefined;
+  let resolvedViolationCount: number | undefined = undefined;
+
+  if (isLocked) {
+    const vSource = incViolationTs >= existViolationTs ? incoming : existing;
+    const vFallback = incViolationTs >= existViolationTs ? existing : incoming;
+    resolvedLoginState = 'Terkunci (Pelanggaran)';
+    resolvedRequestReset = true;
+    resolvedViolationSchema = 3;
+    resolvedViolationTimestamp = maxViolationTs;
+    resolvedViolationReason =
+      vSource.violationReason ||
+      vFallback.violationReason ||
+      'Pelanggaran keamanan ujian CBT';
+    resolvedViolationAt = vSource.violationAt || vFallback.violationAt;
+    resolvedViolationCount = Math.max(
+      typeof existing.violationCount === 'number' ? existing.violationCount : 0,
+      typeof incoming.violationCount === 'number' ? incoming.violationCount : 0,
+      1
+    );
+  } else {
+    // Unlocked (either never violated, or Reset Login occurred at maxResetAt >= maxViolationTs)
+    resolvedRequestReset = false;
+    if (maxResetAt > 0 && maxResetAt >= maxLoginUpdatedAt) {
+      resolvedLoginState = 'Belum Login';
+    } else if (maxLoginUpdatedAt > 0) {
+      const loginSource = incLoginTs >= existLoginTs ? incoming : existing;
+      const loginFallback = incLoginTs >= existLoginTs ? existing : incoming;
+      const candidateState =
+        loginSource.loginState !== 'Terkunci (Pelanggaran)'
+          ? loginSource.loginState
+          : loginFallback.loginState !== 'Terkunci (Pelanggaran)'
+          ? loginFallback.loginState
+          : 'Belum Login';
+      resolvedLoginState = candidateState;
+    } else {
+      const candidateA =
+        incoming.loginState === 'Terkunci (Pelanggaran)'
+          ? 'Belum Login'
+          : incoming.loginState;
+      const candidateB =
+        existing.loginState === 'Terkunci (Pelanggaran)'
+          ? 'Belum Login'
+          : existing.loginState;
+      resolvedLoginState =
+        getLoginStatePriority(candidateA) >= getLoginStatePriority(candidateB)
+          ? candidateA
+          : candidateB;
+    }
+    const maxVCount = Math.max(
+      typeof existing.violationCount === 'number' ? existing.violationCount : 0,
+      typeof incoming.violationCount === 'number' ? incoming.violationCount : 0
+    );
+    if (resolvedLoginState === 'Selesai') {
+      resolvedViolationCount = 0;
+    } else if (maxVCount > 0) {
+      resolvedViolationCount = maxVCount;
+    }
+  }
 
   return {
     ...secondary,
@@ -367,31 +506,124 @@ function mergeDuplicateParticipantRows(
     username: primary.username || secondary.username,
     password: primary.password || secondary.password,
     selected: Boolean(existing.selected || incoming.selected),
-    status: existingIsActive || incomingIsActive ? 'Active' : primary.status,
+    status: resolvedStatus,
     ruang: resolvedRuang,
     kelompok:
       resolvedRuang !== 'Ruang 1'
         ? resolvedRuang
         : primary.kelompok || secondary.kelompok || 'Ruang 1',
-    loginState:
-      incomingPriority > existingPriority
-        ? incoming.loginState
-        : existing.loginState,
-    ...(bestDraftAnswers ? { draftAnswers: bestDraftAnswers } : {}),
-    ...(primary.draftPackageId || secondary.draftPackageId
-      ? { draftPackageId: primary.draftPackageId || secondary.draftPackageId }
-      : {}),
-    ...(typeof primary.draftRemainingSeconds === 'number' ||
-    typeof secondary.draftRemainingSeconds === 'number'
-      ? {
-          draftRemainingSeconds:
-            typeof primary.draftRemainingSeconds === 'number'
-              ? primary.draftRemainingSeconds
-              : secondary.draftRemainingSeconds,
-        }
-      : {}),
+    loginState: resolvedLoginState,
+    requestReset: resolvedRequestReset,
+    violationReason: resolvedViolationReason,
+    violationAt: resolvedViolationAt,
+    violationSchema: resolvedViolationSchema,
+    violationTimestamp: resolvedViolationTimestamp,
+    violationCount: resolvedViolationCount,
+    draftAnswers:
+      resolvedLoginState === 'Selesai' ? undefined : bestDraftAnswers,
+    draftPackageId:
+      resolvedLoginState === 'Selesai' ? undefined : bestDraftPackageId,
+    draftRemainingSeconds:
+      resolvedLoginState === 'Selesai' ? undefined : bestDraftRemainingSeconds,
     ...(maxResetAt > 0 ? { lastResetAt: maxResetAt } : {}),
+    ...(maxLoginUpdatedAt > 0 ? { loginUpdatedAt: maxLoginUpdatedAt } : {}),
+    ...(maxMetaUpdatedAt > 0 ? { metaUpdatedAt: maxMetaUpdatedAt } : {}),
+    ...(maxDraftUpdatedAt > 0 ? { draftUpdatedAt: maxDraftUpdatedAt } : {}),
   };
+}
+
+function mergeDuplicateParticipantRows(
+  existing: ProctorParticipantRow,
+  incoming: ProctorParticipantRow
+): ProctorParticipantRow {
+  return reconcileParticipantRow(existing, incoming);
+}
+
+export function mergeParticipantLists(
+  remoteRows: ProctorParticipantRow[],
+  localRows: ProctorParticipantRow[],
+  deletedIdsInput?: Iterable<string>
+): ProctorParticipantRow[] {
+  const deletedSet = new Set<string>(
+    deletedIdsInput
+      ? Array.from(deletedIdsInput)
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      : []
+  );
+
+  const localById = new Map<string, ProctorParticipantRow>();
+  const localByUser = new Map<string, ProctorParticipantRow>();
+  const localByNameKelas = new Map<string, ProctorParticipantRow>();
+
+  for (const lRow of localRows) {
+    if (!lRow || typeof lRow !== 'object') continue;
+    const id = String(lRow.id || '').trim();
+    const u = shortenStudentUsername(lRow.username);
+    const nk = getParticipantNameKelasKey(lRow);
+    if (id && deletedSet.has(id)) continue;
+    if (id) localById.set(id, lRow);
+    if (u) localByUser.set(u, lRow);
+    if (nk) localByNameKelas.set(nk, lRow);
+  }
+
+  const matchedLocalUsers = new Set<string>();
+  const matchedLocalIds = new Set<string>();
+  const matchedLocalNameKelas = new Set<string>();
+
+  const mergedRemote = remoteRows
+    .filter((rRow) => {
+      if (!rRow || typeof rRow !== 'object') return false;
+      const id = String(rRow.id || '').trim();
+      return !id || !deletedSet.has(id);
+    })
+    .map((rRow) => {
+      const id = String(rRow.id || '').trim();
+      const u = shortenStudentUsername(rRow.username);
+      const nk = getParticipantNameKelasKey(rRow);
+
+      const localMatch =
+        (u ? localByUser.get(u) : undefined) ||
+        (id ? localById.get(id) : undefined) ||
+        (nk ? localByNameKelas.get(nk) : undefined);
+
+      if (localMatch) {
+        if (localMatch.id) matchedLocalIds.add(String(localMatch.id).trim());
+        const lu = shortenStudentUsername(localMatch.username);
+        if (lu) matchedLocalUsers.add(lu);
+        const lnk = getParticipantNameKelasKey(localMatch);
+        if (lnk) matchedLocalNameKelas.add(lnk);
+
+        const reconciled = reconcileParticipantRow(localMatch, rRow);
+        return {
+          ...reconciled,
+          selected: Boolean(localMatch.selected),
+        };
+      }
+      return rRow;
+    });
+
+  // Preserve any custom/uploaded local students that were missing from a split-brain serverless response and not deleted
+  const localHasReal = !isDefaultDemoParticipantsList(localRows);
+  if (localHasReal) {
+    for (const lRow of localRows) {
+      if (!lRow || isDefaultDemoParticipantRow(lRow)) continue;
+      const id = String(lRow.id || '').trim();
+      if (id && deletedSet.has(id)) continue;
+      const u = shortenStudentUsername(lRow.username);
+      const nk = getParticipantNameKelasKey(lRow);
+      if (
+        (id && matchedLocalIds.has(id)) ||
+        (u && matchedLocalUsers.has(u)) ||
+        (nk && matchedLocalNameKelas.has(nk))
+      ) {
+        continue;
+      }
+      mergedRemote.push(lRow);
+    }
+  }
+
+  return sanitizeParticipantRows(mergedRemote);
 }
 
 export function sanitizeParticipantRows(
@@ -815,6 +1047,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         : targetMoveRuang || 'Ruang 2';
 
     const selectedIdSet = new Set(selectedRows.map((r) => r.id));
+    const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
         selectedIdSet.has(r.id)
@@ -823,6 +1056,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
               ruang: destinationRuang,
               kelompok: destinationRuang,
               selected: false,
+              metaUpdatedAt: nowTs,
             }
           : r
       )
@@ -857,9 +1091,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     const visibleSelectedIds = new Set(
       filteredRows.filter((r) => r.selected).map((r) => r.id)
     );
+    const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
-        visibleSelectedIds.has(r.id) ? { ...r, status: 'Active' } : r
+        visibleSelectedIds.has(r.id)
+          ? { ...r, status: 'Active', metaUpdatedAt: nowTs }
+          : r
       )
     );
     // Switch filter view to Semua Status or Aktif so user sees the updated status
@@ -877,9 +1114,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     const visibleSelectedIds = new Set(
       filteredRows.filter((r) => r.selected).map((r) => r.id)
     );
+    const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
-        visibleSelectedIds.has(r.id) ? { ...r, status: 'Non Active' } : r
+        visibleSelectedIds.has(r.id)
+          ? { ...r, status: 'Non Active', metaUpdatedAt: nowTs }
+          : r
       )
     );
     setFilterStatus('Semua Status');
@@ -915,6 +1155,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
               violationSchema: undefined,
               violationTimestamp: undefined,
               lastResetAt: nowTs,
+              loginUpdatedAt: nowTs,
             }
           : r
       )
@@ -935,6 +1176,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         violationSchema: undefined,
         violationTimestamp: undefined,
         lastResetAt: nowTs,
+        loginUpdatedAt:
+          r.loginState === 'Terkunci (Pelanggaran)' ? nowTs : r.loginUpdatedAt,
       }))
     );
     showNotice('Seluruh permintaan Reset Login peserta telah dibersihkan.');

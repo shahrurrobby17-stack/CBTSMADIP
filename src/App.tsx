@@ -22,6 +22,7 @@ import {
   isDefaultDemoParticipantRow,
   isDefaultDemoParticipantsList,
   isParticipantLockedByViolation,
+  mergeParticipantLists,
   normalizeKelasCode,
   sanitizeParticipantRows,
   shortenStudentUsername,
@@ -69,15 +70,65 @@ const STORAGE_KEYS = {
   PACKAGES_BACKUP: 'pusmendik_cbt_packages_backup_v1',
   SCHEDULES: 'pusmendik_cbt_schedules_v1',
   SCHEDULES_BACKUP: 'pusmendik_cbt_schedules_backup_v1',
+  DELETED_SCHEDULES: 'pusmendik_cbt_deleted_schedules_v1',
   PARTICIPANTS: 'pusmendik_cbt_participants_v1',
   PARTICIPANTS_BACKUP: 'pusmendik_cbt_participants_backup_v1',
+  DELETED_PARTICIPANTS: 'pusmendik_cbt_deleted_participants_v1',
   PROCTORS: 'pusmendik_cbt_proctors_v1',
   TOKEN: 'pusmendik_cbt_token_v1',
+  TOKEN_UPDATED_AT: 'pusmendik_cbt_token_updated_at_v1',
   HISTORY: 'pusmendik_cbt_history_v1',
   DRAFTS: 'pusmendik_cbt_student_drafts_v1',
 };
 
-const DEFAULT_DEMO_SCHEDULE_IDS = new Set(['s1', 's2', 's3', 's4', 's5']);
+const DEFAULT_DEMO_SCHEDULE_IDS = new Set([
+  'sch1',
+  'sch2',
+  'sch3',
+  'sch4',
+  'sch5',
+  'sch_1',
+  'sch_2',
+  'sch_3',
+  'sch_4',
+  'sch_5',
+  's1',
+  's2',
+  's3',
+  's4',
+  's5',
+]);
+
+function readLocalDeletedSet(storageKey: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return new Set(
+        parsed.map((id) => String(id || '').trim()).filter(Boolean)
+      );
+    }
+  } catch {
+    // ignore
+  }
+  return new Set();
+}
+
+function addLocalDeletedIds(storageKey: string, ids: Iterable<string>): string[] {
+  const set = readLocalDeletedSet(storageKey);
+  for (const id of ids) {
+    const clean = String(id || '').trim();
+    if (clean) set.add(clean);
+  }
+  const arr = Array.from(set);
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(arr));
+  } catch {
+    // ignore
+  }
+  return arr;
+}
 
 function isDefaultInactiveSchedulesList(
   rows?: AdminScheduleItem[] | null
@@ -89,6 +140,68 @@ function isDefaultInactiveSchedulesList(
   return rows.every((s) =>
     DEFAULT_DEMO_SCHEDULE_IDS.has(String(s?.id || '').trim())
   );
+}
+
+function mergeSchedulesByTimestamp(
+  remoteList: AdminScheduleItem[],
+  localList: AdminScheduleItem[],
+  deletedIdsInput?: Iterable<string>
+): AdminScheduleItem[] {
+  const deletedSet = readLocalDeletedSet(STORAGE_KEYS.DELETED_SCHEDULES);
+  if (deletedIdsInput) {
+    for (const id of deletedIdsInput) {
+      const clean = String(id || '').trim();
+      if (clean) deletedSet.add(clean);
+    }
+  }
+
+  const localById = new Map<string, AdminScheduleItem>();
+  for (const lSch of localList) {
+    if (!lSch || typeof lSch !== 'object') continue;
+    const id = String(lSch.id || '').trim();
+    if (id && !deletedSet.has(id)) {
+      localById.set(id, lSch);
+    }
+  }
+
+  const matchedIds = new Set<string>();
+  const merged = remoteList
+    .filter((rSch) => {
+      if (!rSch || typeof rSch !== 'object') return false;
+      const id = String(rSch.id || '').trim();
+      return !id || !deletedSet.has(id);
+    })
+    .map((rSch) => {
+      const id = String(rSch.id || '').trim();
+      const lSch = id ? localById.get(id) : undefined;
+      if (!lSch) return rSch;
+      matchedIds.add(id);
+
+      const rTs = typeof rSch.updatedAt === 'number' ? rSch.updatedAt : 0;
+      const lTs = typeof lSch.updatedAt === 'number' ? lSch.updatedAt : 0;
+
+      if (rTs > 0 || lTs > 0) {
+        return lTs > rTs ? lSch : rSch;
+      }
+
+      // If neither has a timestamp yet, preserve active state if either is active
+      if (lSch.isActive && !rSch.isActive) {
+        return { ...rSch, isActive: true };
+      }
+      return rSch;
+    });
+
+  // Preserve custom local schedules (not default demo IDs and not deleted) missing from remote
+  for (const lSch of localList) {
+    if (!lSch || typeof lSch !== 'object') continue;
+    const id = String(lSch.id || '').trim();
+    if (!id || deletedSet.has(id) || matchedIds.has(id)) continue;
+    if (!DEFAULT_DEMO_SCHEDULE_IDS.has(id)) {
+      merged.push(lSch);
+    }
+  }
+
+  return merged;
 }
 
 function getRealQuestionsCount(pkg?: ExamPackage | null): number {
@@ -572,6 +685,15 @@ export default function App() {
     activeTokenRef.current = activeToken;
   }, [activeToken]);
 
+  const tokenUpdatedAtRef = useRef<number>((() => {
+    try {
+      const saved = Number(localStorage.getItem(STORAGE_KEYS.TOKEN_UPDATED_AT));
+      return Number.isFinite(saved) && saved > 0 ? saved : 0;
+    } catch {
+      return 0;
+    }
+  })());
+
   const tokenEndTimeRef = useRef<number>(
     Date.now() + TOKEN_DURATION_SECONDS * 1000
   );
@@ -601,6 +723,7 @@ export default function App() {
   const latestUpdatedAtRef = useRef<number>(0);
   const pendingPushCount = useRef<number>(0);
   const examStartedAtRef = useRef<number>(0);
+  const draftSyncTimerRef = useRef<number | null>(null);
 
   const packagesRef = useRef<ExamPackage[]>(packages);
   useEffect(() => {
@@ -644,18 +767,21 @@ export default function App() {
   const handleUpdateToken = useCallback(
     (nextToken: string) => {
       const cleanToken = nextToken.trim().toUpperCase() || DEFAULT_EXAM_TOKEN;
-      lastLocalMutationAt.current = Date.now();
+      const nowTs = Date.now();
+      lastLocalMutationAt.current = nowTs;
       activeTokenRef.current = cleanToken;
-      tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
+      tokenUpdatedAtRef.current = nowTs;
+      tokenEndTimeRef.current = nowTs + TOKEN_DURATION_SECONDS * 1000;
       setActiveToken(cleanToken);
       setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
       try {
         localStorage.setItem(STORAGE_KEYS.TOKEN, cleanToken);
+        localStorage.setItem(STORAGE_KEYS.TOKEN_UPDATED_AT, String(nowTs));
       } catch {
         // ignore
       }
       pendingPushCount.current += 1;
-      saveVercelStorage({ activeToken: cleanToken })
+      saveVercelStorage({ activeToken: cleanToken, tokenUpdatedAt: nowTs })
         .then((res) => {
           if (res.ok) markSyncedSuccess(res.engine);
         })
@@ -886,11 +1012,57 @@ export default function App() {
         | ProctorParticipantRow[]
         | ((prevRows: ProctorParticipantRow[]) => ProctorParticipantRow[])
     ) => {
-      lastLocalMutationAt.current = Date.now();
+      const nowTs = Date.now();
+      lastLocalMutationAt.current = nowTs;
       setParticipants((prev) => {
         const rawNext =
           typeof updater === 'function' ? updater(prev) : updater;
-        const nextParticipants = sanitizeParticipantRows(rawNext);
+
+        const prevByUser = new Map<string, ProctorParticipantRow>();
+        const prevById = new Map<string, ProctorParticipantRow>();
+        prev.forEach((p) => {
+          prevByUser.set(p.username.trim().toUpperCase(), p);
+          prevById.set(p.id, p);
+        });
+
+        // Stamp monotonic CRDT timestamps on any modified fields so concurrent polls never revert changes
+        const stampedNext = rawNext.map((row) => {
+          const prevRow =
+            prevById.get(row.id) ||
+            prevByUser.get(row.username.trim().toUpperCase());
+          if (!prevRow) {
+            return {
+              ...row,
+              metaUpdatedAt: row.metaUpdatedAt || nowTs,
+            };
+          }
+          const metaChanged =
+            prevRow.status !== row.status ||
+            prevRow.ruang !== row.ruang ||
+            prevRow.kelompok !== row.kelompok ||
+            prevRow.kelas !== row.kelas ||
+            prevRow.namaPeserta !== row.namaPeserta;
+          const loginChanged = prevRow.loginState !== row.loginState;
+          const draftChanged =
+            prevRow.draftAnswers !== row.draftAnswers ||
+            prevRow.draftPackageId !== row.draftPackageId ||
+            prevRow.draftRemainingSeconds !== row.draftRemainingSeconds;
+
+          return {
+            ...row,
+            ...(metaChanged
+              ? { metaUpdatedAt: Math.max(row.metaUpdatedAt || 0, nowTs) }
+              : {}),
+            ...(loginChanged
+              ? { loginUpdatedAt: Math.max(row.loginUpdatedAt || 0, nowTs) }
+              : {}),
+            ...(draftChanged
+              ? { draftUpdatedAt: Math.max(row.draftUpdatedAt || 0, nowTs) }
+              : {}),
+          };
+        });
+
+        const nextParticipants = sanitizeParticipantRows(stampedNext);
         participantsRef.current = nextParticipants;
         try {
           localStorage.setItem(
@@ -914,10 +1086,6 @@ export default function App() {
         if (!isAdminOrProctor) {
           // Student-side mutation: NEVER push the full participants array from a student browser.
           // Only send a partial patch for the specific student row(s) that changed.
-          const prevByUser = new Map<string, ProctorParticipantRow>();
-          prev.forEach((p) => {
-            prevByUser.set(p.username.trim().toUpperCase(), p);
-          });
           const changedPatches = nextParticipants
             .filter((row) => {
               const prevRow = prevByUser.get(row.username.trim().toUpperCase());
@@ -954,6 +1122,9 @@ export default function App() {
               draftPackageId: (row.draftPackageId ?? null) as any,
               draftRemainingSeconds: (row.draftRemainingSeconds ?? null) as any,
               lastResetAt: row.lastResetAt,
+              loginUpdatedAt: row.loginUpdatedAt,
+              metaUpdatedAt: row.metaUpdatedAt,
+              draftUpdatedAt: row.draftUpdatedAt,
             }));
 
           if (changedPatches.length > 0) {
@@ -991,9 +1162,13 @@ export default function App() {
         }
 
         const nextIdSet = new Set(nextParticipants.map((p) => p.id));
-        const deletedParticipantIds = prev
+        const newlyDeletedIds = prev
           .filter((p) => !nextIdSet.has(p.id))
           .map((p) => p.id);
+        const deletedParticipantIds = addLocalDeletedIds(
+          STORAGE_KEYS.DELETED_PARTICIPANTS,
+          newlyDeletedIds
+        );
 
         pendingPushCount.current += 1;
         saveVercelStorage({
@@ -1030,16 +1205,43 @@ export default function App() {
         | AdminScheduleItem[]
         | ((prevSchedules: AdminScheduleItem[]) => AdminScheduleItem[])
     ) => {
-      lastLocalMutationAt.current = Date.now();
+      const nowTs = Date.now();
+      lastLocalMutationAt.current = nowTs;
       setSchedules((prev) => {
-        const nextSchedules =
+        const rawNext =
           typeof updater === 'function' ? updater(prev) : updater;
+        const prevById = new Map<string, AdminScheduleItem>();
+        prev.forEach((s) => prevById.set(s.id, s));
+
+        const nextSchedules = rawNext.map((s) => {
+          const prevItem = prevById.get(s.id);
+          if (
+            !prevItem ||
+            prevItem.isActive !== s.isActive ||
+            prevItem.mapel !== s.mapel ||
+            prevItem.kelas !== s.kelas ||
+            prevItem.hariTanggal !== s.hariTanggal ||
+            prevItem.waktuMulai !== s.waktuMulai ||
+            prevItem.durasi !== s.durasi
+          ) {
+            return {
+              ...s,
+              updatedAt: Math.max(s.updatedAt || 0, nowTs),
+            };
+          }
+          return s;
+        });
+
         schedulesRef.current = nextSchedules;
 
         const nextIdSet = new Set(nextSchedules.map((s) => s.id));
-        const deletedScheduleIds = prev
+        const newlyDeletedIds = prev
           .filter((s) => !nextIdSet.has(s.id))
           .map((s) => s.id);
+        const deletedScheduleIds = addLocalDeletedIds(
+          STORAGE_KEYS.DELETED_SCHEDULES,
+          newlyDeletedIds
+        );
 
         try {
           localStorage.setItem(
@@ -1058,6 +1260,7 @@ export default function App() {
           schedules: nextSchedules,
           deletedScheduleIds,
           forceReplaceSchedules: true,
+          schedulesUpdatedAt: nowTs,
         })
           .then((res) => {
             if (res.ok) {
@@ -1175,11 +1378,12 @@ export default function App() {
   );
 
   // Initial Hydration & Background Polling from Vercel Storage (/api/storage)
-  // Uses stable refs so polling runs strictly on a 6s interval without re-triggering on state updates
+  // Uses conflict-free per-entity timestamp resolution so multi-instance serverless split-brain
+  // or 131 concurrent students never cause schedules or reset requests to flicker.
   const syncFromVercelCloud = useCallback(async () => {
     if (
       pendingPushCount.current > 0 ||
-      Date.now() - lastLocalMutationAt.current < 5000
+      Date.now() - lastLocalMutationAt.current < 2500
     ) {
       return;
     }
@@ -1189,11 +1393,15 @@ export default function App() {
     if (
       pendingPushCount.current > 0 ||
       lastLocalMutationAt.current >= fetchStartedAt ||
-      Date.now() - lastLocalMutationAt.current < 5000
+      Date.now() - lastLocalMutationAt.current < 2500
     ) {
       return;
     }
     setStorageEngine(res.engine);
+
+    const isAdminOrProctorStage =
+      stageRef.current === 'admin_dashboard' ||
+      stageRef.current === 'proctor_dashboard';
 
     if (res.data) {
       const serverUpdatedAt =
@@ -1202,29 +1410,140 @@ export default function App() {
           : typeof res.updatedAt === 'number'
           ? res.updatedAt
           : 0;
+      if (serverUpdatedAt > 0) {
+        latestUpdatedAtRef.current = Math.max(
+          latestUpdatedAtRef.current,
+          serverUpdatedAt
+        );
+      }
 
-      // Always keep activeToken synchronized from server even if updatedAt matches a local participant mutation
+      if (Array.isArray(res.data.deletedScheduleIds)) {
+        addLocalDeletedIds(
+          STORAGE_KEYS.DELETED_SCHEDULES,
+          res.data.deletedScheduleIds
+        );
+      }
+      if (Array.isArray(res.data.deletedParticipantIds)) {
+        addLocalDeletedIds(
+          STORAGE_KEYS.DELETED_PARTICIPANTS,
+          res.data.deletedParticipantIds
+        );
+      }
+
+      // 1. Token CRDT reconciliation by tokenUpdatedAt
+      const remoteTokenTs =
+        typeof res.data.tokenUpdatedAt === 'number'
+          ? res.data.tokenUpdatedAt
+          : 0;
       if (
         typeof res.data.activeToken === 'string' &&
         res.data.activeToken &&
         res.data.activeToken !== activeTokenRef.current
       ) {
-        activeTokenRef.current = res.data.activeToken;
-        tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
-        setActiveToken(res.data.activeToken);
-        setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
+        if (
+          remoteTokenTs >= tokenUpdatedAtRef.current ||
+          tokenUpdatedAtRef.current === 0
+        ) {
+          activeTokenRef.current = res.data.activeToken;
+          tokenUpdatedAtRef.current = Math.max(
+            tokenUpdatedAtRef.current,
+            remoteTokenTs
+          );
+          tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
+          setActiveToken(res.data.activeToken);
+          setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
+          try {
+            localStorage.setItem(STORAGE_KEYS.TOKEN, res.data.activeToken);
+            if (remoteTokenTs > 0) {
+              localStorage.setItem(
+                STORAGE_KEYS.TOKEN_UPDATED_AT,
+                String(remoteTokenTs)
+              );
+            }
+          } catch {
+            // ignore
+          }
+        } else if (isAdminOrProctorStage) {
+          saveVercelStorage({
+            activeToken: activeTokenRef.current,
+            tokenUpdatedAt: tokenUpdatedAtRef.current,
+          });
+        }
       }
 
-      // Self-healing & Anti-Downgrade Guard:
-      // 1) If this browser holds real uploaded participants (e.g., 127 students) in localStorage,
-      //    and the server returned only the 8 default demo students (or empty after a serverless cold start),
-      //    NEVER overwrite our 127 uploaded students with the 8 demo students!
-      // 2) If this browser holds active/custom schedules (so the exam token is active),
-      //    and the server returned default inactive schedules, NEVER deactivate our schedules or hide our token!
-      const isAdminOrProctorStage =
-        stageRef.current === 'admin_dashboard' ||
-        stageRef.current === 'proctor_dashboard';
+      isApplyingRemoteUpdate.current = true;
 
+      // 2. Packages CRDT reconciliation (preserving uploaded questions)
+      let healPackagesPayload: ExamPackage[] | undefined;
+      if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
+        const cleanedRemotePackages = filterOutSimulasiTka(res.data.packages);
+        const mergedPackages = mergePackagesPreservingQuestions(
+          cleanedRemotePackages,
+          packagesRef.current
+        );
+        packagesRef.current = mergedPackages;
+        setPackages(mergedPackages);
+
+        if (
+          isAdminOrProctorStage &&
+          getTotalUploadedQuestionsCount(mergedPackages) >
+            getTotalUploadedQuestionsCount(cleanedRemotePackages)
+        ) {
+          healPackagesPayload = mergedPackages;
+        }
+      } else if (
+        isAdminOrProctorStage &&
+        hasAnyUploadedQuestions(packagesRef.current)
+      ) {
+        healPackagesPayload = packagesRef.current;
+      }
+
+      // 3. Schedules CRDT reconciliation by per-schedule updatedAt
+      let healSchedulesPayload: AdminScheduleItem[] | undefined;
+      const localHasActiveOrCustomSchedules = !isDefaultInactiveSchedulesList(
+        schedulesRef.current
+      );
+      const remoteHasSchedules =
+        Array.isArray(res.data.schedules) && res.data.schedules.length > 0;
+      const remoteIsDefaultInactiveSchedules =
+        !remoteHasSchedules ||
+        isDefaultInactiveSchedulesList(res.data.schedules);
+
+      if (remoteHasSchedules) {
+        const mergedSchedules = mergeSchedulesByTimestamp(
+          res.data.schedules!,
+          schedulesRef.current,
+          res.data.deletedScheduleIds
+        );
+        schedulesRef.current = mergedSchedules;
+        setSchedules(mergedSchedules);
+
+        // If local had newer schedule state (e.g. active toggle or custom schedule) than the polled server instance, heal the server
+        if (isAdminOrProctorStage) {
+          const remoteById = new Map<string, AdminScheduleItem>();
+          res.data.schedules!.forEach((s) => {
+            if (s && s.id) remoteById.set(s.id, s);
+          });
+          const serverNeedsScheduleHeal =
+            mergedSchedules.length !== res.data.schedules!.length ||
+            mergedSchedules.some((m) => {
+              const r = remoteById.get(m.id);
+              return (
+                !r ||
+                r.isActive !== m.isActive ||
+                (m.updatedAt || 0) > (r.updatedAt || 0)
+              );
+            });
+          if (serverNeedsScheduleHeal) {
+            healSchedulesPayload = mergedSchedules;
+          }
+        }
+      } else if (isAdminOrProctorStage && localHasActiveOrCustomSchedules) {
+        healSchedulesPayload = schedulesRef.current;
+      }
+
+      // 4. Participants CRDT reconciliation (violationTimestamp vs lastResetAt vs loginUpdatedAt vs metaUpdatedAt)
+      let healParticipantsPayload: ProctorParticipantRow[] | undefined;
       const localHasRealParticipants = !isDefaultDemoParticipantsList(
         participantsRef.current
       );
@@ -1235,46 +1554,72 @@ export default function App() {
         !remoteHasParticipants ||
         isDefaultDemoParticipantsList(res.data.participants);
 
-      const localHasActiveOrCustomSchedules = !isDefaultInactiveSchedulesList(
-        schedulesRef.current
-      );
-      const remoteHasSchedules =
-        Array.isArray(res.data.schedules) && res.data.schedules.length > 0;
-      const remoteIsDefaultInactiveSchedules =
-        !remoteHasSchedules ||
-        isDefaultInactiveSchedulesList(res.data.schedules);
+      if (localHasRealParticipants && remoteIsDemoOnly) {
+        // Server instance cold-started or only has 8 demo students: keep our 131 real students and heal server
+        healParticipantsPayload = sanitizeParticipantRows(
+          participantsRef.current
+        );
+      } else if (remoteHasParticipants) {
+        const mergedParticipants = mergeParticipantLists(
+          res.data.participants!,
+          participantsRef.current,
+          res.data.deletedParticipantIds
+        );
+        participantsRef.current = mergedParticipants;
+        setParticipants(mergedParticipants);
 
-      const localHasQuestions = hasAnyUploadedQuestions(packagesRef.current);
-      const remoteHasQuestions = hasAnyUploadedQuestions(res.data.packages);
+        // Check if the polled serverless instance was missing students, resets, or violations that we just reconciled
+        if (isAdminOrProctorStage) {
+          const remoteByUser = new Map<string, ProctorParticipantRow>();
+          res.data.participants!.forEach((r) => {
+            if (r && r.username) {
+              remoteByUser.set(r.username.trim().toUpperCase(), r);
+            }
+          });
+          const serverNeedsParticipantHeal =
+            mergedParticipants.length !== res.data.participants!.length ||
+            mergedParticipants.some((m) => {
+              const r = remoteByUser.get(m.username.trim().toUpperCase());
+              if (!r) return true;
+              return (
+                Boolean(r.requestReset) !== Boolean(m.requestReset) ||
+                r.loginState !== m.loginState ||
+                r.status !== m.status ||
+                (m.lastResetAt || 0) > (r.lastResetAt || 0) ||
+                (m.violationTimestamp || 0) > (r.violationTimestamp || 0) ||
+                (m.metaUpdatedAt || 0) > (r.metaUpdatedAt || 0)
+              );
+            });
+          if (serverNeedsParticipantHeal) {
+            healParticipantsPayload = mergedParticipants;
+          }
+        }
+      }
 
+      // Heal stale serverless instance if needed (only Admin/Proctor pushes schedules/packages, or real participants on cold start)
       if (
-        (localHasRealParticipants && remoteIsDemoOnly) ||
-        (isAdminOrProctorStage &&
-          localHasActiveOrCustomSchedules &&
-          remoteIsDefaultInactiveSchedules) ||
-        (isAdminOrProctorStage && localHasQuestions && !remoteHasQuestions)
+        healPackagesPayload ||
+        healSchedulesPayload ||
+        healParticipantsPayload
       ) {
-        // CRITICAL: A student browser must NEVER push packages, schedules, or proctors during self-healing!
         saveVercelStorage({
-          ...(isAdminOrProctorStage && localHasQuestions
-            ? { packages: packagesRef.current }
-            : {}),
-          ...(isAdminOrProctorStage && localHasActiveOrCustomSchedules
+          ...(healPackagesPayload ? { packages: healPackagesPayload } : {}),
+          ...(healSchedulesPayload
             ? {
-                schedules: schedulesRef.current,
+                schedules: healSchedulesPayload,
+                deletedScheduleIds: Array.from(
+                  readLocalDeletedSet(STORAGE_KEYS.DELETED_SCHEDULES)
+                ),
                 forceReplaceSchedules: true,
               }
             : {}),
-          ...(localHasRealParticipants
+          ...(healParticipantsPayload
             ? {
-                participants: sanitizeParticipantRows(participantsRef.current),
+                participants: healParticipantsPayload,
+                deletedParticipantIds: Array.from(
+                  readLocalDeletedSet(STORAGE_KEYS.DELETED_PARTICIPANTS)
+                ),
                 forceReplaceParticipants: true,
-              }
-            : {}),
-          ...(isAdminOrProctorStage
-            ? {
-                proctors: proctorsRef.current,
-                activeToken: activeTokenRef.current,
               }
             : {}),
         }).then((healRes) => {
@@ -1285,207 +1630,10 @@ export default function App() {
             );
           }
         });
-        // Still apply any non-downgrading remote updates (e.g. student browser receives packages & schedules while healing participants)
-        if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
-          const cleanedRemotePkgs = filterOutSimulasiTka(res.data.packages);
-          const mergedPkgs = mergePackagesPreservingQuestions(
-            cleanedRemotePkgs,
-            packagesRef.current
-          );
-          setPackages(mergedPkgs);
-        }
-        if (!remoteIsDemoOnly && Array.isArray(res.data.participants)) {
-          setParticipants(sanitizeParticipantRows(res.data.participants));
-        }
-        if (
-          !remoteIsDefaultInactiveSchedules &&
-          Array.isArray(res.data.schedules)
-        ) {
-          setSchedules(res.data.schedules);
-        }
-        isHydratedFromCloud.current = true;
-        return;
       }
 
-      // Never overwrite newer client state with a stale serverless instance response
-      if (
-        isHydratedFromCloud.current &&
-        latestUpdatedAtRef.current > 0 &&
-        serverUpdatedAt > 0
-      ) {
-        if (serverUpdatedAt < latestUpdatedAtRef.current) {
-          return;
-        }
-        if (serverUpdatedAt === latestUpdatedAtRef.current) {
-          return;
-        }
-      }
-
-      if (serverUpdatedAt > 0) {
-        latestUpdatedAtRef.current = Math.max(
-          latestUpdatedAtRef.current,
-          serverUpdatedAt
-        );
-      }
-
-      isApplyingRemoteUpdate.current = true;
-      if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
-        const cleanedRemotePackages = filterOutSimulasiTka(res.data.packages);
-        const mergedPackages = mergePackagesPreservingQuestions(
-          cleanedRemotePackages,
-          packagesRef.current
-        );
-        setPackages(mergedPackages);
-
-        // If local had uploaded questions that were missing on a cold-started server instance, heal the server
-        if (
-          isAdminOrProctorStage &&
-          getTotalUploadedQuestionsCount(mergedPackages) >
-            getTotalUploadedQuestionsCount(cleanedRemotePackages)
-        ) {
-          saveVercelStorage({
-            packages: mergedPackages,
-          });
-        }
-      }
-      if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
-        if (
-          localHasActiveOrCustomSchedules &&
-          isDefaultInactiveSchedulesList(res.data.schedules)
-        ) {
-          // Keep local active schedules and heal server
-          if (isAdminOrProctorStage) {
-            saveVercelStorage({
-              schedules: schedulesRef.current,
-              forceReplaceSchedules: true,
-            });
-          }
-        } else {
-          // Merge any local custom schedules (sch_...) so newly added schedules never disappear during split-brain polling
-          const remoteScheduleIds = new Set(
-            res.data.schedules.map((s) => String(s?.id || '').trim())
-          );
-          const missingLocalCustomSchedules = schedulesRef.current.filter(
-            (s) => {
-              const id = String(s?.id || '').trim();
-              return (
-                id &&
-                !DEFAULT_DEMO_SCHEDULE_IDS.has(id) &&
-                !remoteScheduleIds.has(id)
-              );
-            }
-          );
-          const mergedSchedules =
-            missingLocalCustomSchedules.length > 0
-              ? [...res.data.schedules, ...missingLocalCustomSchedules]
-              : res.data.schedules;
-
-          setSchedules(mergedSchedules);
-
-          if (
-            isAdminOrProctorStage &&
-            missingLocalCustomSchedules.length > 0
-          ) {
-            saveVercelStorage({
-              schedules: mergedSchedules,
-              forceReplaceSchedules: true,
-            });
-          }
-        }
-      }
-      if (
-        Array.isArray(res.data.participants) &&
-        res.data.participants.length > 0
-      ) {
-        // Merge local lastResetAt and local selected state so UI selections never flicker
-        const localResetMap = new Map<string, number>();
-        const localSelectedMap = new Map<string, boolean>();
-        participantsRef.current.forEach((p) => {
-          const u = p.username.trim().toUpperCase();
-          if (typeof p.lastResetAt === 'number' && p.lastResetAt > 0) {
-            localResetMap.set(u, p.lastResetAt);
-          }
-          localSelectedMap.set(u, Boolean(p.selected));
-        });
-        let mergedRemoteParticipants = sanitizeParticipantRows(
-          res.data.participants.map((row) => {
-            const u = (row.username || '').trim().toUpperCase();
-            const localReset = localResetMap.get(u);
-            const localSelected = localSelectedMap.get(u);
-            const maxReset = Math.max(
-              typeof row.lastResetAt === 'number' ? row.lastResetAt : 0,
-              localReset || 0
-            );
-            return {
-              ...row,
-              ...(typeof localSelected === 'boolean'
-                ? { selected: localSelected }
-                : {}),
-              ...(maxReset > 0 ? { lastResetAt: maxReset } : {}),
-            };
-          })
-        );
-
-        // Additive protection: if this browser holds more real custom students (e.g. 127 students)
-        // than what returned from a split-brain serverless instance, preserve all local non-demo students
-        let shouldHealParticipantsToServer =
-          res.data.participants.length > mergedRemoteParticipants.length;
-
-        if (localHasRealParticipants) {
-          const remoteUserSet = new Set(
-            mergedRemoteParticipants.map((p) =>
-              (p.username || '').trim().toUpperCase()
-            )
-          );
-          const remoteIdSet = new Set(
-            mergedRemoteParticipants.map((p) => String(p.id || '').trim())
-          );
-          const remoteNameKelasSet = new Set(
-            mergedRemoteParticipants
-              .map((p) => getParticipantNameKelasKey(p))
-              .filter(Boolean)
-          );
-          const missingLocalCustom = participantsRef.current.filter((p) => {
-            if (isDefaultDemoParticipantRow(p)) return false;
-            const u = (p.username || '').trim().toUpperCase();
-            const id = String(p.id || '').trim();
-            const nk = getParticipantNameKelasKey(p);
-            return (
-              !remoteUserSet.has(u) &&
-              !remoteIdSet.has(id) &&
-              (!nk || !remoteNameKelasSet.has(nk))
-            );
-          });
-          if (missingLocalCustom.length > 0) {
-            mergedRemoteParticipants = sanitizeParticipantRows([
-              ...mergedRemoteParticipants,
-              ...missingLocalCustom,
-            ]);
-            shouldHealParticipantsToServer = true;
-          }
-        }
-
-        if (shouldHealParticipantsToServer) {
-          saveVercelStorage({
-            participants: mergedRemoteParticipants,
-            forceReplaceParticipants: true,
-          });
-        }
-
-        setParticipants(mergedRemoteParticipants);
-      }
       if (Array.isArray(res.data.proctors) && res.data.proctors.length > 0) {
         setProctors(res.data.proctors);
-      }
-      if (
-        typeof res.data.activeToken === 'string' &&
-        res.data.activeToken &&
-        res.data.activeToken !== activeTokenRef.current
-      ) {
-        activeTokenRef.current = res.data.activeToken;
-        tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
-        setActiveToken(res.data.activeToken);
-        setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
       }
       if (Array.isArray(res.data.resultsHistory)) {
         setResultsHistory(res.data.resultsHistory);
@@ -1502,10 +1650,6 @@ export default function App() {
       }, 150);
     } else if (!isHydratedFromCloud.current) {
       // Cold-start / empty server: Only seed from Admin/Proctor or if local holds real data.
-      // NEVER let a student device seed empty packages or default schedules!
-      const isAdminOrProctorStage =
-        stageRef.current === 'admin_dashboard' ||
-        stageRef.current === 'proctor_dashboard';
       const localHasRealParticipants = !isDefaultDemoParticipantsList(
         participantsRef.current
       );
@@ -1539,6 +1683,7 @@ export default function App() {
             ? {
                 proctors: proctorsRef.current,
                 activeToken: activeTokenRef.current,
+                tokenUpdatedAt: tokenUpdatedAtRef.current || Date.now(),
                 resultsHistory: resultsHistoryRef.current,
               }
             : {}),
@@ -2242,10 +2387,14 @@ export default function App() {
               requestReset: false,
               violationReason: undefined,
               violationAt: undefined,
+              violationSchema: undefined,
+              violationTimestamp: undefined,
               violationCount: effectiveViolationCount,
+              loginUpdatedAt: Date.now(),
               draftPackageId: currentPkgId,
               draftAnswers: restoredAnswers,
               draftRemainingSeconds: restoredRemainingSecs,
+              draftUpdatedAt: Date.now(),
             }
           : row
       )
@@ -2306,18 +2455,27 @@ export default function App() {
           updatedAt: Date.now(),
         });
 
-        handleUpdateParticipants((prev) =>
-          prev.map((row) =>
-            row.username.trim().toUpperCase() === cleanUser
-              ? {
-                  ...row,
-                  draftPackageId: currentPkgId,
-                  draftAnswers: nextMap,
-                  draftRemainingSeconds: examRemainingSecondsRef.current,
-                }
-              : row
-          )
-        );
+        // Debounce remote server sync by 1200ms so 131 concurrent students answering/typing
+        // do not flood /api/storage on every keystroke while keeping localStorage 0ms instant
+        if (draftSyncTimerRef.current) {
+          window.clearTimeout(draftSyncTimerRef.current);
+        }
+        draftSyncTimerRef.current = window.setTimeout(() => {
+          draftSyncTimerRef.current = null;
+          handleUpdateParticipants((prev) =>
+            prev.map((row) =>
+              row.username.trim().toUpperCase() === cleanUser
+                ? {
+                    ...row,
+                    draftPackageId: currentPkgId,
+                    draftAnswers: answersRef.current,
+                    draftRemainingSeconds: examRemainingSecondsRef.current,
+                    draftUpdatedAt: Date.now(),
+                  }
+                : row
+            )
+          );
+        }, 1200);
 
         return nextMap;
       });
@@ -2327,6 +2485,10 @@ export default function App() {
 
   const handleFinishExam = useCallback(
     (usedSeconds: number) => {
+      if (draftSyncTimerRef.current) {
+        window.clearTimeout(draftSyncTimerRef.current);
+        draftSyncTimerRef.current = null;
+      }
       setTimeUsedSeconds(usedSeconds);
 
       // Compute summary for Proctor History
@@ -2374,6 +2536,7 @@ export default function App() {
       clearStudentDraftInLocal(cleanUser, selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id);
       examRemainingSecondsRef.current = undefined;
       setExamInitialRemainingSeconds(undefined);
+      const nowTs = Date.now();
 
       handleUpdateParticipants((prev) =>
         prev.map((row) =>
@@ -2384,10 +2547,14 @@ export default function App() {
                 requestReset: false,
                 violationReason: undefined,
                 violationAt: undefined,
+                violationSchema: undefined,
+                violationTimestamp: undefined,
                 violationCount: 0,
+                loginUpdatedAt: nowTs,
                 draftAnswers: undefined,
                 draftPackageId: undefined,
                 draftRemainingSeconds: undefined,
+                draftUpdatedAt: nowTs,
               }
             : row
         )
@@ -2622,8 +2789,12 @@ export default function App() {
               setPackages(merged);
             }
             if (Array.isArray(remoteSchs) && remoteSchs.length > 0) {
-              schedulesRef.current = remoteSchs;
-              setSchedules(remoteSchs);
+              const mergedSchs = mergeSchedulesByTimestamp(
+                remoteSchs,
+                schedulesRef.current
+              );
+              schedulesRef.current = mergedSchs;
+              setSchedules(mergedSchs);
             }
             if (typeof remoteTok === 'string' && remoteTok) {
               activeTokenRef.current = remoteTok;

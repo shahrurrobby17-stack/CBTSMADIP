@@ -129,5 +129,7 @@ export interface AdminScheduleItem {
   waktuMulai: string;
   durasi: string;
   isActive: boolean;
+  updatedAt?: number;
 }
+
 

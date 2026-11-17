@@ -2134,6 +2134,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         : targetMoveRuang || 'Ruang 2';
 
     const selectedIdSet = new Set(selectedRows.map((r) => r.id));
+    const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
         selectedIdSet.has(r.id)
@@ -2142,6 +2143,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               ruang: destinationRuang,
               kelompok: destinationRuang,
               selected: false,
+              metaUpdatedAt: nowTs,
             }
           : r
       )
@@ -2176,9 +2178,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     const visibleSelectedIds = new Set(
       filteredRows.filter((r) => r.selected).map((r) => r.id)
     );
+    const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
-        visibleSelectedIds.has(r.id) ? { ...r, status: 'Active' } : r
+        visibleSelectedIds.has(r.id)
+          ? { ...r, status: 'Active', metaUpdatedAt: nowTs }
+          : r
       )
     );
     setFilterStatus('Semua Status');
@@ -2195,9 +2200,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     const visibleSelectedIds = new Set(
       filteredRows.filter((r) => r.selected).map((r) => r.id)
     );
+    const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
-        visibleSelectedIds.has(r.id) ? { ...r, status: 'Non Active' } : r
+        visibleSelectedIds.has(r.id)
+          ? { ...r, status: 'Non Active', metaUpdatedAt: nowTs }
+          : r
       )
     );
     setFilterStatus('Semua Status');
@@ -2219,8 +2227,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const handleAddParticipant = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newParticipantName.trim()) return;
+    const nowTs = Date.now();
     const newRow: ProctorParticipantRow = {
-      id: `ap_${Date.now()}`,
+      id: `ap_${nowTs}`,
       selected: true,
       status: 'Non Active',
       kodeTes: 'SAS26SMADIP1',
@@ -2230,6 +2239,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       kelompok: '1',
       kelas: newParticipantKelas,
       loginState: 'Belum Login',
+      metaUpdatedAt: nowTs,
     };
     setParticipants((prev) => [...prev, newRow]);
     setNewParticipantName('');
@@ -3208,14 +3218,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const handleAddSchedule = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newHariTanggal.trim() || !newJadwalMapel.trim()) return;
+    const nowTs = Date.now();
     const item: AdminScheduleItem = {
-      id: `sch_${Date.now()}`,
+      id: `sch_${nowTs}`,
       hariTanggal: newHariTanggal.trim(),
       kelas: newJadwalKelas,
       mapel: newJadwalMapel.trim(),
       waktuMulai: newWaktuMulai.trim() || '07:30 WIB',
       durasi: newDurasi.trim() || '90 Menit',
       isActive: false,
+      updatedAt: nowTs,
     };
     onUpdateSchedules([...schedules, item]);
     setNewHariTanggal('');
@@ -3229,8 +3241,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     const target = schedules.find((s) => s.id === id);
     if (!target) return;
     const nextState = !target.isActive;
+    const nowTs = Date.now();
     const nextList = schedules.map((s) =>
-      s.id === id ? { ...s, isActive: nextState } : s
+      s.id === id ? { ...s, isActive: nextState, updatedAt: nowTs } : s
     );
     onUpdateSchedules(nextList);
     if (nextState) {
@@ -4789,6 +4802,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                 violationSchema: undefined,
                                 violationTimestamp: undefined,
                                 lastResetAt: nowTs,
+                                loginUpdatedAt:
+                                  row.loginState === 'Terkunci (Pelanggaran)'
+                                    ? nowTs
+                                    : row.loginUpdatedAt,
                               }))
                             );
                             showNotice(
@@ -4957,6 +4974,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                               violationSchema: undefined,
                                               violationTimestamp: undefined,
                                               lastResetAt: nowTs,
+                                              loginUpdatedAt: nowTs,
                                             }
                                           : row
                                       )
@@ -5135,8 +5153,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     <button
                       type="button"
                       onClick={() => {
+                        const nowTs = Date.now();
                         onUpdateSchedules(
-                          schedules.map((s) => ({ ...s, isActive: true }))
+                          schedules.map((s) => ({
+                            ...s,
+                            isActive: true,
+                            updatedAt: nowTs,
+                          }))
                         );
                         showNotice(
                           'Semua mata pelajaran diaktifkan! Token ujian kini keluar di halaman Proktor & Siswa.'
@@ -5150,8 +5173,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     <button
                       type="button"
                       onClick={() => {
+                        const nowTs = Date.now();
                         onUpdateSchedules(
-                          schedules.map((s) => ({ ...s, isActive: false }))
+                          schedules.map((s) => ({
+                            ...s,
+                            isActive: false,
+                            updatedAt: nowTs,
+                          }))
                         );
                         showNotice(
                           'Semua mata pelajaran dinonaktifkan. Token ujian disembunyikan dari Proktor & Siswa.'

@@ -10,15 +10,18 @@ export interface CBTCloudPayload {
   packages?: ExamPackage[];
   deletedPackageIds?: string[];
   forceReplacePackages?: boolean;
+  packagesUpdatedAt?: number;
   schedules?: AdminScheduleItem[];
   deletedScheduleIds?: string[];
   forceReplaceSchedules?: boolean;
+  schedulesUpdatedAt?: number;
   participants?: ProctorParticipantRow[];
   participantPatch?: Partial<ProctorParticipantRow> | Partial<ProctorParticipantRow>[];
   deletedParticipantIds?: string[];
   forceReplaceParticipants?: boolean;
   proctors?: AdminProctorItem[];
   activeToken?: string;
+  tokenUpdatedAt?: number;
   resultsHistory?: ExamResultSummary[];
   updatedAt?: number;
   schemaVersion?: number;

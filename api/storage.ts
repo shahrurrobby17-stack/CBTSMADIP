@@ -44,11 +44,21 @@ const DEFAULT_DEMO_USERNAMES = new Set([
 ]);
 
 const DEFAULT_DEMO_SCHEDULE_IDS = new Set([
+  'sch1',
+  'sch2',
+  'sch3',
+  'sch4',
+  'sch5',
   'sch_1',
   'sch_2',
   'sch_3',
   'sch_4',
   'sch_5',
+  's1',
+  's2',
+  's3',
+  's4',
+  's5',
 ]);
 
 function isDefaultDemoRow(item: unknown): boolean {
@@ -114,14 +124,23 @@ function resolveIncomingSchedules(
   const existingHasActiveOrCustom =
     hasExisting && !isDefaultInactiveSchedulesList(existingList);
   const incomingIsDefaultInactive = isDefaultInactiveSchedulesList(incomingList);
+  const incomingHasAnyTimestamp =
+    hasIncoming &&
+    (incomingList as any[]).some(
+      (s) => s && typeof s === 'object' && typeof s.updatedAt === 'number' && s.updatedAt > 0
+    );
 
-  // Never allow an unhydrated tab's default inactive schedules to wipe out active schedules or custom schedules
-  if (existingHasActiveOrCustom && incomingIsDefaultInactive && !forceReplace) {
+  // Never allow an unhydrated tab's default inactive schedules (with no updatedAt timestamp) to wipe out active schedules or custom schedules
+  if (
+    existingHasActiveOrCustom &&
+    incomingIsDefaultInactive &&
+    (!forceReplace || !incomingHasAnyTimestamp)
+  ) {
     return existingList as Record<string, any>[];
   }
 
   if (hasExisting) {
-    const existingActiveIds = new Set<string>();
+    const existingById = new Map<string, Record<string, any>>();
     const customExistingRows: Record<string, any>[] = [];
     const incomingIds = new Set<string>(
       (incomingList as any[])
@@ -134,9 +153,7 @@ function resolveIncomingSchedules(
       const id = String(row.id || '').trim();
       if (!id || deletedIds.has(id)) continue;
 
-      if (row.isActive) {
-        existingActiveIds.add(id);
-      }
+      existingById.set(id, row);
       // Preserve custom schedules (sch_...) that were not explicitly deleted
       if (!DEFAULT_DEMO_SCHEDULE_IDS.has(id) && !incomingIds.has(id)) {
         customExistingRows.push(row);
@@ -151,7 +168,21 @@ function resolveIncomingSchedules(
       })
       .map((s) => {
         const id = String(s.id || '').trim();
-        if (!forceReplace && id && existingActiveIds.has(id)) {
+        const existRow = id ? existingById.get(id) : undefined;
+        if (!existRow) return s;
+
+        const incTs = typeof s.updatedAt === 'number' ? s.updatedAt : 0;
+        const existTs =
+          typeof existRow.updatedAt === 'number' ? existRow.updatedAt : 0;
+
+        if (incTs > 0 || existTs > 0) {
+          if (existTs > incTs) {
+            return existRow;
+          }
+          return s;
+        }
+
+        if (!forceReplace && existRow.isActive) {
           return { ...s, isActive: true };
         }
         return s;
@@ -160,7 +191,11 @@ function resolveIncomingSchedules(
     return [...merged, ...customExistingRows];
   }
 
-  return incomingList as Record<string, any>[];
+  return (incomingList as any[]).filter((s) => {
+    if (!s || typeof s !== 'object') return false;
+    const id = String(s.id || '').trim();
+    return !id || !deletedIds.has(id);
+  });
 }
 
 function getPackageMatchKey(pkg: Record<string, any>): string {
@@ -439,8 +474,8 @@ function getServerParticipantNameKelasKey(row: unknown): string {
 
 function getServerLoginPriority(state?: unknown): number {
   if (state === 'Selesai') return 4;
-  if (state === 'Sedang Mengerjakan') return 3;
-  if (state === 'Terkunci (Pelanggaran)') return 2;
+  if (state === 'Terkunci (Pelanggaran)') return 3;
+  if (state === 'Sedang Mengerjakan') return 2;
   return 1;
 }
 
@@ -468,7 +503,46 @@ function mergeServerDuplicateRows(
       .trim()
       .toLowerCase() === 'active';
 
+  const existMetaTs =
+    typeof existing.metaUpdatedAt === 'number' ? existing.metaUpdatedAt : 0;
+  const incMetaTs =
+    typeof incoming.metaUpdatedAt === 'number' ? incoming.metaUpdatedAt : 0;
+  const maxMetaUpdatedAt = Math.max(existMetaTs, incMetaTs);
+
+  const existLoginTs =
+    typeof existing.loginUpdatedAt === 'number' ? existing.loginUpdatedAt : 0;
+  const incLoginTs =
+    typeof incoming.loginUpdatedAt === 'number' ? incoming.loginUpdatedAt : 0;
+  const maxLoginUpdatedAt = Math.max(existLoginTs, incLoginTs);
+
+  const existDraftTs =
+    typeof existing.draftUpdatedAt === 'number' ? existing.draftUpdatedAt : 0;
+  const incDraftTs =
+    typeof incoming.draftUpdatedAt === 'number' ? incoming.draftUpdatedAt : 0;
+  const maxDraftUpdatedAt = Math.max(existDraftTs, incDraftTs);
+
+  const existViolationTs =
+    existing.violationSchema === 3 &&
+    typeof existing.violationTimestamp === 'number'
+      ? existing.violationTimestamp
+      : 0;
+  const incViolationTs =
+    incoming.violationSchema === 3 &&
+    typeof incoming.violationTimestamp === 'number'
+      ? incoming.violationTimestamp
+      : 0;
+  const maxViolationTs = Math.max(existViolationTs, incViolationTs);
+
+  const existResetAt =
+    typeof existing.lastResetAt === 'number' ? existing.lastResetAt : 0;
+  const incResetAt =
+    typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0;
+  const maxResetAt = Math.max(existResetAt, incResetAt);
+
   const preferIncomingIdentity =
+    incMetaTs > existMetaTs ||
+    incLoginTs > existLoginTs ||
+    incViolationTs > existViolationTs ||
     incomingPriority > existingPriority ||
     (incomingPriority === existingPriority &&
       incomingDraftCount > existingDraftCount) ||
@@ -479,50 +553,179 @@ function mergeServerDuplicateRows(
   const primary = preferIncomingIdentity ? incoming : existing;
   const secondary = preferIncomingIdentity ? existing : incoming;
 
+  let resolvedStatus: string;
+  if (incMetaTs !== existMetaTs) {
+    resolvedStatus =
+      incMetaTs > existMetaTs ? incoming.status : existing.status;
+  } else {
+    resolvedStatus =
+      existingIsActive || incomingIsActive ? 'Active' : primary.status || 'Non Active';
+  }
+
   const existingRuang = String(
     existing.ruang || existing.kelompok || 'Ruang 1'
   ).trim();
   const incomingRuang = String(
     incoming.ruang || incoming.kelompok || 'Ruang 1'
   ).trim();
-  const resolvedRuang =
-    existingRuang && existingRuang !== 'Ruang 1' && existingRuang !== '1'
-      ? existingRuang
-      : incomingRuang && incomingRuang !== 'Ruang 1' && incomingRuang !== '1'
-      ? incomingRuang
-      : primary.ruang || 'Ruang 1';
+  let resolvedRuang: string;
+  if (incMetaTs !== existMetaTs) {
+    resolvedRuang = incMetaTs > existMetaTs ? incomingRuang : existingRuang;
+  } else {
+    resolvedRuang =
+      existingRuang && existingRuang !== 'Ruang 1' && existingRuang !== '1'
+        ? existingRuang
+        : incomingRuang && incomingRuang !== 'Ruang 1' && incomingRuang !== '1'
+        ? incomingRuang
+        : primary.ruang || 'Ruang 1';
+  }
 
-  const maxResetAt = Math.max(
-    typeof existing.lastResetAt === 'number' ? existing.lastResetAt : 0,
-    typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0
-  );
+  const preferIncomingDraft =
+    incDraftTs > existDraftTs ||
+    (incDraftTs === existDraftTs && incomingDraftCount >= existingDraftCount);
+  const draftSource = preferIncomingDraft ? incoming : existing;
+  const fallbackDraftSource = preferIncomingDraft ? existing : incoming;
 
   const bestDraftAnswers =
-    incomingDraftCount > existingDraftCount
-      ? incoming.draftAnswers
-      : existingDraftCount > 0
-      ? existing.draftAnswers
-      : incoming.draftAnswers || existing.draftAnswers;
+    draftSource.draftAnswers &&
+    typeof draftSource.draftAnswers === 'object' &&
+    Object.keys(draftSource.draftAnswers).length > 0
+      ? draftSource.draftAnswers
+      : fallbackDraftSource.draftAnswers;
+  const bestDraftPackageId =
+    draftSource.draftPackageId || fallbackDraftSource.draftPackageId;
+  const bestDraftRemainingSeconds =
+    typeof draftSource.draftRemainingSeconds === 'number'
+      ? draftSource.draftRemainingSeconds
+      : fallbackDraftSource.draftRemainingSeconds;
 
-  return {
+  const finishedAfterViolation =
+    (existing.loginState === 'Selesai' && existLoginTs > maxViolationTs) ||
+    (incoming.loginState === 'Selesai' && incLoginTs > maxViolationTs);
+
+  const isLocked =
+    !finishedAfterViolation &&
+    maxViolationTs > 0 &&
+    maxViolationTs > maxResetAt;
+
+  let resolvedLoginState = 'Belum Login';
+  let resolvedRequestReset = false;
+  let resolvedViolationReason: string | undefined = undefined;
+  let resolvedViolationAt: string | undefined = undefined;
+  let resolvedViolationSchema: number | undefined = undefined;
+  let resolvedViolationTimestamp: number | undefined = undefined;
+  let resolvedViolationCount: number | undefined = undefined;
+
+  if (isLocked) {
+    const vSource = incViolationTs >= existViolationTs ? incoming : existing;
+    const vFallback = incViolationTs >= existViolationTs ? existing : incoming;
+    resolvedLoginState = 'Terkunci (Pelanggaran)';
+    resolvedRequestReset = true;
+    resolvedViolationSchema = 3;
+    resolvedViolationTimestamp = maxViolationTs;
+    resolvedViolationReason =
+      vSource.violationReason ||
+      vFallback.violationReason ||
+      'Pelanggaran keamanan ujian CBT';
+    resolvedViolationAt = vSource.violationAt || vFallback.violationAt;
+    resolvedViolationCount = Math.max(
+      typeof existing.violationCount === 'number' ? existing.violationCount : 0,
+      typeof incoming.violationCount === 'number' ? incoming.violationCount : 0,
+      1
+    );
+  } else {
+    resolvedRequestReset = false;
+    if (maxResetAt > 0 && maxResetAt >= maxLoginUpdatedAt) {
+      resolvedLoginState = 'Belum Login';
+    } else if (maxLoginUpdatedAt > 0) {
+      const loginSource = incLoginTs >= existLoginTs ? incoming : existing;
+      const loginFallback = incLoginTs >= existLoginTs ? existing : incoming;
+      const candidateState =
+        loginSource.loginState &&
+        loginSource.loginState !== 'Terkunci (Pelanggaran)'
+          ? loginSource.loginState
+          : loginFallback.loginState &&
+            loginFallback.loginState !== 'Terkunci (Pelanggaran)'
+          ? loginFallback.loginState
+          : 'Belum Login';
+      resolvedLoginState = candidateState;
+    } else {
+      const candidateA =
+        incoming.loginState === 'Terkunci (Pelanggaran)'
+          ? 'Belum Login'
+          : incoming.loginState || 'Belum Login';
+      const candidateB =
+        existing.loginState === 'Terkunci (Pelanggaran)'
+          ? 'Belum Login'
+          : existing.loginState || 'Belum Login';
+      resolvedLoginState =
+        getServerLoginPriority(candidateA) >= getServerLoginPriority(candidateB)
+          ? candidateA
+          : candidateB;
+    }
+    const maxVCount = Math.max(
+      typeof existing.violationCount === 'number' ? existing.violationCount : 0,
+      typeof incoming.violationCount === 'number' ? incoming.violationCount : 0
+    );
+    if (resolvedLoginState === 'Selesai') {
+      resolvedViolationCount = 0;
+    } else if (maxVCount > 0) {
+      resolvedViolationCount = maxVCount;
+    }
+  }
+
+  const result: Record<string, any> = {
     ...secondary,
     ...primary,
     id: primary.id || secondary.id,
     username: primary.username || secondary.username,
     password: primary.password || secondary.password,
-    status: existingIsActive || incomingIsActive ? 'Active' : primary.status,
+    status: resolvedStatus,
     ruang: resolvedRuang,
     kelompok:
       resolvedRuang !== 'Ruang 1'
         ? resolvedRuang
         : primary.kelompok || secondary.kelompok || 'Ruang 1',
-    loginState:
-      incomingPriority > existingPriority
-        ? incoming.loginState
-        : existing.loginState,
-    ...(bestDraftAnswers ? { draftAnswers: bestDraftAnswers } : {}),
-    ...(maxResetAt > 0 ? { lastResetAt: maxResetAt } : {}),
+    loginState: resolvedLoginState,
+    requestReset: resolvedRequestReset,
   };
+
+  if (isLocked) {
+    result.violationReason = resolvedViolationReason;
+    result.violationAt = resolvedViolationAt;
+    result.violationSchema = resolvedViolationSchema;
+    result.violationTimestamp = resolvedViolationTimestamp;
+    result.violationCount = resolvedViolationCount;
+  } else {
+    delete result.violationReason;
+    delete result.violationAt;
+    delete result.violationSchema;
+    delete result.violationTimestamp;
+    if (resolvedViolationCount !== undefined) {
+      result.violationCount = resolvedViolationCount;
+    } else {
+      delete result.violationCount;
+    }
+  }
+
+  if (resolvedLoginState === 'Selesai') {
+    delete result.draftAnswers;
+    delete result.draftPackageId;
+    delete result.draftRemainingSeconds;
+  } else {
+    if (bestDraftAnswers) result.draftAnswers = bestDraftAnswers;
+    if (bestDraftPackageId) result.draftPackageId = bestDraftPackageId;
+    if (typeof bestDraftRemainingSeconds === 'number') {
+      result.draftRemainingSeconds = bestDraftRemainingSeconds;
+    }
+  }
+
+  if (maxResetAt > 0) result.lastResetAt = maxResetAt;
+  if (maxLoginUpdatedAt > 0) result.loginUpdatedAt = maxLoginUpdatedAt;
+  if (maxMetaUpdatedAt > 0) result.metaUpdatedAt = maxMetaUpdatedAt;
+  if (maxDraftUpdatedAt > 0) result.draftUpdatedAt = maxDraftUpdatedAt;
+
+  return result;
 }
 
 function sanitizeParticipantsList(
@@ -535,11 +738,14 @@ function sanitizeParticipantsList(
     ? rawList.filter((item) => !isDefaultDemoRow(item))
     : rawList;
 
+  const existingById = new Map<string, Record<string, any>>();
   const existingByUser = new Map<string, Record<string, any>>();
   const existingByNameKelas = new Map<string, Record<string, any>>();
   if (Array.isArray(existingList)) {
     for (const item of existingList) {
       if (item && typeof item === 'object') {
+        const id = String((item as any).id || '').trim();
+        if (id) existingById.set(id, item as Record<string, any>);
         const u = String((item as any).username || '')
           .trim()
           .toUpperCase();
@@ -553,50 +759,25 @@ function sanitizeParticipantsList(
   const normalizedList = baseList
     .filter((item) => item && typeof item === 'object')
     .map((item) => {
-      const row = { ...(item as Record<string, any>) };
+      const rawRow = { ...(item as Record<string, any>) };
+      const cleanId = String(rawRow.id || '').trim();
       const cleanUser =
-        typeof row.username === 'string'
-          ? row.username.trim().toUpperCase()
+        typeof rawRow.username === 'string'
+          ? rawRow.username.trim().toUpperCase()
           : '';
-      const nk = getServerParticipantNameKelasKey(row);
+      const nk = getServerParticipantNameKelasKey(rawRow);
       const prevRow =
         (cleanUser ? existingByUser.get(cleanUser) : undefined) ||
+        (cleanId ? existingById.get(cleanId) : undefined) ||
         (nk ? existingByNameKelas.get(nk) : undefined);
 
-      const maxResetAt = Math.max(
-        typeof row.lastResetAt === 'number' ? row.lastResetAt : 0,
-        typeof prevRow?.lastResetAt === 'number' ? prevRow.lastResetAt : 0
-      );
-      if (maxResetAt > 0) {
-        row.lastResetAt = maxResetAt;
-      }
+      // Reconcile against prevRow using CRDT timestamps so neither violations nor resets are ever lost
+      const row = prevRow
+        ? mergeServerDuplicateRows(prevRow, rawRow)
+        : rawRow;
 
-      if (
-        row.violationCount === undefined &&
-        typeof prevRow?.violationCount === 'number'
-      ) {
-        row.violationCount = prevRow.violationCount;
-      }
-      if (
-        row.draftAnswers === undefined &&
-        prevRow?.draftAnswers &&
-        typeof prevRow.draftAnswers === 'object'
-      ) {
-        row.draftAnswers = prevRow.draftAnswers;
-      }
-      if (
-        row.draftPackageId === undefined &&
-        typeof prevRow?.draftPackageId === 'string'
-      ) {
-        row.draftPackageId = prevRow.draftPackageId;
-      }
-      if (
-        row.draftRemainingSeconds === undefined &&
-        typeof prevRow?.draftRemainingSeconds === 'number'
-      ) {
-        row.draftRemainingSeconds = prevRow.draftRemainingSeconds;
-      }
-
+      const maxResetAt =
+        typeof row.lastResetAt === 'number' ? row.lastResetAt : 0;
       const vTimestamp =
         typeof row.violationTimestamp === 'number' ? row.violationTimestamp : 0;
       const isValidViolation =
@@ -695,17 +876,21 @@ function applyParticipantPatches(
     });
 
     if (matchIndex !== -1) {
-      const target = { ...baseList[matchIndex] };
+      const existingRow = baseList[matchIndex];
+      const patchedCandidate = { ...existingRow };
       for (const [key, val] of Object.entries(patch)) {
         if (val === undefined || val === null) {
-          delete target[key];
+          delete patchedCandidate[key];
         } else {
-          target[key] = val;
+          patchedCandidate[key] = val;
         }
       }
-      baseList[matchIndex] = target;
+      baseList[matchIndex] = mergeServerDuplicateRows(
+        existingRow,
+        patchedCandidate
+      );
     } else if (patchUser && patch.namaPeserta) {
-      // Only append if the list is currently empty (do not pollute 135 uploaded rows with unknown demo rows)
+      // Only append if the list is currently empty (do not pollute uploaded rows with unknown demo rows)
       if (baseList.length === 0) {
         baseList.push({
           id: patchId || `p_${Date.now()}`,
@@ -894,6 +1079,39 @@ export default async function handler(req: any, res: any) {
         });
       }
 
+      const combinedDeletedParticipantIds = Array.from(
+        new Set([
+          ...(Array.isArray(existing.deletedParticipantIds)
+            ? existing.deletedParticipantIds
+            : []),
+          ...(Array.isArray(body.deletedParticipantIds)
+            ? body.deletedParticipantIds
+            : []),
+        ])
+      );
+
+      const combinedDeletedScheduleIds = Array.from(
+        new Set([
+          ...(Array.isArray(existing.deletedScheduleIds)
+            ? existing.deletedScheduleIds
+            : []),
+          ...(Array.isArray(body.deletedScheduleIds)
+            ? body.deletedScheduleIds
+            : []),
+        ])
+      );
+
+      const combinedDeletedPackageIds = Array.from(
+        new Set([
+          ...(Array.isArray(existing.deletedPackageIds)
+            ? existing.deletedPackageIds
+            : []),
+          ...(Array.isArray(body.deletedPackageIds)
+            ? body.deletedPackageIds
+            : []),
+        ])
+      );
+
       let nextParticipants: Record<string, any>[] | undefined;
 
       if (body.participantPatch !== undefined) {
@@ -905,7 +1123,7 @@ export default async function handler(req: any, res: any) {
         nextParticipants = resolveIncomingParticipants(
           body.participants,
           existing.participants,
-          body.deletedParticipantIds,
+          combinedDeletedParticipantIds,
           Boolean(body.forceReplaceParticipants)
         );
       } else if (Array.isArray(existing.participants)) {
@@ -917,7 +1135,7 @@ export default async function handler(req: any, res: any) {
         nextSchedules = resolveIncomingSchedules(
           body.schedules,
           existing.schedules,
-          body.deletedScheduleIds,
+          combinedDeletedScheduleIds,
           Boolean(body.forceReplaceSchedules)
         );
       } else if (Array.isArray(existing.schedules)) {
@@ -929,7 +1147,7 @@ export default async function handler(req: any, res: any) {
         nextPackages = resolveIncomingPackages(
           body.packages,
           existing.packages,
-          body.deletedPackageIds,
+          combinedDeletedPackageIds,
           Boolean(body.forceReplacePackages)
         );
       } else if (Array.isArray(existing.packages)) {
@@ -963,14 +1181,27 @@ export default async function handler(req: any, res: any) {
         nextResultsHistory = existing.resultsHistory as Record<string, any>[];
       }
 
+      // Resolve activeToken by tokenUpdatedAt so stale instances never revert token rotation
+      const existTokenTs =
+        typeof existing.tokenUpdatedAt === 'number'
+          ? existing.tokenUpdatedAt
+          : 0;
+      const incTokenTs =
+        typeof body.tokenUpdatedAt === 'number' ? body.tokenUpdatedAt : 0;
+      let resolvedActiveToken = existing.activeToken;
+      let resolvedTokenUpdatedAt = existTokenTs;
+      if (typeof body.activeToken === 'string' && body.activeToken.trim()) {
+        if (incTokenTs >= existTokenTs || !existing.activeToken) {
+          resolvedActiveToken = body.activeToken.trim().toUpperCase();
+          resolvedTokenUpdatedAt = Math.max(incTokenTs, existTokenTs, Date.now());
+        }
+      }
+
       // Strip transient transport keys before persisting
       const {
         participantPatch: _ignorePatch,
-        deletedParticipantIds: _ignoreDeleted,
         forceReplaceParticipants: _ignoreForce,
-        deletedScheduleIds: _ignoreDeletedSchedules,
         forceReplaceSchedules: _ignoreForceSchedules,
-        deletedPackageIds: _ignoreDeletedPackages,
         forceReplacePackages: _ignoreForcePackages,
         ...cleanBody
       } = body as Record<string, unknown>;
@@ -978,6 +1209,12 @@ export default async function handler(req: any, res: any) {
       const merged: Record<string, unknown> = {
         ...existing,
         ...cleanBody,
+        ...(resolvedActiveToken
+          ? {
+              activeToken: resolvedActiveToken,
+              tokenUpdatedAt: resolvedTokenUpdatedAt,
+            }
+          : {}),
         ...(nextPackages !== undefined ? { packages: nextPackages } : {}),
         ...(nextSchedules !== undefined ? { schedules: nextSchedules } : {}),
         ...(nextParticipants !== undefined
@@ -986,6 +1223,9 @@ export default async function handler(req: any, res: any) {
         ...(nextResultsHistory !== undefined
           ? { resultsHistory: nextResultsHistory }
           : {}),
+        deletedParticipantIds: combinedDeletedParticipantIds,
+        deletedScheduleIds: combinedDeletedScheduleIds,
+        deletedPackageIds: combinedDeletedPackageIds,
         updatedAt: Date.now(),
       };
 
