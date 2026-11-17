@@ -789,29 +789,63 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const displayPackages = useMemo(() => {
     let currentMapelList: any[] = [...DEFAULT_MAPEL_LIST];
+    const deletedCodesSet = new Set<string>();
+    const deletedNamesSet = new Set<string>();
+    let isCustomMapelConfigured = false;
     try {
       const saved = localStorage.getItem('cbt_admin_settings');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed.mapelList)) {
-          currentMapelList = parsed.mapelList.map((m: any) => ({
-            ...m,
-            tingkat: getTargetClassFromMapel(m),
-          }));
-          if (currentMapelList.length < 10) {
-            const existingCodes = new Set(
-              currentMapelList.map((m: any) => (m.kode || '').trim().toUpperCase())
-            );
-            DEFAULT_MAPEL_LIST.forEach((defM: any) => {
-              const defCode = (defM.kode || '').trim().toUpperCase();
-              if (defCode && !existingCodes.has(defCode)) {
-                currentMapelList.push({
-                  ...defM,
-                  tingkat: getTargetClassFromMapel(defM),
-                });
-                existingCodes.add(defCode);
+        if (parsed && typeof parsed === 'object') {
+          isCustomMapelConfigured = Boolean(parsed.customMapelConfigured);
+          if (Array.isArray(parsed.deletedMapelCodes)) {
+            parsed.deletedMapelCodes.forEach((c: any) => {
+              if (typeof c === 'string' && c.trim()) {
+                deletedCodesSet.add(c.trim().toUpperCase());
               }
             });
+          }
+          if (Array.isArray(parsed.deletedMapelNames)) {
+            parsed.deletedMapelNames.forEach((n: any) => {
+              if (typeof n === 'string' && n.trim()) {
+                deletedNamesSet.add(n.trim().toLowerCase());
+              }
+            });
+          }
+          if (Array.isArray(parsed.mapelList)) {
+            currentMapelList = parsed.mapelList
+              .filter((m: any) => m && typeof m === 'object')
+              .map((m: any) => ({
+                ...m,
+                tingkat: getTargetClassFromMapel(m),
+              }))
+              .filter((m: any) => {
+                const mKode = String(m.kode || '').trim().toUpperCase();
+                const mNama = String(m.nama || '').trim().toLowerCase();
+                if (mKode && deletedCodesSet.has(mKode)) return false;
+                if (mNama && deletedNamesSet.has(mNama)) return false;
+                return true;
+              });
+            if (
+              !isCustomMapelConfigured &&
+              deletedCodesSet.size === 0 &&
+              deletedNamesSet.size === 0 &&
+              currentMapelList.length < 10
+            ) {
+              const existingCodes = new Set(
+                currentMapelList.map((m: any) => (m.kode || '').trim().toUpperCase())
+              );
+              DEFAULT_MAPEL_LIST.forEach((defM: any) => {
+                const defCode = (defM.kode || '').trim().toUpperCase();
+                if (defCode && !existingCodes.has(defCode)) {
+                  currentMapelList.push({
+                    ...defM,
+                    tingkat: getTargetClassFromMapel(defM),
+                  });
+                  existingCodes.add(defCode);
+                }
+              });
+            }
           }
         }
       }
@@ -823,31 +857,37 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     const processedPkgIds = new Set<string>();
 
     currentMapelList.forEach((mapel: any) => {
+      if (!mapel || typeof mapel !== 'object') return;
       const cleanKode = (mapel.kode || '').trim().toUpperCase();
       const cleanNama = (mapel.nama || '')
         .replace(/^Simulasi TKA\s*-\s*/i, '')
         .trim()
         .toLowerCase();
+      if (cleanKode && deletedCodesSet.has(cleanKode)) return;
+      if (cleanNama && deletedNamesSet.has(cleanNama)) return;
+
       const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
+      const targetClass = getTargetClassFromMapel(mapel);
+
       const existing = packages.find((p) => {
-        if (processedPkgIds.has(p.id)) return false;
+        if (!p || processedPkgIds.has(p.id)) return false;
         if (p.id === newPkgId) return true;
         const pCode = (p.code || '').trim().toUpperCase();
         const pTitle = (p.title || '')
           .replace(/^Simulasi TKA\s*-\s*/i, '')
           .trim()
           .toLowerCase();
-        return (
-          (cleanKode.length > 0 &&
-            (pCode === cleanKode ||
-              pCode.startsWith(cleanKode + '-') ||
-              cleanKode.startsWith(pCode + '-'))) ||
-          (cleanNama.length > 0 && pTitle === cleanNama)
-        );
+        if (cleanKode.length > 0 && pCode === cleanKode) return true;
+        if (
+          cleanNama.length > 0 &&
+          pTitle === cleanNama &&
+          getPkgClass(p) === targetClass
+        ) {
+          return true;
+        }
+        return false;
       });
-
-      const targetClass = getTargetClassFromMapel(mapel);
 
       if (existing && !processedPkgIds.has(existing.id)) {
         processedPkgIds.add(existing.id);
@@ -881,7 +921,16 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     });
 
     packages.forEach((pkg) => {
+      if (!pkg || typeof pkg !== 'object') return;
       if (!processedPkgIds.has(pkg.id)) {
+        const pCode = (pkg.code || '').trim().toUpperCase();
+        const pTitle = (pkg.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
+        if (pCode && deletedCodesSet.has(pCode)) return;
+        if (pTitle && deletedNamesSet.has(pTitle)) return;
+
         processedPkgIds.add(pkg.id);
         const cleanedQuestions = Array.isArray(pkg.questions)
           ? pkg.questions.filter(
@@ -906,22 +955,39 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     return filtered.length > 0 ? filtered : displayPackages;
   }, [displayPackages, statusTesKelas]);
 
-  const selectedPackage =
+  const fallbackEmptyPackage: ExamPackage = useMemo(
+    () => ({
+      id: 'pkg_empty_fallback',
+      code: 'MAPEL-00',
+      title: 'Belum Ada Mata Pelajaran',
+      level: 'SMA / MA / SMK / Sederajat',
+      subtest: 'Wajib Umum',
+      durationMinutes: 90,
+      targetClass: statusTesKelas !== 'Semua Kelas' ? statusTesKelas : 'Kelas X',
+      questions: [],
+    }),
+    [statusTesKelas]
+  );
+
+  const selectedPackage: ExamPackage =
     visiblePackagesForKelas.find((p) => p.id === selectedPkgId) ||
     displayPackages.find((p) => p.id === selectedPkgId) ||
     visiblePackagesForKelas[0] ||
-    displayPackages[0];
+    displayPackages[0] ||
+    fallbackEmptyPackage;
 
   const [lastUploadedWordFile, setLastUploadedWordFile] = useState<string>('');
 
   const syncSelectedPackageQuestions = (nextQuestions: Question[]) => {
-    if (!selectedPackage) return;
+    if (!selectedPackage || selectedPackage.id === 'pkg_empty_fallback') return;
     const renumbered = nextQuestions.map((q, idx) => ({
       ...q,
       number: idx + 1,
     }));
+    const preservedClass = getPkgClass(selectedPackage);
     const updatedSelectedPackage: ExamPackage = {
       ...selectedPackage,
+      targetClass: preservedClass,
       questions: renumbered,
     };
     const cleanSelectedKode = (selectedPackage.code || '').trim().toUpperCase();
@@ -941,22 +1007,21 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
           .replace(/^Simulasi TKA\s*-\s*/i, '')
           .trim()
           .toLowerCase();
-        const isMatch =
-          pkg.id === selectedPackage.id ||
-          (cleanSelectedKode.length > 0 &&
-            (pCode === cleanSelectedKode ||
-              pCode.startsWith(cleanSelectedKode + '-') ||
-              cleanSelectedKode.startsWith(pCode + '-'))) ||
-          (cleanSelectedNama.length > 0 && pTitle === cleanSelectedNama);
+        const isExactMatch =
+          !matched &&
+          (pkg.id === selectedPackage.id ||
+            (cleanSelectedKode.length > 0 && pCode === cleanSelectedKode) ||
+            (cleanSelectedNama.length > 0 &&
+              pTitle === cleanSelectedNama &&
+              getPkgClass(pkg) === preservedClass));
 
-        if (isMatch) {
-          if (!matched) {
-            matched = true;
-            nextList.push({
-              ...updatedSelectedPackage,
-              id: pkg.id,
-            });
-          }
+        if (isExactMatch) {
+          matched = true;
+          nextList.push({
+            ...updatedSelectedPackage,
+            id: pkg.id,
+            targetClass: preservedClass,
+          });
         } else {
           nextList.push(pkg);
         }
@@ -1284,31 +1349,51 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     // 2. Hapus dari mapelList di cbt_admin_settings & simpan ke localStorage
     try {
       const saved = localStorage.getItem('cbt_admin_settings');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed.mapelList)) {
-          const updatedList = parsed.mapelList.filter((m: any) => {
-            const mKode = (m.kode || '').trim().toUpperCase();
-            const mNama = (m.nama || '')
-              .replace(/^Simulasi TKA\s*-\s*/i, '')
-              .trim()
-              .toLowerCase();
-            if (cleanTargetKode && mKode === cleanTargetKode) return false;
-            if (cleanTargetNama && mNama === cleanTargetNama) return false;
-            return true;
-          });
-          parsed.mapelList = updatedList;
-          localStorage.setItem('cbt_admin_settings', JSON.stringify(parsed));
-        }
-      }
+      const parsed = saved ? JSON.parse(saved) : {};
+      const baseMapelList = Array.isArray(parsed.mapelList)
+        ? parsed.mapelList
+        : DEFAULT_MAPEL_LIST;
+      const updatedList = baseMapelList.filter((m: any) => {
+        const mKode = (m?.kode || '').trim().toUpperCase();
+        const mNama = (m?.nama || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
+        if (cleanTargetKode && mKode === cleanTargetKode) return false;
+        if (cleanTargetNama && mNama === cleanTargetNama) return false;
+        return true;
+      });
+      const nextDeletedCodes = Array.from(
+        new Set([
+          ...(Array.isArray(parsed.deletedMapelCodes)
+            ? parsed.deletedMapelCodes
+            : []),
+          ...(cleanTargetKode ? [cleanTargetKode] : []),
+        ])
+      );
+      const nextDeletedNames = Array.from(
+        new Set([
+          ...(Array.isArray(parsed.deletedMapelNames)
+            ? parsed.deletedMapelNames
+            : []),
+          ...(cleanTargetNama ? [cleanTargetNama] : []),
+        ])
+      );
+      parsed.mapelList = updatedList;
+      parsed.customMapelConfigured = true;
+      parsed.deletedMapelCodes = nextDeletedCodes;
+      parsed.deletedMapelNames = nextDeletedNames;
+      localStorage.setItem('cbt_admin_settings', JSON.stringify(parsed));
     } catch {
       // ignore
     }
 
     // 3. Update selectedPkgId jika yang dihapus sedang dipilih
     const remainingVisible = displayPackages.filter((p) => p.id !== pkgToDelete.id);
-    if (selectedPkgId === pkgToDelete.id && remainingVisible.length > 0) {
-      setSelectedPkgId(remainingVisible[0].id);
+    if (selectedPkgId === pkgToDelete.id) {
+      setSelectedPkgId(
+        remainingVisible.length > 0 ? remainingVisible[0].id : 'pkg_empty_fallback'
+      );
     }
 
     showNotice(`Mata pelajaran "${pkgTitle}" (${pkgToDelete.code}) berhasil dihapus.`);
@@ -2688,6 +2773,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                         onChange={(e) => setSelectedPkgId(e.target.value)}
                         className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
                       >
+                        {displayPackages.length === 0 && (
+                          <option value="pkg_empty_fallback">
+                            Belum Ada Mata Pelajaran Terdaftar
+                          </option>
+                        )}
                         {STATUS_TES_CLASS_GROUPS.filter(
                           (groupName) =>
                             statusTesKelas === 'Semua Kelas' ||

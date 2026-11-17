@@ -438,14 +438,14 @@ export const TestConfirmationView: React.FC<TestConfirmationViewProps> = ({
             <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
               <span className="text-xs font-semibold text-slate-500">Nama Tes</span>
               <span className="text-sm font-semibold text-slate-800">
-                {examPackage.title}
+                {examPackage?.title || 'Belum Ada Mata Pelajaran'}
               </span>
             </div>
 
             <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
               <span className="text-xs font-semibold text-slate-500">Subtes</span>
               <span className="text-sm font-medium text-slate-700">
-                {examPackage.subtest}
+                {examPackage?.subtest || 'Wajib Umum'}
               </span>
             </div>
 
@@ -466,7 +466,7 @@ export const TestConfirmationView: React.FC<TestConfirmationViewProps> = ({
                 Alokasi Waktu Tes
               </span>
               <span className="text-sm font-mono font-bold text-slate-800">
-                {examPackage.durationMinutes} Menit ({examPackage.questions.length} Butir Soal)
+                {examPackage?.durationMinutes || 90} Menit ({Array.isArray(examPackage?.questions) ? examPackage.questions.length : 0} Butir Soal)
               </span>
             </div>
           </div>

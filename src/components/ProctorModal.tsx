@@ -56,8 +56,17 @@ export const ProctorModal: React.FC<ProctorModalProps> = ({
 
   if (!isOpen) return null;
 
-  const selectedPackage =
-    packages.find((p) => p.id === selectedPkgId) || packages[0];
+  const selectedPackage: ExamPackage =
+    packages.find((p) => p.id === selectedPkgId) ||
+    packages[0] || {
+      id: 'pkg_empty_fallback',
+      code: 'MAPEL-00',
+      title: 'Belum Ada Mata Pelajaran',
+      level: 'SMA / MA / SMK / Sederajat',
+      subtest: 'Wajib Umum',
+      durationMinutes: 90,
+      questions: [],
+    };
 
   const notify = (msg: string) => {
     setSavedNotice(msg);

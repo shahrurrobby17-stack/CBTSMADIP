@@ -755,7 +755,8 @@ export function getTargetClassFromMapel(mapel: {
   return 'Kelas X';
 }
 
-export const getPkgClass = (pkg: ExamPackage): string => {
+export const getPkgClass = (pkg?: ExamPackage | null): string => {
+  if (!pkg) return 'Kelas X';
   if (
     pkg.targetClass &&
     pkg.targetClass !== 'Semua Kelas' &&
@@ -1087,6 +1088,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     adminList: defaultAdminList,
     kelasList: defaultKelasList,
     mapelList: defaultMapelList,
+    customMapelConfigured: false,
+    deletedMapelCodes: [] as string[],
+    deletedMapelNames: [] as string[],
     durasiDefault: 90,
     minMinutesBeforeFinish: 45,
     acakSoal: true,
@@ -1104,18 +1108,43 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       const saved = localStorage.getItem('cbt_admin_settings');
       if (saved) {
         const parsed = JSON.parse(saved);
+        const isCustomMapelConfigured = Boolean(parsed.customMapelConfigured);
+        const deletedCodesSet = new Set<string>(
+          Array.isArray(parsed.deletedMapelCodes)
+            ? parsed.deletedMapelCodes.map((c: any) => String(c || '').trim().toUpperCase())
+            : []
+        );
+        const deletedNamesSet = new Set<string>(
+          Array.isArray(parsed.deletedMapelNames)
+            ? parsed.deletedMapelNames.map((n: any) => String(n || '').trim().toLowerCase())
+            : []
+        );
+
         const rawMapelList = Array.isArray(parsed.mapelList)
           ? parsed.mapelList
           : defaultMapelList;
 
-        let normalizedMapelList = rawMapelList.map((m: any) => ({
-          ...m,
-          tingkat: getTargetClassFromMapel(m),
-        }));
+        let normalizedMapelList = rawMapelList
+          .filter((m: any) => m && typeof m === 'object')
+          .map((m: any) => ({
+            ...m,
+            tingkat: getTargetClassFromMapel(m),
+          }))
+          .filter((m: any) => {
+            const mKode = String(m.kode || '').trim().toUpperCase();
+            const mNama = String(m.nama || '').trim().toLowerCase();
+            if (mKode && deletedCodesSet.has(mKode)) return false;
+            if (mNama && deletedNamesSet.has(mNama)) return false;
+            return true;
+          });
 
-        // Jika tersisa kurang dari 10 mapel (misalnya hanya 5 mapel awal),
-        // otomatis lengkapi dengan mapel standar yang belum ada agar kartu mapel lengkap 10
-        if (normalizedMapelList.length < 10) {
+        // Hanya lengkapi dengan mapel standar jika admin belum pernah menghapus/mengatur mapel secara kustom
+        if (
+          !isCustomMapelConfigured &&
+          deletedCodesSet.size === 0 &&
+          deletedNamesSet.size === 0 &&
+          normalizedMapelList.length < 10
+        ) {
           const existingCodes = new Set(
             normalizedMapelList.map((m: any) => (m.kode || '').trim().toUpperCase())
           );
@@ -1354,9 +1383,18 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     };
 
     const updatedList = [...currentList, newEntry];
+    const nextDeletedCodes = (appConfig.deletedMapelCodes || []).filter(
+      (c) => c.trim().toUpperCase() !== cleanKode.toUpperCase()
+    );
+    const nextDeletedNames = (appConfig.deletedMapelNames || []).filter(
+      (n) => n.trim().toLowerCase() !== cleanNama.toLowerCase()
+    );
     const updatedConfig = {
       ...appConfig,
       mapelList: updatedList,
+      customMapelConfigured: true,
+      deletedMapelCodes: nextDeletedCodes,
+      deletedMapelNames: nextDeletedNames,
     };
     setAppConfig(updatedConfig);
     try {
@@ -1647,10 +1685,25 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           return;
         }
 
+        const addedCodesUpper = new Set(
+          newMapels.map((m) => String(m.kode || '').trim().toUpperCase())
+        );
+        const addedNamesLower = new Set(
+          newMapels.map((m) => String(m.nama || '').trim().toLowerCase())
+        );
+        const nextDeletedCodes = (appConfig.deletedMapelCodes || []).filter(
+          (c) => !addedCodesUpper.has(c.trim().toUpperCase())
+        );
+        const nextDeletedNames = (appConfig.deletedMapelNames || []).filter(
+          (n) => !addedNamesLower.has(n.trim().toLowerCase())
+        );
         const updatedList = [...currentList, ...newMapels];
         const updatedConfig = {
           ...appConfig,
           mapelList: updatedList,
+          customMapelConfigured: true,
+          deletedMapelCodes: nextDeletedCodes,
+          deletedMapelNames: nextDeletedNames,
         };
         setAppConfig(updatedConfig);
         try {
@@ -1784,12 +1837,38 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       ? appConfig.mapelList
       : defaultMapelList;
     const itemToDelete = currentList.find((m: any) => m.kode === kodeToDelete);
+    const cleanTargetKode = (kodeToDelete || '').trim().toUpperCase();
+    const cleanTargetNama = (itemToDelete?.nama || '')
+      .replace(/^Simulasi TKA\s*-\s*/i, '')
+      .trim()
+      .toLowerCase();
+
     const updatedList = currentList.filter(
       (m: { kode: string }) => m.kode !== kodeToDelete
     );
+    const nextDeletedCodes = Array.from(
+      new Set([
+        ...(Array.isArray(appConfig.deletedMapelCodes)
+          ? appConfig.deletedMapelCodes
+          : []),
+        ...(cleanTargetKode ? [cleanTargetKode] : []),
+      ])
+    );
+    const nextDeletedNames = Array.from(
+      new Set([
+        ...(Array.isArray(appConfig.deletedMapelNames)
+          ? appConfig.deletedMapelNames
+          : []),
+        ...(cleanTargetNama ? [cleanTargetNama] : []),
+      ])
+    );
+
     const updatedConfig = {
       ...appConfig,
       mapelList: updatedList,
+      customMapelConfigured: true,
+      deletedMapelCodes: nextDeletedCodes,
+      deletedMapelNames: nextDeletedNames,
     };
     setAppConfig(updatedConfig);
     try {
@@ -1799,8 +1878,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     }
 
     // Juga hapus dari daftar paket soal CBT agar sinkron di status tes
-    const cleanTargetKode = kodeToDelete.trim().toUpperCase();
-    const cleanTargetNama = (itemToDelete?.nama || '').trim().toLowerCase();
     onUpdatePackages((prevPackages) => {
       const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
       return baseList.filter((p) => {
@@ -2428,36 +2505,52 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     const currentMapelList = Array.isArray(appConfig.mapelList)
       ? appConfig.mapelList
       : defaultMapelList;
+    const deletedCodesSet = new Set<string>(
+      Array.isArray(appConfig.deletedMapelCodes)
+        ? appConfig.deletedMapelCodes.map((c) => String(c || '').trim().toUpperCase())
+        : []
+    );
+    const deletedNamesSet = new Set<string>(
+      Array.isArray(appConfig.deletedMapelNames)
+        ? appConfig.deletedMapelNames.map((n) => String(n || '').trim().toLowerCase())
+        : []
+    );
 
     const result: ExamPackage[] = [];
     const processedPkgIds = new Set<string>();
 
     currentMapelList.forEach((mapel: any) => {
+      if (!mapel || typeof mapel !== 'object') return;
       const cleanKode = (mapel.kode || '').trim().toUpperCase();
       const cleanNama = (mapel.nama || '')
         .replace(/^Simulasi TKA\s*-\s*/i, '')
         .trim()
         .toLowerCase();
+      if (cleanKode && deletedCodesSet.has(cleanKode)) return;
+      if (cleanNama && deletedNamesSet.has(cleanNama)) return;
+
       const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
+      const targetClass = getTargetClassFromMapel(mapel);
+
       const existing = packages.find((p) => {
-        if (processedPkgIds.has(p.id)) return false;
+        if (!p || processedPkgIds.has(p.id)) return false;
         if (p.id === newPkgId) return true;
         const pCode = (p.code || '').trim().toUpperCase();
         const pTitle = (p.title || '')
           .replace(/^Simulasi TKA\s*-\s*/i, '')
           .trim()
           .toLowerCase();
-        return (
-          (cleanKode.length > 0 &&
-            (pCode === cleanKode ||
-              pCode.startsWith(cleanKode + '-') ||
-              cleanKode.startsWith(pCode + '-'))) ||
-          (cleanNama.length > 0 && pTitle === cleanNama)
-        );
+        if (cleanKode.length > 0 && pCode === cleanKode) return true;
+        if (
+          cleanNama.length > 0 &&
+          pTitle === cleanNama &&
+          getPkgClass(p) === targetClass
+        ) {
+          return true;
+        }
+        return false;
       });
-
-      const targetClass = getTargetClassFromMapel(mapel);
 
       if (existing && !processedPkgIds.has(existing.id)) {
         processedPkgIds.add(existing.id);
@@ -2491,7 +2584,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     });
 
     packages.forEach((pkg) => {
+      if (!pkg || typeof pkg !== 'object') return;
       if (!processedPkgIds.has(pkg.id)) {
+        const pCode = (pkg.code || '').trim().toUpperCase();
+        const pTitle = (pkg.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
+        if (pCode && deletedCodesSet.has(pCode)) return;
+        if (pTitle && deletedNamesSet.has(pTitle)) return;
+
         processedPkgIds.add(pkg.id);
         const cleanedQuestions = Array.isArray(pkg.questions)
           ? pkg.questions.filter(
@@ -2506,7 +2608,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     });
 
     return result;
-  }, [appConfig.mapelList, packages]);
+  }, [
+    appConfig.mapelList,
+    appConfig.deletedMapelCodes,
+    appConfig.deletedMapelNames,
+    packages,
+  ]);
 
   const visiblePackagesForKelas = useMemo(() => {
     if (statusTesKelas === 'Semua Kelas') return displayPackages;
@@ -2516,22 +2623,39 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     return filtered.length > 0 ? filtered : displayPackages;
   }, [displayPackages, statusTesKelas]);
 
-  const selectedPackage =
+  const fallbackEmptyPackage: ExamPackage = useMemo(
+    () => ({
+      id: 'pkg_empty_fallback',
+      code: 'MAPEL-00',
+      title: 'Belum Ada Mata Pelajaran',
+      level: 'SMA / MA / SMK / Sederajat',
+      subtest: 'Wajib Umum',
+      durationMinutes: 90,
+      targetClass: statusTesKelas !== 'Semua Kelas' ? statusTesKelas : 'Kelas X',
+      questions: [],
+    }),
+    [statusTesKelas]
+  );
+
+  const selectedPackage: ExamPackage =
     visiblePackagesForKelas.find((p) => p.id === selectedPkgId) ||
     displayPackages.find((p) => p.id === selectedPkgId) ||
     visiblePackagesForKelas[0] ||
-    displayPackages[0];
+    displayPackages[0] ||
+    fallbackEmptyPackage;
 
   const [lastUploadedWordFile, setLastUploadedWordFile] = useState<string>('');
 
   const syncSelectedPackageQuestions = (nextQuestions: Question[]) => {
-    if (!selectedPackage) return;
+    if (!selectedPackage || selectedPackage.id === 'pkg_empty_fallback') return;
     const renumbered = nextQuestions.map((q, idx) => ({
       ...q,
       number: idx + 1,
     }));
+    const preservedClass = getPkgClass(selectedPackage);
     const updatedSelectedPackage: ExamPackage = {
       ...selectedPackage,
+      targetClass: preservedClass,
       questions: renumbered,
     };
     const cleanSelectedKode = (selectedPackage.code || '').trim().toUpperCase();
@@ -2551,22 +2675,21 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           .replace(/^Simulasi TKA\s*-\s*/i, '')
           .trim()
           .toLowerCase();
-        const isMatch =
-          pkg.id === selectedPackage.id ||
-          (cleanSelectedKode.length > 0 &&
-            (pCode === cleanSelectedKode ||
-              pCode.startsWith(cleanSelectedKode + '-') ||
-              cleanSelectedKode.startsWith(pCode + '-'))) ||
-          (cleanSelectedNama.length > 0 && pTitle === cleanSelectedNama);
+        const isExactMatch =
+          !matched &&
+          (pkg.id === selectedPackage.id ||
+            (cleanSelectedKode.length > 0 && pCode === cleanSelectedKode) ||
+            (cleanSelectedNama.length > 0 &&
+              pTitle === cleanSelectedNama &&
+              getPkgClass(pkg) === preservedClass));
 
-        if (isMatch) {
-          if (!matched) {
-            matched = true;
-            nextList.push({
-              ...updatedSelectedPackage,
-              id: pkg.id,
-            });
-          }
+        if (isExactMatch) {
+          matched = true;
+          nextList.push({
+            ...updatedSelectedPackage,
+            id: pkg.id,
+            targetClass: preservedClass,
+          });
         } else {
           nextList.push(pkg);
         }
@@ -2670,9 +2793,29 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       return true;
     });
 
+    const nextDeletedCodes = Array.from(
+      new Set([
+        ...(Array.isArray(appConfig.deletedMapelCodes)
+          ? appConfig.deletedMapelCodes
+          : []),
+        ...(cleanTargetKode ? [cleanTargetKode] : []),
+      ])
+    );
+    const nextDeletedNames = Array.from(
+      new Set([
+        ...(Array.isArray(appConfig.deletedMapelNames)
+          ? appConfig.deletedMapelNames
+          : []),
+        ...(cleanTargetNama ? [cleanTargetNama] : []),
+      ])
+    );
+
     const updatedConfig = {
       ...appConfig,
       mapelList: updatedMapelList,
+      customMapelConfigured: true,
+      deletedMapelCodes: nextDeletedCodes,
+      deletedMapelNames: nextDeletedNames,
     };
     setAppConfig(updatedConfig);
     try {
@@ -2683,8 +2826,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
     // 3. Update selectedPkgId jika yang dihapus sedang dipilih
     const remainingVisible = displayPackages.filter((p) => p.id !== pkgToDelete.id);
-    if (selectedPkgId === pkgToDelete.id && remainingVisible.length > 0) {
-      setSelectedPkgId(remainingVisible[0].id);
+    if (selectedPkgId === pkgToDelete.id) {
+      setSelectedPkgId(
+        remainingVisible.length > 0 ? remainingVisible[0].id : 'pkg_empty_fallback'
+      );
     }
 
     showNotice(`Mata pelajaran "${pkgTitle}" (${pkgToDelete.code}) berhasil dihapus.`);
@@ -5410,20 +5555,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                     )}
                                   </td>
                                   <td className="py-3 px-4 text-right whitespace-nowrap space-x-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setSelectedPkgId(pkg.id);
-                                        triggerUploadWordFile();
-                                      }}
-                                      className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer shadow-2xs transition-colors"
-                                      title={`Upload file soal untuk ${cleanTitle}`}
-                                    >
-                                      <Upload className="w-3 h-3" />
-                                      <span>Upload Soal</span>
-                                    </button>
-                                    {isUploaded && (
+                                    {isUploaded ? (
                                       <button
                                         type="button"
                                         onClick={(e) => {
@@ -5438,6 +5570,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                         <Eye className="w-3 h-3" />
                                         <span>Lihat</span>
                                       </button>
+                                    ) : (
+                                      <span className="text-[11px] text-slate-400 font-mono">
+                                        -
+                                      </span>
                                     )}
                                   </td>
                                 </tr>
@@ -5517,6 +5653,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         onChange={(e) => setSelectedPkgId(e.target.value)}
                         className="px-3 py-1.5 text-xs font-bold bg-white border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-[#0095ff]"
                       >
+                        {displayPackages.length === 0 && (
+                          <option value="pkg_empty_fallback">
+                            Belum Ada Mata Pelajaran Terdaftar
+                          </option>
+                        )}
                         {STATUS_TES_CLASS_GROUPS.filter(
                           (groupName) =>
                             statusTesKelas === 'Semua Kelas' ||

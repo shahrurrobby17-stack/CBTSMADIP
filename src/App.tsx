@@ -74,6 +74,17 @@ const STORAGE_KEYS = {
 
 const MAX_VIOLATION_LIMIT = 6;
 
+const FALLBACK_EMPTY_PACKAGE: ExamPackage = {
+  id: 'pkg_empty_fallback',
+  code: 'MAPEL-00',
+  title: 'Belum Ada Mata Pelajaran',
+  level: 'SMA / MA / SMK / Sederajat',
+  subtest: 'Wajib Umum',
+  durationMinutes: 90,
+  targetClass: 'Kelas X',
+  questions: [],
+};
+
 interface StudentExamDraft {
   username: string;
   packageId: string;
@@ -231,10 +242,41 @@ export default function App() {
 
   const [packages, setPackages] = useState<ExamPackage[]>(() => {
     try {
+      let isCustomMapelConfigured = false;
+      const deletedCodes = new Set<string>();
+      const deletedNames = new Set<string>();
+      try {
+        const rawSettings = localStorage.getItem('cbt_admin_settings');
+        if (rawSettings) {
+          const parsedSettings = JSON.parse(rawSettings);
+          if (parsedSettings && typeof parsedSettings === 'object') {
+            if (parsedSettings.customMapelConfigured) {
+              isCustomMapelConfigured = true;
+            }
+            if (Array.isArray(parsedSettings.deletedMapelCodes)) {
+              parsedSettings.deletedMapelCodes.forEach((c: any) => {
+                if (typeof c === 'string' && c.trim()) {
+                  deletedCodes.add(c.trim().toUpperCase());
+                }
+              });
+            }
+            if (Array.isArray(parsedSettings.deletedMapelNames)) {
+              parsedSettings.deletedMapelNames.forEach((n: any) => {
+                if (typeof n === 'string' && n.trim()) {
+                  deletedNames.add(n.trim().toLowerCase());
+                }
+              });
+            }
+          }
+        }
+      } catch {
+        // ignore settings parse error
+      }
+
       const saved = localStorage.getItem(STORAGE_KEYS.PACKAGES);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           const list = parsed
             .filter((pkg: ExamPackage) => pkg && typeof pkg === 'object')
             .map((pkg: ExamPackage) => ({
@@ -245,23 +287,36 @@ export default function App() {
                     (q) => !String(q?.id || '').startsWith('q_default_')
                   )
                 : [],
-            }));
-
-          // Jika jumlah paket kurang dari 10 (misalnya hanya 5 dari versi lama),
-          // lengkapi dengan paket standar yang belum ada agar kartu mapel lengkap 10 mapel
-          if (list.length < 10) {
-            const existingCodes = new Set(
-              list.map((p) => (p.code || '').trim().toUpperCase())
-            );
-            INITIAL_EXAM_PACKAGES.forEach((initPkg) => {
-              const initCode = (initPkg.code || '').trim().toUpperCase();
-              if (initCode && !existingCodes.has(initCode)) {
-                list.push(initPkg);
-                existingCodes.add(initCode);
-              }
+            }))
+            .filter((pkg: ExamPackage) => {
+              const pCode = (pkg.code || '').trim().toUpperCase();
+              const pTitle = (pkg.title || '').trim().toLowerCase();
+              if (pCode && deletedCodes.has(pCode)) return false;
+              if (pTitle && deletedNames.has(pTitle)) return false;
+              return true;
             });
+
+          if (isCustomMapelConfigured || deletedCodes.size > 0 || deletedNames.size > 0) {
+            return list;
           }
-          return list;
+
+          if (list.length > 0) {
+            // Jika belum pernah dikustomisasi dan jumlah paket kurang dari 10 (migrasi versi lama),
+            // lengkapi dengan paket standar yang belum ada
+            if (list.length < 10) {
+              const existingCodes = new Set(
+                list.map((p) => (p.code || '').trim().toUpperCase())
+              );
+              INITIAL_EXAM_PACKAGES.forEach((initPkg) => {
+                const initCode = (initPkg.code || '').trim().toUpperCase();
+                if (initCode && !existingCodes.has(initCode)) {
+                  list.push(initPkg);
+                  existingCodes.add(initCode);
+                }
+              });
+            }
+            return list;
+          }
         }
       }
     } catch {
@@ -1104,11 +1159,13 @@ export default function App() {
         )
       : undefined) || currentStudentActiveSchedules[0];
 
-  const selectedPackage =
+  const selectedPackage: ExamPackage =
     (matchedStudentSchedule
       ? resolvePackageForSchedule(matchedStudentSchedule, packages)
       : packages.find((p) => p.id === participant.selectedPackageId)) ||
-    packages[0];
+    packages[0] ||
+    INITIAL_EXAM_PACKAGES[0] ||
+    FALLBACK_EMPTY_PACKAGE;
 
   const [isFullscreenActive, setIsFullscreenActive] = useState<boolean>(false);
 
@@ -1217,7 +1274,7 @@ export default function App() {
         second: '2-digit',
       });
       const cleanUser = participant.username.trim().toUpperCase();
-      const currentPkgId = selectedPackage.id;
+      const currentPkgId = selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id;
 
       // Hitung jumlah pelanggaran siswa pada mata pelajaran aktif (maksimal 6x)
       const existingRow = participantsRef.current.find(
@@ -1339,7 +1396,7 @@ export default function App() {
       handleUpdateParticipants,
       participant.fullName,
       participant.username,
-      selectedPackage.id,
+      selectedPackage?.id,
     ]
   );
 
@@ -1620,7 +1677,7 @@ export default function App() {
     requestCbtFullscreen();
 
     const cleanUser = participant.username.trim().toUpperCase();
-    const currentPkgId = selectedPackage.id;
+    const currentPkgId = selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id;
     const matchedRow = participantsRef.current.find(
       (r) => r.username.trim().toUpperCase() === cleanUser
     );
@@ -1711,7 +1768,7 @@ export default function App() {
     (secsLeft: number) => {
       examRemainingSecondsRef.current = secsLeft;
       const cleanUser = participant.username.trim().toUpperCase();
-      const currentPkgId = selectedPackage.id;
+      const currentPkgId = selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id;
       const matchedRow = participantsRef.current.find(
         (r) => r.username.trim().toUpperCase() === cleanUser
       );
@@ -1728,13 +1785,13 @@ export default function App() {
         updatedAt: Date.now(),
       });
     },
-    [participant.username, selectedPackage.id]
+    [participant.username, selectedPackage?.id]
   );
 
   const handleUpdateAnswer = useCallback(
     (questionId: string, updater: (prev: StudentAnswer) => StudentAnswer) => {
       const cleanUser = participant.username.trim().toUpperCase();
-      const currentPkgId = selectedPackage.id;
+      const currentPkgId = selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id;
       setAnswers((prevMap) => {
         const current = prevMap[questionId] || { questionId };
         const nextMap = {
@@ -1776,7 +1833,7 @@ export default function App() {
         return nextMap;
       });
     },
-    [handleUpdateParticipants, participant.username, selectedPackage.id]
+    [handleUpdateParticipants, participant.username, selectedPackage?.id]
   );
 
   const handleFinishExam = useCallback(
@@ -1784,7 +1841,9 @@ export default function App() {
       setTimeUsedSeconds(usedSeconds);
 
       // Compute summary for Proctor History
-      const questions = selectedPackage.questions;
+      const questions = Array.isArray(selectedPackage?.questions)
+        ? selectedPackage.questions
+        : [];
       let totalPoints = 0;
       let maxPoints = 0;
       let correctCount = 0;
@@ -1805,7 +1864,7 @@ export default function App() {
       const summary: ExamResultSummary = {
         id: `res_${Date.now()}`,
         participant,
-        packageTitle: selectedPackage.title,
+        packageTitle: selectedPackage?.title || FALLBACK_EMPTY_PACKAGE.title,
         completedAt: new Date().toLocaleString('id-ID', {
           day: '2-digit',
           month: 'short',
@@ -1823,7 +1882,7 @@ export default function App() {
       };
 
       const cleanUser = participant.username.trim().toUpperCase();
-      clearStudentDraftInLocal(cleanUser, selectedPackage.id);
+      clearStudentDraftInLocal(cleanUser, selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id);
       examRemainingSecondsRef.current = undefined;
       setExamInitialRemainingSeconds(undefined);
 
