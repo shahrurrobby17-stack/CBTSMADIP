@@ -949,7 +949,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   const tokenCountdownLabel = `${tokenMinutes}:${tokenSeconds}`;
   const tokenProgressPct = Math.max(
     0,
-    Math.min(100, (tokenSecondsLeft / 300) * 100)
+    Math.min(100, (tokenSecondsLeft / 600) * 100)
   );
   const [newQuestionType, setNewQuestionType] = useState<QuestionType>('pilihan_ganda');
   const [newCategory, setNewCategory] = useState('Literasi & Penalaran Umum');
@@ -2592,7 +2592,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                   Informasi Server Proktor — CBT SMA Islam Diponegoro Wagir
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Selamat datang di Dashboard Proktor Aplikasi Sumatif Akhir Semester. Kartu <strong>Token Ujian Aktif</strong> kini berada di menu <strong>Beranda</strong> ini dan diperbarui otomatis setiap 5 menit dari server Administrator. Gunakan menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk memantau nilai akhir peserta.
+                  Selamat datang di Dashboard Proktor Aplikasi Sumatif Akhir Semester. Kartu <strong>Token Ujian Aktif</strong> kini berada di menu <strong>Beranda</strong> ini dan diperbarui otomatis setiap 10 menit dari server Administrator. Gunakan menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk memantau nilai akhir peserta.
                 </p>
               </div>
             </div>

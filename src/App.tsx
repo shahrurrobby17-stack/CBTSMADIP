@@ -661,7 +661,7 @@ export default function App() {
     return INITIAL_EXAM_PACKAGES;
   });
 
-  const TOKEN_DURATION_SECONDS = 300; // 5 menit (300 detik)
+  const TOKEN_DURATION_SECONDS = 600; // 10 menit (600 detik)
 
   const generateRandomToken = useCallback(() => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -724,6 +724,8 @@ export default function App() {
   const pendingPushCount = useRef<number>(0);
   const examStartedAtRef = useRef<number>(0);
   const draftSyncTimerRef = useRef<number | null>(null);
+  const isSyncInFlightRef = useRef<boolean>(false);
+  const lastSyncAttemptAtRef = useRef<number>(0);
 
   const packagesRef = useRef<ExamPackage[]>(packages);
   useEffect(() => {
@@ -792,7 +794,7 @@ export default function App() {
     [markSyncedSuccess]
   );
 
-  // Automatic 5-minute token countdown timer (wall-clock based, never rotates early)
+  // Automatic 10-minute token countdown timer (wall-clock based, never rotates early)
   useEffect(() => {
     const tick = () => {
       const diffMs = tokenEndTimeRef.current - Date.now();
@@ -1380,335 +1382,435 @@ export default function App() {
   // Initial Hydration & Background Polling from Vercel Storage (/api/storage)
   // Uses conflict-free per-entity timestamp resolution so multi-instance serverless split-brain
   // or 131 concurrent students never cause schedules or reset requests to flicker.
-  const syncFromVercelCloud = useCallback(async () => {
-    if (
-      pendingPushCount.current > 0 ||
-      Date.now() - lastLocalMutationAt.current < 2500
-    ) {
-      return;
-    }
-    const fetchStartedAt = Date.now();
-    const res = await fetchVercelStorage();
-    if (!res.ok) return;
-    if (
-      pendingPushCount.current > 0 ||
-      lastLocalMutationAt.current >= fetchStartedAt ||
-      Date.now() - lastLocalMutationAt.current < 2500
-    ) {
-      return;
-    }
-    setStorageEngine(res.engine);
-
-    const isAdminOrProctorStage =
-      stageRef.current === 'admin_dashboard' ||
-      stageRef.current === 'proctor_dashboard';
-
-    if (res.data) {
-      const serverUpdatedAt =
-        typeof res.data.updatedAt === 'number'
-          ? res.data.updatedAt
-          : typeof res.updatedAt === 'number'
-          ? res.updatedAt
-          : 0;
-      if (serverUpdatedAt > 0) {
-        latestUpdatedAtRef.current = Math.max(
-          latestUpdatedAtRef.current,
-          serverUpdatedAt
-        );
-      }
-
-      if (Array.isArray(res.data.deletedScheduleIds)) {
-        addLocalDeletedIds(
-          STORAGE_KEYS.DELETED_SCHEDULES,
-          res.data.deletedScheduleIds
-        );
-      }
-      if (Array.isArray(res.data.deletedParticipantIds)) {
-        addLocalDeletedIds(
-          STORAGE_KEYS.DELETED_PARTICIPANTS,
-          res.data.deletedParticipantIds
-        );
-      }
-
-      // 1. Token CRDT reconciliation by tokenUpdatedAt
-      const remoteTokenTs =
-        typeof res.data.tokenUpdatedAt === 'number'
-          ? res.data.tokenUpdatedAt
-          : 0;
+  const syncFromVercelCloud = useCallback(
+    async (options?: { force?: boolean }): Promise<ProctorParticipantRow[]> => {
+      const isForced = Boolean(options?.force);
       if (
-        typeof res.data.activeToken === 'string' &&
-        res.data.activeToken &&
-        res.data.activeToken !== activeTokenRef.current
+        !isForced &&
+        (isSyncInFlightRef.current ||
+          pendingPushCount.current > 0 ||
+          Date.now() - lastLocalMutationAt.current < 2500)
       ) {
+        return participantsRef.current;
+      }
+
+      isSyncInFlightRef.current = true;
+      lastSyncAttemptAtRef.current = Date.now();
+      const fetchStartedAt = Date.now();
+
+      try {
+        const res = await fetchVercelStorage({
+          since:
+            !isForced && isHydratedFromCloud.current
+              ? latestUpdatedAtRef.current
+              : undefined,
+          force: isForced,
+        });
+        if (!res.ok) return participantsRef.current;
         if (
-          remoteTokenTs >= tokenUpdatedAtRef.current ||
-          tokenUpdatedAtRef.current === 0
+          !isForced &&
+          (pendingPushCount.current > 0 ||
+            lastLocalMutationAt.current >= fetchStartedAt ||
+            Date.now() - lastLocalMutationAt.current < 2500)
         ) {
-          activeTokenRef.current = res.data.activeToken;
-          tokenUpdatedAtRef.current = Math.max(
-            tokenUpdatedAtRef.current,
-            remoteTokenTs
+          return participantsRef.current;
+        }
+        setStorageEngine(res.engine);
+
+        if (res.unchanged) {
+          setLastSyncedLabel(
+            new Date().toLocaleTimeString('id-ID', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })
           );
-          tokenEndTimeRef.current = Date.now() + TOKEN_DURATION_SECONDS * 1000;
-          setActiveToken(res.data.activeToken);
-          setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
-          try {
-            localStorage.setItem(STORAGE_KEYS.TOKEN, res.data.activeToken);
-            if (remoteTokenTs > 0) {
-              localStorage.setItem(
-                STORAGE_KEYS.TOKEN_UPDATED_AT,
-                String(remoteTokenTs)
-              );
-            }
-          } catch {
-            // ignore
-          }
-        } else if (isAdminOrProctorStage) {
-          saveVercelStorage({
-            activeToken: activeTokenRef.current,
-            tokenUpdatedAt: tokenUpdatedAtRef.current,
-          });
+          isHydratedFromCloud.current = true;
+          return participantsRef.current;
         }
-      }
 
-      isApplyingRemoteUpdate.current = true;
+        const isAdminOrProctorStage =
+          stageRef.current === 'admin_dashboard' ||
+          stageRef.current === 'proctor_dashboard';
 
-      // 2. Packages CRDT reconciliation (preserving uploaded questions)
-      let healPackagesPayload: ExamPackage[] | undefined;
-      if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
-        const cleanedRemotePackages = filterOutSimulasiTka(res.data.packages);
-        const mergedPackages = mergePackagesPreservingQuestions(
-          cleanedRemotePackages,
-          packagesRef.current
-        );
-        packagesRef.current = mergedPackages;
-        setPackages(mergedPackages);
-
-        if (
-          isAdminOrProctorStage &&
-          getTotalUploadedQuestionsCount(mergedPackages) >
-            getTotalUploadedQuestionsCount(cleanedRemotePackages)
-        ) {
-          healPackagesPayload = mergedPackages;
-        }
-      } else if (
-        isAdminOrProctorStage &&
-        hasAnyUploadedQuestions(packagesRef.current)
-      ) {
-        healPackagesPayload = packagesRef.current;
-      }
-
-      // 3. Schedules CRDT reconciliation by per-schedule updatedAt
-      let healSchedulesPayload: AdminScheduleItem[] | undefined;
-      const localHasActiveOrCustomSchedules = !isDefaultInactiveSchedulesList(
-        schedulesRef.current
-      );
-      const remoteHasSchedules =
-        Array.isArray(res.data.schedules) && res.data.schedules.length > 0;
-      const remoteIsDefaultInactiveSchedules =
-        !remoteHasSchedules ||
-        isDefaultInactiveSchedulesList(res.data.schedules);
-
-      if (remoteHasSchedules) {
-        const mergedSchedules = mergeSchedulesByTimestamp(
-          res.data.schedules!,
-          schedulesRef.current,
-          res.data.deletedScheduleIds
-        );
-        schedulesRef.current = mergedSchedules;
-        setSchedules(mergedSchedules);
-
-        // If local had newer schedule state (e.g. active toggle or custom schedule) than the polled server instance, heal the server
-        if (isAdminOrProctorStage) {
-          const remoteById = new Map<string, AdminScheduleItem>();
-          res.data.schedules!.forEach((s) => {
-            if (s && s.id) remoteById.set(s.id, s);
-          });
-          const serverNeedsScheduleHeal =
-            mergedSchedules.length !== res.data.schedules!.length ||
-            mergedSchedules.some((m) => {
-              const r = remoteById.get(m.id);
-              return (
-                !r ||
-                r.isActive !== m.isActive ||
-                (m.updatedAt || 0) > (r.updatedAt || 0)
-              );
-            });
-          if (serverNeedsScheduleHeal) {
-            healSchedulesPayload = mergedSchedules;
-          }
-        }
-      } else if (isAdminOrProctorStage && localHasActiveOrCustomSchedules) {
-        healSchedulesPayload = schedulesRef.current;
-      }
-
-      // 4. Participants CRDT reconciliation (violationTimestamp vs lastResetAt vs loginUpdatedAt vs metaUpdatedAt)
-      let healParticipantsPayload: ProctorParticipantRow[] | undefined;
-      const localHasRealParticipants = !isDefaultDemoParticipantsList(
-        participantsRef.current
-      );
-      const remoteHasParticipants =
-        Array.isArray(res.data.participants) &&
-        res.data.participants.length > 0;
-      const remoteIsDemoOnly =
-        !remoteHasParticipants ||
-        isDefaultDemoParticipantsList(res.data.participants);
-
-      if (localHasRealParticipants && remoteIsDemoOnly) {
-        // Server instance cold-started or only has 8 demo students: keep our 131 real students and heal server
-        healParticipantsPayload = sanitizeParticipantRows(
-          participantsRef.current
-        );
-      } else if (remoteHasParticipants) {
-        const mergedParticipants = mergeParticipantLists(
-          res.data.participants!,
-          participantsRef.current,
-          res.data.deletedParticipantIds
-        );
-        participantsRef.current = mergedParticipants;
-        setParticipants(mergedParticipants);
-
-        // Check if the polled serverless instance was missing students, resets, or violations that we just reconciled
-        if (isAdminOrProctorStage) {
-          const remoteByUser = new Map<string, ProctorParticipantRow>();
-          res.data.participants!.forEach((r) => {
-            if (r && r.username) {
-              remoteByUser.set(r.username.trim().toUpperCase(), r);
-            }
-          });
-          const serverNeedsParticipantHeal =
-            mergedParticipants.length !== res.data.participants!.length ||
-            mergedParticipants.some((m) => {
-              const r = remoteByUser.get(m.username.trim().toUpperCase());
-              if (!r) return true;
-              return (
-                Boolean(r.requestReset) !== Boolean(m.requestReset) ||
-                r.loginState !== m.loginState ||
-                r.status !== m.status ||
-                (m.lastResetAt || 0) > (r.lastResetAt || 0) ||
-                (m.violationTimestamp || 0) > (r.violationTimestamp || 0) ||
-                (m.metaUpdatedAt || 0) > (r.metaUpdatedAt || 0)
-              );
-            });
-          if (serverNeedsParticipantHeal) {
-            healParticipantsPayload = mergedParticipants;
-          }
-        }
-      }
-
-      // Heal stale serverless instance if needed (only Admin/Proctor pushes schedules/packages, or real participants on cold start)
-      if (
-        healPackagesPayload ||
-        healSchedulesPayload ||
-        healParticipantsPayload
-      ) {
-        saveVercelStorage({
-          ...(healPackagesPayload ? { packages: healPackagesPayload } : {}),
-          ...(healSchedulesPayload
-            ? {
-                schedules: healSchedulesPayload,
-                deletedScheduleIds: Array.from(
-                  readLocalDeletedSet(STORAGE_KEYS.DELETED_SCHEDULES)
-                ),
-                forceReplaceSchedules: true,
-              }
-            : {}),
-          ...(healParticipantsPayload
-            ? {
-                participants: healParticipantsPayload,
-                deletedParticipantIds: Array.from(
-                  readLocalDeletedSet(STORAGE_KEYS.DELETED_PARTICIPANTS)
-                ),
-                forceReplaceParticipants: true,
-              }
-            : {}),
-        }).then((healRes) => {
-          if (healRes.ok && typeof healRes.updatedAt === 'number') {
+        if (res.data) {
+          const serverUpdatedAt =
+            typeof res.data.updatedAt === 'number'
+              ? res.data.updatedAt
+              : typeof res.updatedAt === 'number'
+              ? res.updatedAt
+              : 0;
+          if (serverUpdatedAt > 0) {
             latestUpdatedAtRef.current = Math.max(
               latestUpdatedAtRef.current,
-              healRes.updatedAt
+              serverUpdatedAt
             );
           }
-        });
-      }
 
-      if (Array.isArray(res.data.proctors) && res.data.proctors.length > 0) {
-        setProctors(res.data.proctors);
-      }
-      if (Array.isArray(res.data.resultsHistory)) {
-        setResultsHistory(res.data.resultsHistory);
-      }
-      setLastSyncedLabel(
-        new Date().toLocaleTimeString('id-ID', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        })
-      );
-      setTimeout(() => {
-        isApplyingRemoteUpdate.current = false;
-      }, 150);
-    } else if (!isHydratedFromCloud.current) {
-      // Cold-start / empty server: Only seed from Admin/Proctor or if local holds real data.
-      const localHasRealParticipants = !isDefaultDemoParticipantsList(
-        participantsRef.current
-      );
-      const localHasActiveOrCustomSchedules = !isDefaultInactiveSchedulesList(
-        schedulesRef.current
-      );
-      const localHasQuestions = hasAnyUploadedQuestions(packagesRef.current);
+          if (Array.isArray(res.data.deletedScheduleIds)) {
+            addLocalDeletedIds(
+              STORAGE_KEYS.DELETED_SCHEDULES,
+              res.data.deletedScheduleIds
+            );
+          }
+          if (Array.isArray(res.data.deletedParticipantIds)) {
+            addLocalDeletedIds(
+              STORAGE_KEYS.DELETED_PARTICIPANTS,
+              res.data.deletedParticipantIds
+            );
+          }
 
-      if (
-        localHasRealParticipants ||
-        (isAdminOrProctorStage &&
-          (localHasActiveOrCustomSchedules || localHasQuestions))
-      ) {
-        const seedRes = await saveVercelStorage({
-          ...(isAdminOrProctorStage && localHasQuestions
-            ? { packages: packagesRef.current }
-            : {}),
-          ...(isAdminOrProctorStage && localHasActiveOrCustomSchedules
-            ? {
-                schedules: schedulesRef.current,
-                forceReplaceSchedules: true,
+          // 1. Token CRDT reconciliation by tokenUpdatedAt
+          const remoteTokenTs =
+            typeof res.data.tokenUpdatedAt === 'number'
+              ? res.data.tokenUpdatedAt
+              : 0;
+          if (
+            typeof res.data.activeToken === 'string' &&
+            res.data.activeToken &&
+            res.data.activeToken !== activeTokenRef.current
+          ) {
+            if (
+              remoteTokenTs >= tokenUpdatedAtRef.current ||
+              tokenUpdatedAtRef.current === 0
+            ) {
+              activeTokenRef.current = res.data.activeToken;
+              tokenUpdatedAtRef.current = Math.max(
+                tokenUpdatedAtRef.current,
+                remoteTokenTs
+              );
+              tokenEndTimeRef.current =
+                Date.now() + TOKEN_DURATION_SECONDS * 1000;
+              setActiveToken(res.data.activeToken);
+              setTokenSecondsLeft(TOKEN_DURATION_SECONDS);
+              try {
+                localStorage.setItem(STORAGE_KEYS.TOKEN, res.data.activeToken);
+                if (remoteTokenTs > 0) {
+                  localStorage.setItem(
+                    STORAGE_KEYS.TOKEN_UPDATED_AT,
+                    String(remoteTokenTs)
+                  );
+                }
+              } catch {
+                // ignore
               }
-            : {}),
-          ...(localHasRealParticipants
-            ? {
-                participants: sanitizeParticipantRows(participantsRef.current),
-                forceReplaceParticipants: true,
-              }
-            : {}),
-          ...(isAdminOrProctorStage
-            ? {
-                proctors: proctorsRef.current,
+            } else if (isAdminOrProctorStage) {
+              saveVercelStorage({
                 activeToken: activeTokenRef.current,
-                tokenUpdatedAt: tokenUpdatedAtRef.current || Date.now(),
-                resultsHistory: resultsHistoryRef.current,
-              }
-            : {}),
-        });
-        if (seedRes.ok) {
-          if (typeof seedRes.updatedAt === 'number') {
-            latestUpdatedAtRef.current = Math.max(
-              latestUpdatedAtRef.current,
-              seedRes.updatedAt
-            );
+                tokenUpdatedAt: tokenUpdatedAtRef.current,
+              });
+            }
           }
-          setStorageEngine(seedRes.engine);
-        }
-      }
-    }
-    isHydratedFromCloud.current = true;
-  }, [filterOutSimulasiTka]);
 
+          isApplyingRemoteUpdate.current = true;
+
+          // 2. Packages CRDT reconciliation (preserving uploaded questions)
+          let healPackagesPayload: ExamPackage[] | undefined;
+          if (Array.isArray(res.data.packages) && res.data.packages.length > 0) {
+            const cleanedRemotePackages = filterOutSimulasiTka(
+              res.data.packages
+            );
+            const mergedPackages = mergePackagesPreservingQuestions(
+              cleanedRemotePackages,
+              packagesRef.current
+            );
+            packagesRef.current = mergedPackages;
+            setPackages(mergedPackages);
+
+            if (
+              isAdminOrProctorStage &&
+              getTotalUploadedQuestionsCount(mergedPackages) >
+                getTotalUploadedQuestionsCount(cleanedRemotePackages)
+            ) {
+              healPackagesPayload = mergedPackages;
+            }
+          } else if (
+            isAdminOrProctorStage &&
+            hasAnyUploadedQuestions(packagesRef.current)
+          ) {
+            healPackagesPayload = packagesRef.current;
+          }
+
+          // 3. Schedules CRDT reconciliation by per-schedule updatedAt
+          let healSchedulesPayload: AdminScheduleItem[] | undefined;
+          const localHasActiveOrCustomSchedules =
+            !isDefaultInactiveSchedulesList(schedulesRef.current);
+          const remoteHasSchedules =
+            Array.isArray(res.data.schedules) && res.data.schedules.length > 0;
+
+          if (remoteHasSchedules) {
+            const mergedSchedules = mergeSchedulesByTimestamp(
+              res.data.schedules!,
+              schedulesRef.current,
+              res.data.deletedScheduleIds
+            );
+            schedulesRef.current = mergedSchedules;
+            setSchedules(mergedSchedules);
+
+            // If local had newer schedule state (e.g. active toggle or custom schedule) than the polled server instance, heal the server
+            if (isAdminOrProctorStage) {
+              const remoteById = new Map<string, AdminScheduleItem>();
+              res.data.schedules!.forEach((s) => {
+                if (s && s.id) remoteById.set(s.id, s);
+              });
+              const serverNeedsScheduleHeal =
+                mergedSchedules.length !== res.data.schedules!.length ||
+                mergedSchedules.some((m) => {
+                  const r = remoteById.get(m.id);
+                  return (
+                    !r ||
+                    r.isActive !== m.isActive ||
+                    (m.updatedAt || 0) > (r.updatedAt || 0)
+                  );
+                });
+              if (serverNeedsScheduleHeal) {
+                healSchedulesPayload = mergedSchedules;
+              }
+            }
+          } else if (isAdminOrProctorStage && localHasActiveOrCustomSchedules) {
+            healSchedulesPayload = schedulesRef.current;
+          }
+
+          // 4. Participants CRDT reconciliation (violationTimestamp vs lastResetAt vs loginUpdatedAt vs metaUpdatedAt)
+          let healParticipantsPayload: ProctorParticipantRow[] | undefined;
+          const localHasRealParticipants = !isDefaultDemoParticipantsList(
+            participantsRef.current
+          );
+          const remoteHasParticipants =
+            Array.isArray(res.data.participants) &&
+            res.data.participants.length > 0;
+          const remoteIsDemoOnly =
+            !remoteHasParticipants ||
+            isDefaultDemoParticipantsList(res.data.participants);
+
+          if (localHasRealParticipants && remoteIsDemoOnly) {
+            // Server instance cold-started or only has 8 demo students: keep our 131 real students and heal server
+            healParticipantsPayload = sanitizeParticipantRows(
+              participantsRef.current
+            );
+          } else if (remoteHasParticipants) {
+            const mergedParticipants = mergeParticipantLists(
+              res.data.participants!,
+              participantsRef.current,
+              res.data.deletedParticipantIds
+            );
+            participantsRef.current = mergedParticipants;
+            setParticipants(mergedParticipants);
+
+            // Check if the polled serverless instance was missing students, resets, or violations that we just reconciled
+            if (isAdminOrProctorStage) {
+              const remoteByUser = new Map<string, ProctorParticipantRow>();
+              res.data.participants!.forEach((r) => {
+                if (r && r.username) {
+                  remoteByUser.set(r.username.trim().toUpperCase(), r);
+                }
+              });
+              const serverNeedsParticipantHeal =
+                mergedParticipants.length !== res.data.participants!.length ||
+                mergedParticipants.some((m) => {
+                  const r = remoteByUser.get(m.username.trim().toUpperCase());
+                  if (!r) return true;
+                  return (
+                    Boolean(r.requestReset) !== Boolean(m.requestReset) ||
+                    r.loginState !== m.loginState ||
+                    r.status !== m.status ||
+                    (m.lastResetAt || 0) > (r.lastResetAt || 0) ||
+                    (m.violationTimestamp || 0) > (r.violationTimestamp || 0) ||
+                    (m.metaUpdatedAt || 0) > (r.metaUpdatedAt || 0)
+                  );
+                });
+              if (serverNeedsParticipantHeal) {
+                healParticipantsPayload = mergedParticipants;
+              }
+            }
+          }
+
+          // Heal stale serverless instance if needed (only Admin/Proctor pushes schedules/packages, or real participants on cold start)
+          if (
+            healPackagesPayload ||
+            healSchedulesPayload ||
+            healParticipantsPayload
+          ) {
+            saveVercelStorage({
+              ...(healPackagesPayload
+                ? { packages: healPackagesPayload }
+                : {}),
+              ...(healSchedulesPayload
+                ? {
+                    schedules: healSchedulesPayload,
+                    deletedScheduleIds: Array.from(
+                      readLocalDeletedSet(STORAGE_KEYS.DELETED_SCHEDULES)
+                    ),
+                    forceReplaceSchedules: true,
+                  }
+                : {}),
+              ...(healParticipantsPayload
+                ? {
+                    participants: healParticipantsPayload,
+                    deletedParticipantIds: Array.from(
+                      readLocalDeletedSet(STORAGE_KEYS.DELETED_PARTICIPANTS)
+                    ),
+                    forceReplaceParticipants: true,
+                  }
+                : {}),
+            }).then((healRes) => {
+              if (healRes.ok && typeof healRes.updatedAt === 'number') {
+                latestUpdatedAtRef.current = Math.max(
+                  latestUpdatedAtRef.current,
+                  healRes.updatedAt
+                );
+              }
+            });
+          }
+
+          if (
+            Array.isArray(res.data.proctors) &&
+            res.data.proctors.length > 0
+          ) {
+            setProctors(res.data.proctors);
+          }
+          if (Array.isArray(res.data.resultsHistory)) {
+            setResultsHistory(res.data.resultsHistory);
+          }
+          setLastSyncedLabel(
+            new Date().toLocaleTimeString('id-ID', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })
+          );
+          setTimeout(() => {
+            isApplyingRemoteUpdate.current = false;
+          }, 150);
+        } else if (!isHydratedFromCloud.current) {
+          // Cold-start / empty server: Only seed from Admin/Proctor or if local holds real data.
+          const localHasRealParticipants = !isDefaultDemoParticipantsList(
+            participantsRef.current
+          );
+          const localHasActiveOrCustomSchedules =
+            !isDefaultInactiveSchedulesList(schedulesRef.current);
+          const localHasQuestions = hasAnyUploadedQuestions(
+            packagesRef.current
+          );
+
+          if (
+            localHasRealParticipants ||
+            (isAdminOrProctorStage &&
+              (localHasActiveOrCustomSchedules || localHasQuestions))
+          ) {
+            const seedRes = await saveVercelStorage({
+              ...(isAdminOrProctorStage && localHasQuestions
+                ? { packages: packagesRef.current }
+                : {}),
+              ...(isAdminOrProctorStage && localHasActiveOrCustomSchedules
+                ? {
+                    schedules: schedulesRef.current,
+                    forceReplaceSchedules: true,
+                  }
+                : {}),
+              ...(localHasRealParticipants
+                ? {
+                    participants: sanitizeParticipantRows(
+                      participantsRef.current
+                    ),
+                    forceReplaceParticipants: true,
+                  }
+                : {}),
+              ...(isAdminOrProctorStage
+                ? {
+                    proctors: proctorsRef.current,
+                    activeToken: activeTokenRef.current,
+                    tokenUpdatedAt: tokenUpdatedAtRef.current || Date.now(),
+                    resultsHistory: resultsHistoryRef.current,
+                  }
+                : {}),
+            });
+            if (seedRes.ok) {
+              if (typeof seedRes.updatedAt === 'number') {
+                latestUpdatedAtRef.current = Math.max(
+                  latestUpdatedAtRef.current,
+                  seedRes.updatedAt
+                );
+              }
+              setStorageEngine(seedRes.engine);
+            }
+          }
+        }
+        isHydratedFromCloud.current = true;
+        return participantsRef.current;
+      } finally {
+        isSyncInFlightRef.current = false;
+      }
+    },
+    [filterOutSimulasiTka]
+  );
+
+  // Stage-aware adaptive polling with random jitter & visibility pause so 131+ students
+  // on a single school Wi-Fi IP do not trigger Vercel Edge Firewall 403/429 blocks.
+  const hasActiveViolationBanner = Boolean(lastViolationInfo);
   useEffect(() => {
-    syncFromVercelCloud();
-    const pollTimer = window.setInterval(() => {
-      syncFromVercelCloud();
-    }, 6000);
-    return () => window.clearInterval(pollTimer);
-  }, [syncFromVercelCloud]);
+    let cancelled = false;
+    let pollTimeoutId: number | null = null;
+
+    const getNextPollDelayMs = (): number | null => {
+      if (stage === 'admin_dashboard' || stage === 'proctor_dashboard') {
+        return 10_000 + Math.floor(Math.random() * 4_000); // 10–14s
+      }
+      if (stage === 'login') {
+        return hasActiveViolationBanner
+          ? 12_000 + Math.floor(Math.random() * 5_000) // 12–17s when waiting Reset Login
+          : 25_000 + Math.floor(Math.random() * 10_000); // 25–35s normal login screen
+      }
+      if (stage === 'confirm_participant' || stage === 'confirm_test') {
+        return 20_000 + Math.floor(Math.random() * 8_000); // 20–28s
+      }
+      if (stage === 'exam_running') {
+        return 75_000 + Math.floor(Math.random() * 30_000); // 75–105s (saves >93% GETs during exam)
+      }
+      // exam_result / proctor_login / admin_login: no background polling needed
+      return null;
+    };
+
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const delayMs = getNextPollDelayMs();
+      if (delayMs === null) return;
+      pollTimeoutId = window.setTimeout(async () => {
+        if (cancelled) return;
+        if (document.visibilityState !== 'hidden') {
+          await syncFromVercelCloud();
+        }
+        scheduleNext();
+      }, delayMs);
+    };
+
+    if (!isHydratedFromCloud.current) {
+      syncFromVercelCloud().finally(() => {
+        scheduleNext();
+      });
+    } else {
+      scheduleNext();
+    }
+
+    const handleVisibilityResume = () => {
+      if (
+        document.visibilityState === 'visible' &&
+        getNextPollDelayMs() !== null &&
+        Date.now() - lastSyncAttemptAtRef.current > 8_000
+      ) {
+        syncFromVercelCloud();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityResume);
+
+    return () => {
+      cancelled = true;
+      if (pollTimeoutId !== null) {
+        window.clearTimeout(pollTimeoutId);
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityResume);
+    };
+  }, [syncFromVercelCloud, stage, hasActiveViolationBanner]);
 
   // Manual Force Sync from Admin Dashboard
   const pushToVercelCloud = useCallback(async () => {
@@ -1901,6 +2003,10 @@ export default function App() {
 
   const lockStudentByViolation = useCallback(
     (reason: string) => {
+      if (draftSyncTimerRef.current) {
+        window.clearTimeout(draftSyncTimerRef.current);
+        draftSyncTimerRef.current = null;
+      }
       const nowTs = Date.now();
       const timeStr = new Date().toLocaleTimeString('id-ID', {
         hour: '2-digit',
@@ -2455,8 +2561,8 @@ export default function App() {
           updatedAt: Date.now(),
         });
 
-        // Debounce remote server sync by 1200ms so 131 concurrent students answering/typing
-        // do not flood /api/storage on every keystroke while keeping localStorage 0ms instant
+        // Debounce remote server sync by 5000ms so 131 concurrent students answering/typing
+        // do not flood /api/storage (or trigger Vercel 403 rate limits) while keeping localStorage 0ms instant
         if (draftSyncTimerRef.current) {
           window.clearTimeout(draftSyncTimerRef.current);
         }
@@ -2475,7 +2581,7 @@ export default function App() {
                 : row
             )
           );
-        }, 1200);
+        }, 5000);
 
         return nextMap;
       });
@@ -2681,6 +2787,7 @@ export default function App() {
           activeSchedules={activeSchedules}
           lastViolationInfo={lastViolationInfo}
           onRequestResetLogin={handleRequestResetFromLogin}
+          onRefreshParticipants={() => syncFromVercelCloud({ force: true })}
           onQuickLoginAdmin={() => {
             requestCbtFullscreen();
             setAdminUsername('K05060108-KB6K');

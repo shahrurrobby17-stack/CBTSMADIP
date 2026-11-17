@@ -31,12 +31,52 @@ export interface VercelStorageResponse {
   ok: boolean;
   engine: 'vercel-kv' | 'vercel-serverless' | 'local';
   updatedAt?: number;
+  unchanged?: boolean;
+  rateLimited?: boolean;
+  status?: number;
   data: CBTCloudPayload | null;
 }
 
-export async function fetchVercelStorage(): Promise<VercelStorageResponse> {
+let cooldownUntilMs = 0;
+let consecutiveThrottleCount = 0;
+
+function markThrottleBackoff(status: number): void {
+  if (status === 403 || status === 429 || status === 503) {
+    consecutiveThrottleCount = Math.min(consecutiveThrottleCount + 1, 4);
+    const baseMs = 30_000 * Math.pow(2, consecutiveThrottleCount - 1); // 30s, 60s, 120s, 240s
+    const jitterMs = Math.floor(Math.random() * 10_000);
+    cooldownUntilMs = Date.now() + Math.min(240_000, baseMs) + jitterMs;
+  }
+}
+
+function clearThrottleBackoff(): void {
+  consecutiveThrottleCount = 0;
+  cooldownUntilMs = 0;
+}
+
+export function isCloudSyncCoolingDown(): boolean {
+  return Date.now() < cooldownUntilMs;
+}
+
+export async function fetchVercelStorage(options?: {
+  since?: number;
+  force?: boolean;
+}): Promise<VercelStorageResponse> {
+  if (!options?.force && Date.now() < cooldownUntilMs) {
+    return {
+      ok: false,
+      engine: 'local',
+      rateLimited: true,
+      data: null,
+    };
+  }
+
   try {
-    const res = await fetch('/api/storage', {
+    const sinceQuery =
+      typeof options?.since === 'number' && options.since > 0
+        ? `?since=${Math.floor(options.since)}`
+        : '';
+    const res = await fetch(`/api/storage${sinceQuery}`, {
       method: 'GET',
       headers: {
         Accept: 'application/json',
@@ -44,8 +84,19 @@ export async function fetchVercelStorage(): Promise<VercelStorageResponse> {
       cache: 'no-store',
     });
     if (!res.ok) {
-      return { ok: false, engine: 'local', data: null };
+      if (res.status === 403 || res.status === 429 || res.status === 503) {
+        markThrottleBackoff(res.status);
+        return {
+          ok: false,
+          engine: 'local',
+          rateLimited: true,
+          status: res.status,
+          data: null,
+        };
+      }
+      return { ok: false, engine: 'local', status: res.status, data: null };
     }
+    clearThrottleBackoff();
     const json = (await res.json()) as VercelStorageResponse;
     return json;
   } catch {
@@ -69,8 +120,19 @@ export async function saveVercelStorage(
       }),
     });
     if (!res.ok) {
-      return { ok: false, engine: 'local', data: null };
+      if (res.status === 403 || res.status === 429 || res.status === 503) {
+        markThrottleBackoff(res.status);
+        return {
+          ok: false,
+          engine: 'local',
+          rateLimited: true,
+          status: res.status,
+          data: null,
+        };
+      }
+      return { ok: false, engine: 'local', status: res.status, data: null };
     }
+    clearThrottleBackoff();
     const json = (await res.json()) as VercelStorageResponse;
     return json;
   } catch {

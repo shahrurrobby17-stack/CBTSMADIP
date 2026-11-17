@@ -1038,6 +1038,39 @@ export default async function handler(req: any, res: any) {
     if (!data) {
       data = readFromFileOrMemory();
     }
+
+    let sinceParam = 0;
+    try {
+      const rawSince =
+        req.query?.since ??
+        (typeof req.url === 'string' && req.url.includes('since=')
+          ? new URL(req.url, 'http://localhost').searchParams.get('since')
+          : undefined);
+      const parsedSince = Number(rawSince);
+      if (Number.isFinite(parsedSince) && parsedSince > 0) {
+        sinceParam = parsedSince;
+      }
+    } catch {
+      sinceParam = 0;
+    }
+
+    // Only skip full payload when server updatedAt matches client's since timestamp exactly.
+    // If server updatedAt < since (stale serverless instance), return full data so Admin/Proctor can heal it.
+    if (
+      sinceParam > 0 &&
+      data &&
+      typeof data.updatedAt === 'number' &&
+      data.updatedAt === sinceParam
+    ) {
+      return res.status(200).json({
+        ok: true,
+        engine,
+        updatedAt: data.updatedAt,
+        unchanged: true,
+        data: null,
+      });
+    }
+
     if (data && Array.isArray(data.participants)) {
       data = {
         ...data,

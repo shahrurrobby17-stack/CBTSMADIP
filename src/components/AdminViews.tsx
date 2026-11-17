@@ -957,7 +957,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const tokenCountdownLabel = `${tokenMinutes}:${tokenSeconds}`;
   const tokenProgressPct = Math.max(
     0,
-    Math.min(100, (tokenSecondsLeft / 300) * 100)
+    Math.min(100, (tokenSecondsLeft / 600) * 100)
   );
   const [newQuestionType, setNewQuestionType] = useState<QuestionType>('pilihan_ganda');
   const [newCategory, setNewCategory] = useState('Literasi & Numerasi');
@@ -3939,7 +3939,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           {/* 2. BERANDA */}
           {activeMenu === 'beranda' && (
             <div className="space-y-6">
-              {/* Kartu Token Ujian Aktif (Otomatis Berganti Setiap 5 Menit jika Mapel di Jadwal Aktif) */}
+              {/* Kartu Token Ujian Aktif (Otomatis Berganti Setiap 10 Menit jika Mapel di Jadwal Aktif) */}
               <div className="bg-white p-6 rounded-xl border border-slate-200/80 shadow-2xs space-y-4">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                   <div className="space-y-1.5">
@@ -3993,7 +3993,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       onClick={() => {
                         onUpdateToken(activeToken);
                         showNotice(
-                          `Token aktif (${activeToken}) berhasil disimpan & durasi 5 menit di-reset.`
+                          `Token aktif (${activeToken}) berhasil disimpan & durasi 10 menit di-reset.`
                         );
                       }}
                       className={`px-4 py-2 rounded-lg text-xs font-semibold ${
@@ -4018,7 +4018,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         setCustomTokenInput(t);
                         onUpdateToken(t);
                         showNotice(
-                          `Token baru dirilis (${t}) — durasi otomatis 5 menit dimulai ulang.`
+                          `Token baru dirilis (${t}) — durasi otomatis 10 menit dimulai ulang.`
                         );
                       }}
                       className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold ${
@@ -4053,7 +4053,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </div>
                 <div className="bg-white p-5 rounded-xl border border-slate-200/80 shadow-2xs">
                   <div className="text-xs font-semibold text-slate-500">
-                    Token Ujian Saat Ini (5 Menit)
+                    Token Ujian Saat Ini (10 Menit)
                   </div>
                   <div className="mt-2 flex items-baseline justify-between gap-2">
                     {isAnyScheduleActive ? (
@@ -4116,7 +4116,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     Dashboard Administrator — CBT SMA Islam Diponegoro Wagir
                   </h4>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Kartu <strong>Token Ujian Aktif</strong> pada halaman Beranda ini akan berganti secara otomatis setiap <strong>5 menit</strong>. Gunakan menu <strong>Daftar Proktor</strong> untuk mengelola akun proktor ruang ujian, menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Daftar Peserta</strong> untuk menambah peserta baru, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk merekapitulasi nilai.
+                    Kartu <strong>Token Ujian Aktif</strong> pada halaman Beranda ini akan berganti secara otomatis setiap <strong>10 menit</strong>. Gunakan menu <strong>Daftar Proktor</strong> untuk mengelola akun proktor ruang ujian, menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Daftar Peserta</strong> untuk menambah peserta baru, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk merekapitulasi nilai.
                   </p>
                 </div>
               </div>

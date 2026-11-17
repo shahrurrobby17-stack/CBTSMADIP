@@ -30,6 +30,7 @@ interface LoginViewProps {
   activeSchedules?: AdminScheduleItem[];
   lastViolationInfo?: ViolationAlertInfo | null;
   onRequestResetLogin?: (username: string) => void;
+  onRefreshParticipants?: () => Promise<ProctorParticipantRow[]>;
   onExitApp?: () => void;
 }
 
@@ -37,6 +38,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   onLoginSuccess,
   participants = [],
   lastViolationInfo,
+  onRefreshParticipants,
   onOpenProctorModal,
   onExitApp,
 }) => {
@@ -44,6 +46,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isCheckingLogin, setIsCheckingLogin] = useState(false);
 
   const cleanUpperUsername = username.trim().toUpperCase();
   const shortUpperUsername = shortenStudentUsername(cleanUpperUsername);
@@ -79,8 +82,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const isMaxViolationReached =
     activeViolationCount >= 6 || Boolean(lastViolationInfo?.answersWiped);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCheckingLogin) return;
     const cleanUser = username.trim().toUpperCase();
     const shortUser = shortenStudentUsername(cleanUser);
     const cleanPass = password.trim();
@@ -89,12 +93,32 @@ export const LoginView: React.FC<LoginViewProps> = ({
       return;
     }
 
-    const row = participants.find(
-      (p) =>
-        p.username.trim().toUpperCase() === cleanUser ||
-        shortenStudentUsername(p.username) === shortUser ||
-        p.namaPeserta.trim().toUpperCase() === cleanUser
-    );
+    const findMatched = (list: ProctorParticipantRow[]) =>
+      list.find(
+        (p) =>
+          p.username.trim().toUpperCase() === cleanUser ||
+          shortenStudentUsername(p.username) === shortUser ||
+          p.namaPeserta.trim().toUpperCase() === cleanUser
+      );
+
+    let row = findMatched(participants);
+    if (
+      onRefreshParticipants &&
+      (!row || isParticipantLockedByViolation(row) || row.status !== 'Active')
+    ) {
+      setIsCheckingLogin(true);
+      try {
+        const freshList = await onRefreshParticipants();
+        if (Array.isArray(freshList) && freshList.length > 0) {
+          row = findMatched(freshList) || row;
+        }
+      } catch {
+        // fallback to local row
+      } finally {
+        setIsCheckingLogin(false);
+      }
+    }
+
     if (!row) {
       setErrorMsg('Username anda tidak terdaftar');
       return;
@@ -283,13 +307,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
           <div className="pt-2">
             <button
               type="submit"
-              className={`w-full py-2.5 px-6 rounded-full text-white text-[14px] font-semibold transition-all cursor-pointer ${
+              disabled={isCheckingLogin}
+              className={`w-full py-2.5 px-6 rounded-full text-white text-[14px] font-semibold transition-all cursor-pointer disabled:opacity-70 ${
                 isLockedByViolation
                   ? 'bg-slate-400 hover:bg-slate-500'
                   : 'bg-[#0066ff] hover:bg-[#0052cc] active:scale-[0.99] shadow-[0_6px_16px_rgba(0,102,255,0.28)]'
               }`}
             >
-              {isLockedByViolation
+              {isCheckingLogin
+                ? 'Memeriksa status akun...'
+                : isLockedByViolation
                 ? 'Akun Terkunci (Wajib Reset Proktor/Admin)'
                 : 'Login'}
             </button>
