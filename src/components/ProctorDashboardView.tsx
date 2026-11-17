@@ -285,6 +285,115 @@ export function isDefaultDemoParticipantsList(
   return rows.every((r) => isDefaultDemoParticipantRow(r));
 }
 
+export function getParticipantNameKelasKey(
+  row?: Partial<ProctorParticipantRow> | null
+): string {
+  if (!row || typeof row !== 'object') return '';
+  const name = String(row.namaPeserta || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+  if (!name) return '';
+  const kelas =
+    normalizeKelasCode(row.kelas) ||
+    String(row.kelas || '')
+      .trim()
+      .toUpperCase();
+  return `${name}__${kelas}`;
+}
+
+function getLoginStatePriority(
+  state?: ProctorParticipantRow['loginState']
+): number {
+  if (state === 'Selesai') return 4;
+  if (state === 'Sedang Mengerjakan') return 3;
+  if (state === 'Terkunci (Pelanggaran)') return 2;
+  return 1;
+}
+
+function mergeDuplicateParticipantRows(
+  existing: ProctorParticipantRow,
+  incoming: ProctorParticipantRow
+): ProctorParticipantRow {
+  const existingPriority = getLoginStatePriority(existing.loginState);
+  const incomingPriority = getLoginStatePriority(incoming.loginState);
+  const existingDraftCount = existing.draftAnswers
+    ? Object.keys(existing.draftAnswers).length
+    : 0;
+  const incomingDraftCount = incoming.draftAnswers
+    ? Object.keys(incoming.draftAnswers).length
+    : 0;
+
+  const existingIsActive = isParticipantStatusActive(existing.status);
+  const incomingIsActive = isParticipantStatusActive(incoming.status);
+
+  // Prefer the identity (id/username/password) of whichever record has exam progress or is already Active
+  const preferIncomingIdentity =
+    incomingPriority > existingPriority ||
+    (incomingPriority === existingPriority &&
+      incomingDraftCount > existingDraftCount) ||
+    (incomingPriority === existingPriority &&
+      !existingIsActive &&
+      incomingIsActive);
+
+  const primary = preferIncomingIdentity ? incoming : existing;
+  const secondary = preferIncomingIdentity ? existing : incoming;
+
+  const existingRuang = resolveParticipantRuang(existing);
+  const incomingRuang = resolveParticipantRuang(incoming);
+  const resolvedRuang =
+    existingRuang !== 'Ruang 1'
+      ? existingRuang
+      : incomingRuang !== 'Ruang 1'
+      ? incomingRuang
+      : primary.ruang || 'Ruang 1';
+
+  const maxResetAt = Math.max(
+    typeof existing.lastResetAt === 'number' ? existing.lastResetAt : 0,
+    typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0
+  );
+
+  const bestDraftAnswers =
+    incomingDraftCount > existingDraftCount
+      ? incoming.draftAnswers
+      : existingDraftCount > 0
+      ? existing.draftAnswers
+      : incoming.draftAnswers || existing.draftAnswers;
+
+  return {
+    ...secondary,
+    ...primary,
+    id: primary.id || secondary.id,
+    username: primary.username || secondary.username,
+    password: primary.password || secondary.password,
+    selected: Boolean(existing.selected || incoming.selected),
+    status: existingIsActive || incomingIsActive ? 'Active' : primary.status,
+    ruang: resolvedRuang,
+    kelompok:
+      resolvedRuang !== 'Ruang 1'
+        ? resolvedRuang
+        : primary.kelompok || secondary.kelompok || 'Ruang 1',
+    loginState:
+      incomingPriority > existingPriority
+        ? incoming.loginState
+        : existing.loginState,
+    ...(bestDraftAnswers ? { draftAnswers: bestDraftAnswers } : {}),
+    ...(primary.draftPackageId || secondary.draftPackageId
+      ? { draftPackageId: primary.draftPackageId || secondary.draftPackageId }
+      : {}),
+    ...(typeof primary.draftRemainingSeconds === 'number' ||
+    typeof secondary.draftRemainingSeconds === 'number'
+      ? {
+          draftRemainingSeconds:
+            typeof primary.draftRemainingSeconds === 'number'
+              ? primary.draftRemainingSeconds
+              : secondary.draftRemainingSeconds,
+        }
+      : {}),
+    ...(maxResetAt > 0 ? { lastResetAt: maxResetAt } : {}),
+  };
+}
+
 export function sanitizeParticipantRows(
   rows: ProctorParticipantRow[]
 ): ProctorParticipantRow[] {
@@ -301,7 +410,7 @@ export function sanitizeParticipantRows(
       })
     : rows;
 
-  const next = filtered.map((row, idx) => {
+  const normalizedRows = filtered.map((row, idx) => {
     const validLock = isParticipantLockedByViolation(row);
     const resolvedKelas =
       row.kelas && row.kelas.trim()
@@ -348,7 +457,49 @@ export function sanitizeParticipantRows(
     }
     return row;
   });
-  return changed ? next : rows;
+
+  // Deduplicate by (namaPeserta + kelas) and by username so re-uploaded Excel lists never create 245 duplicate students
+  const dedupedList: ProctorParticipantRow[] = [];
+  const indexByNameKelas = new Map<string, number>();
+  const indexByUsername = new Map<string, number>();
+
+  for (const row of normalizedRows) {
+    const nameKelasKey = getParticipantNameKelasKey(row);
+    const userKey = String(row.username || '')
+      .trim()
+      .toUpperCase();
+
+    const existingIdxByName =
+      nameKelasKey && indexByNameKelas.has(nameKelasKey)
+        ? indexByNameKelas.get(nameKelasKey)
+        : undefined;
+    const existingIdxByUser =
+      userKey && indexByUsername.has(userKey)
+        ? indexByUsername.get(userKey)
+        : undefined;
+
+    const matchIdx =
+      existingIdxByName !== undefined ? existingIdxByName : existingIdxByUser;
+
+    if (matchIdx !== undefined) {
+      changed = true;
+      const merged = mergeDuplicateParticipantRows(dedupedList[matchIdx], row);
+      dedupedList[matchIdx] = merged;
+      const mergedNameKey = getParticipantNameKelasKey(merged);
+      const mergedUserKey = String(merged.username || '')
+        .trim()
+        .toUpperCase();
+      if (mergedNameKey) indexByNameKelas.set(mergedNameKey, matchIdx);
+      if (mergedUserKey) indexByUsername.set(mergedUserKey, matchIdx);
+    } else {
+      const newIdx = dedupedList.length;
+      dedupedList.push(row);
+      if (nameKelasKey) indexByNameKelas.set(nameKelasKey, newIdx);
+      if (userKey) indexByUsername.set(userKey, newIdx);
+    }
+  }
+
+  return changed ? dedupedList : rows;
 }
 
 const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [

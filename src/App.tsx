@@ -18,6 +18,7 @@ import {
   ProctorDashboardView,
   ProctorParticipantRow,
   doesKelasMatch,
+  getParticipantNameKelasKey,
   isDefaultDemoParticipantRow,
   isDefaultDemoParticipantsList,
   isParticipantLockedByViolation,
@@ -1152,6 +1153,9 @@ export default function App() {
 
         // Additive protection: if this browser holds more real custom students (e.g. 127 students)
         // than what returned from a split-brain serverless instance, preserve all local non-demo students
+        let shouldHealParticipantsToServer =
+          res.data.participants.length > mergedRemoteParticipants.length;
+
         if (localHasRealParticipants) {
           const remoteUserSet = new Set(
             mergedRemoteParticipants.map((p) =>
@@ -1161,22 +1165,36 @@ export default function App() {
           const remoteIdSet = new Set(
             mergedRemoteParticipants.map((p) => String(p.id || '').trim())
           );
+          const remoteNameKelasSet = new Set(
+            mergedRemoteParticipants
+              .map((p) => getParticipantNameKelasKey(p))
+              .filter(Boolean)
+          );
           const missingLocalCustom = participantsRef.current.filter((p) => {
             if (isDefaultDemoParticipantRow(p)) return false;
             const u = (p.username || '').trim().toUpperCase();
             const id = String(p.id || '').trim();
-            return !remoteUserSet.has(u) && !remoteIdSet.has(id);
+            const nk = getParticipantNameKelasKey(p);
+            return (
+              !remoteUserSet.has(u) &&
+              !remoteIdSet.has(id) &&
+              (!nk || !remoteNameKelasSet.has(nk))
+            );
           });
           if (missingLocalCustom.length > 0) {
             mergedRemoteParticipants = sanitizeParticipantRows([
               ...mergedRemoteParticipants,
               ...missingLocalCustom,
             ]);
-            saveVercelStorage({
-              participants: mergedRemoteParticipants,
-              forceReplaceParticipants: true,
-            });
+            shouldHealParticipantsToServer = true;
           }
+        }
+
+        if (shouldHealParticipantsToServer) {
+          saveVercelStorage({
+            participants: mergedRemoteParticipants,
+            forceReplaceParticipants: true,
+          });
         }
 
         setParticipants(mergedRemoteParticipants);

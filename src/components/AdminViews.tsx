@@ -60,6 +60,7 @@ import {
   DEFAULT_EXAM_ROOMS,
   resolveParticipantRuang,
   doesKelasMatch,
+  getParticipantNameKelasKey,
   isDefaultDemoParticipantRow,
   isDefaultDemoParticipantsList,
   isParticipantLockedByViolation,
@@ -2404,46 +2405,92 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         );
         const existingKeys = new Set<string>();
         baseParticipants.forEach((p) => {
-          existingKeys.add(
-            `${p.namaPeserta.trim().toUpperCase()}__${(p.kelas || '').trim().toUpperCase()}`
-          );
+          const nk = getParticipantNameKelasKey(p);
+          if (nk) existingKeys.add(nk);
         });
+
+        // Cek cadangan lokal jika ada riwayat peserta sebelumnya agar username/password tetap konsisten saat upload ulang
+        const backupByNameKelas = new Map<string, ProctorParticipantRow>();
+        try {
+          const backupRaw = localStorage.getItem(
+            'pusmendik_cbt_participants_backup_v1'
+          );
+          if (backupRaw) {
+            const backupParsed = JSON.parse(backupRaw);
+            if (Array.isArray(backupParsed)) {
+              backupParsed.forEach((bp: ProctorParticipantRow) => {
+                const nk = getParticipantNameKelasKey(bp);
+                if (nk && !isDefaultDemoParticipantRow(bp)) {
+                  backupByNameKelas.set(nk, bp);
+                }
+              });
+            }
+          }
+        } catch {
+          // ignore
+        }
 
         const nowTs = Date.now();
         const appendedParticipants: ProctorParticipantRow[] = [];
 
         parsedEntries.forEach((entry, idx) => {
-          const compositeKey = `${entry.namaPeserta}__${entry.kelas}`;
-          if (existingKeys.has(compositeKey)) {
+          const compositeKey = getParticipantNameKelasKey({
+            namaPeserta: entry.namaPeserta,
+            kelas: entry.kelas,
+          });
+          if (compositeKey && existingKeys.has(compositeKey)) {
             return;
           }
-          existingKeys.add(compositeKey);
-
-          let randCode = Math.floor(1000 + Math.random() * 9000);
-          while (usedUsernames.has(`SA2026${randCode}`)) {
-            randCode = 1000 + ((randCode + 317) % 9000);
+          if (compositeKey) {
+            existingKeys.add(compositeKey);
           }
-          const newUsername = `SA2026${randCode}`;
-          usedUsernames.add(newUsername);
+
+          const backupMatch = compositeKey
+            ? backupByNameKelas.get(compositeKey)
+            : undefined;
+          let newUsername = '';
+          let newPassword = '';
+          let newId = `excel_${nowTs}_${idx}`;
+
+          if (
+            backupMatch &&
+            backupMatch.username &&
+            !usedUsernames.has(backupMatch.username.trim().toUpperCase())
+          ) {
+            newUsername = backupMatch.username.trim().toUpperCase();
+            const codeDigits = newUsername.replace(/^SA2026/, '') || '4821';
+            newPassword = backupMatch.password || `SMADIP${codeDigits}*`;
+            newId = backupMatch.id || newId;
+            usedUsernames.add(newUsername);
+          } else {
+            let randCode = Math.floor(1000 + Math.random() * 9000);
+            while (usedUsernames.has(`SA2026${randCode}`)) {
+              randCode = 1000 + ((randCode + 317) % 9000);
+            }
+            newUsername = `SA2026${randCode}`;
+            newPassword = `SMADIP${randCode}*`;
+            usedUsernames.add(newUsername);
+          }
 
           appendedParticipants.push({
-            id: `excel_${nowTs}_${idx}`,
+            id: newId,
             selected: true,
-            status: 'Non Active',
+            status: backupMatch?.status || 'Non Active',
             kodeTes: 'SAS26SMADIP1',
             username: newUsername,
-            password: `SMADIP${randCode}*`,
+            password: newPassword,
             namaPeserta: entry.namaPeserta,
-            kelompok: '1',
+            kelompok: backupMatch?.kelompok || '1',
+            ruang: backupMatch?.ruang,
             kelas: entry.kelas,
-            loginState: 'Belum Login',
+            loginState: backupMatch?.loginState || 'Belum Login',
           });
         });
 
-        const combinedParticipants = [
+        const combinedParticipants = sanitizeParticipantRows([
           ...baseParticipants,
           ...appendedParticipants,
-        ];
+        ]);
 
         setParticipants(combinedParticipants);
         setFilterStatus('Semua Status');

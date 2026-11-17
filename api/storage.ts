@@ -247,6 +247,132 @@ function writeToFileAndMemory(payload: Record<string, unknown>): void {
   }
 }
 
+function normalizeServerKelas(raw?: unknown): string {
+  if (typeof raw !== 'string' || !raw) return '';
+  const s = raw
+    .replace(/^kelas\s+/i, '')
+    .replace(/\s*\(.*?\)\s*/g, ' ')
+    .replace(/[-_]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+  if (!s) return '';
+  if (/^XII\b/.test(s)) {
+    if (s.includes('IPS')) return 'XII IPS';
+    if (s.includes('IPA') || s.includes('MIPA')) return 'XII IPA';
+    return s;
+  }
+  if (/^XI\b/.test(s)) {
+    if (s.includes('IPS')) return 'XI IPS';
+    if (s.includes('IPA') || s.includes('MIPA')) return 'XI IPA';
+    return s;
+  }
+  if (/^X\b/.test(s)) {
+    return 'X';
+  }
+  return s;
+}
+
+function getServerParticipantNameKelasKey(row: unknown): string {
+  if (!row || typeof row !== 'object') return '';
+  const r = row as Record<string, any>;
+  const name = String(r.namaPeserta || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+  if (!name) return '';
+  const kelas = normalizeServerKelas(r.kelas);
+  return `${name}__${kelas}`;
+}
+
+function getServerLoginPriority(state?: unknown): number {
+  if (state === 'Selesai') return 4;
+  if (state === 'Sedang Mengerjakan') return 3;
+  if (state === 'Terkunci (Pelanggaran)') return 2;
+  return 1;
+}
+
+function mergeServerDuplicateRows(
+  existing: Record<string, any>,
+  incoming: Record<string, any>
+): Record<string, any> {
+  const existingPriority = getServerLoginPriority(existing.loginState);
+  const incomingPriority = getServerLoginPriority(incoming.loginState);
+  const existingDraftCount =
+    existing.draftAnswers && typeof existing.draftAnswers === 'object'
+      ? Object.keys(existing.draftAnswers).length
+      : 0;
+  const incomingDraftCount =
+    incoming.draftAnswers && typeof incoming.draftAnswers === 'object'
+      ? Object.keys(incoming.draftAnswers).length
+      : 0;
+
+  const existingIsActive =
+    String(existing.status || '')
+      .trim()
+      .toLowerCase() === 'active';
+  const incomingIsActive =
+    String(incoming.status || '')
+      .trim()
+      .toLowerCase() === 'active';
+
+  const preferIncomingIdentity =
+    incomingPriority > existingPriority ||
+    (incomingPriority === existingPriority &&
+      incomingDraftCount > existingDraftCount) ||
+    (incomingPriority === existingPriority &&
+      !existingIsActive &&
+      incomingIsActive);
+
+  const primary = preferIncomingIdentity ? incoming : existing;
+  const secondary = preferIncomingIdentity ? existing : incoming;
+
+  const existingRuang = String(
+    existing.ruang || existing.kelompok || 'Ruang 1'
+  ).trim();
+  const incomingRuang = String(
+    incoming.ruang || incoming.kelompok || 'Ruang 1'
+  ).trim();
+  const resolvedRuang =
+    existingRuang && existingRuang !== 'Ruang 1' && existingRuang !== '1'
+      ? existingRuang
+      : incomingRuang && incomingRuang !== 'Ruang 1' && incomingRuang !== '1'
+      ? incomingRuang
+      : primary.ruang || 'Ruang 1';
+
+  const maxResetAt = Math.max(
+    typeof existing.lastResetAt === 'number' ? existing.lastResetAt : 0,
+    typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0
+  );
+
+  const bestDraftAnswers =
+    incomingDraftCount > existingDraftCount
+      ? incoming.draftAnswers
+      : existingDraftCount > 0
+      ? existing.draftAnswers
+      : incoming.draftAnswers || existing.draftAnswers;
+
+  return {
+    ...secondary,
+    ...primary,
+    id: primary.id || secondary.id,
+    username: primary.username || secondary.username,
+    password: primary.password || secondary.password,
+    status: existingIsActive || incomingIsActive ? 'Active' : primary.status,
+    ruang: resolvedRuang,
+    kelompok:
+      resolvedRuang !== 'Ruang 1'
+        ? resolvedRuang
+        : primary.kelompok || secondary.kelompok || 'Ruang 1',
+    loginState:
+      incomingPriority > existingPriority
+        ? incoming.loginState
+        : existing.loginState,
+    ...(bestDraftAnswers ? { draftAnswers: bestDraftAnswers } : {}),
+    ...(maxResetAt > 0 ? { lastResetAt: maxResetAt } : {}),
+  };
+}
+
 function sanitizeParticipantsList(
   rawList: unknown,
   existingList?: unknown
@@ -257,23 +383,22 @@ function sanitizeParticipantsList(
     ? rawList.filter((item) => !isDefaultDemoRow(item))
     : rawList;
 
-  const existingMap = new Map<string, Record<string, any>>();
+  const existingByUser = new Map<string, Record<string, any>>();
+  const existingByNameKelas = new Map<string, Record<string, any>>();
   if (Array.isArray(existingList)) {
     for (const item of existingList) {
-      if (
-        item &&
-        typeof item === 'object' &&
-        typeof (item as any).username === 'string'
-      ) {
-        existingMap.set(
-          (item as any).username.trim().toUpperCase(),
-          item as Record<string, any>
-        );
+      if (item && typeof item === 'object') {
+        const u = String((item as any).username || '')
+          .trim()
+          .toUpperCase();
+        if (u) existingByUser.set(u, item as Record<string, any>);
+        const nk = getServerParticipantNameKelasKey(item);
+        if (nk) existingByNameKelas.set(nk, item as Record<string, any>);
       }
     }
   }
 
-  return baseList
+  const normalizedList = baseList
     .filter((item) => item && typeof item === 'object')
     .map((item) => {
       const row = { ...(item as Record<string, any>) };
@@ -281,7 +406,10 @@ function sanitizeParticipantsList(
         typeof row.username === 'string'
           ? row.username.trim().toUpperCase()
           : '';
-      const prevRow = cleanUser ? existingMap.get(cleanUser) : undefined;
+      const nk = getServerParticipantNameKelasKey(row);
+      const prevRow =
+        (cleanUser ? existingByUser.get(cleanUser) : undefined) ||
+        (nk ? existingByNameKelas.get(nk) : undefined);
 
       const maxResetAt = Math.max(
         typeof row.lastResetAt === 'number' ? row.lastResetAt : 0,
@@ -339,6 +467,48 @@ function sanitizeParticipantsList(
 
       return row;
     });
+
+  // Deduplicate by (namaPeserta + kelas) and by username
+  const dedupedList: Record<string, any>[] = [];
+  const indexByNameKelas = new Map<string, number>();
+  const indexByUsername = new Map<string, number>();
+
+  for (const row of normalizedList) {
+    const nameKelasKey = getServerParticipantNameKelasKey(row);
+    const userKey = String(row.username || '')
+      .trim()
+      .toUpperCase();
+
+    const existingIdxByName =
+      nameKelasKey && indexByNameKelas.has(nameKelasKey)
+        ? indexByNameKelas.get(nameKelasKey)
+        : undefined;
+    const existingIdxByUser =
+      userKey && indexByUsername.has(userKey)
+        ? indexByUsername.get(userKey)
+        : undefined;
+
+    const matchIdx =
+      existingIdxByName !== undefined ? existingIdxByName : existingIdxByUser;
+
+    if (matchIdx !== undefined) {
+      const merged = mergeServerDuplicateRows(dedupedList[matchIdx], row);
+      dedupedList[matchIdx] = merged;
+      const mergedNameKey = getServerParticipantNameKelasKey(merged);
+      const mergedUserKey = String(merged.username || '')
+        .trim()
+        .toUpperCase();
+      if (mergedNameKey) indexByNameKelas.set(mergedNameKey, matchIdx);
+      if (mergedUserKey) indexByUsername.set(mergedUserKey, matchIdx);
+    } else {
+      const newIdx = dedupedList.length;
+      dedupedList.push(row);
+      if (nameKelasKey) indexByNameKelas.set(nameKelasKey, newIdx);
+      if (userKey) indexByUsername.set(userKey, newIdx);
+    }
+  }
+
+  return dedupedList;
 }
 
 function applyParticipantPatches(
@@ -448,14 +618,17 @@ function resolveIncomingParticipants(
   // so an un-synced tab or partial list never drops existing uploaded classes
   const incomingById = new Map<string, Record<string, any>>();
   const incomingByUser = new Map<string, Record<string, any>>();
+  const incomingByNameKelas = new Map<string, Record<string, any>>();
 
   for (const row of sanitizedIncoming) {
     const id = String(row.id || '').trim();
     const user = String(row.username || '')
       .trim()
       .toUpperCase();
+    const nk = getServerParticipantNameKelasKey(row);
     if (id) incomingById.set(id, row);
     if (user) incomingByUser.set(user, row);
+    if (nk) incomingByNameKelas.set(nk, row);
   }
 
   const sanitizedExisting = sanitizeParticipantsList(existingList);
@@ -468,6 +641,7 @@ function resolveIncomingParticipants(
     const existUser = String(existRow.username || '')
       .trim()
       .toUpperCase();
+    const existNk = getServerParticipantNameKelasKey(existRow);
 
     if (existId && deletedIds.has(existId)) {
       continue;
@@ -475,7 +649,8 @@ function resolveIncomingParticipants(
 
     const foundInIncoming =
       (existId && incomingById.has(existId)) ||
-      (existUser && incomingByUser.has(existUser));
+      (existUser && incomingByUser.has(existUser)) ||
+      (existNk && incomingByNameKelas.has(existNk));
 
     if (!foundInIncoming && isCustomUploadedRow(existRow)) {
       preservedMissingExisting.push(existRow);
@@ -483,7 +658,10 @@ function resolveIncomingParticipants(
   }
 
   if (preservedMissingExisting.length > 0 && !forceReplace) {
-    return [...sanitizedIncoming, ...preservedMissingExisting];
+    return sanitizeParticipantsList(
+      [...sanitizedIncoming, ...preservedMissingExisting],
+      existingList
+    );
   }
 
   // Even when forceReplace is true (e.g. Admin action), if deletedIds is empty and incoming suddenly dropped >50% of custom rows,
@@ -493,7 +671,10 @@ function resolveIncomingParticipants(
     deletedIds.size === 0 &&
     sanitizedIncoming.length < sanitizedExisting.length
   ) {
-    return [...sanitizedIncoming, ...preservedMissingExisting];
+    return sanitizeParticipantsList(
+      [...sanitizedIncoming, ...preservedMissingExisting],
+      existingList
+    );
   }
 
   return sanitizedIncoming;
