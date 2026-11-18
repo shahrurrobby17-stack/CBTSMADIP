@@ -153,6 +153,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   participants = [],
   resultsHistory = [],
   activeToken,
+  isScheduleActive,
   activeSchedules,
   onSyncRemoteData,
   onSubmitProfile,
@@ -375,22 +376,18 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               // ignore
             }
           }
-          if (
-            !remoteActiveSchedule &&
-            Array.isArray(res.data.schedules) &&
-            res.data.schedules.length > 0
-          ) {
+          if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
             const remoteActiveList = res.data.schedules.filter(
               (s) => s.isActive
             );
+            const exactRemote = remoteActiveList.filter((s) =>
+              doesKelasMatch(studentKelas, s.kelas)
+            );
             remoteActiveSchedule =
-              remoteActiveList.find((s) =>
-                doesKelasMatch(studentKelas, s.kelas)
-              ) ||
-              remoteActiveList[0] ||
-              res.data.schedules[0];
+              exactRemote[0] || remoteActiveList[0] || undefined;
           }
           if (
+            remoteActiveSchedule &&
             Array.isArray(res.data.packages) &&
             res.data.packages.length > 0
           ) {
@@ -412,6 +409,13 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       } finally {
         setIsVerifyingToken(false);
       }
+    }
+
+    if (!remoteActiveSchedule) {
+      setError(
+        'Jadwal ujian belum diaktifkan oleh Administrator. Mata pelajaran dan sesi ujian belum tersedia saat ini.'
+      );
+      return;
     }
 
     if (!isTokenValid) {
@@ -442,8 +446,15 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
     });
   };
 
+  const hasActiveSchedule =
+    Boolean(isScheduleActive) &&
+    activeSchedules.length > 0 &&
+    Boolean(selectedSchedule);
+
   const activeSubjectLabel =
-    selectedSchedule?.mapel || activePackage?.title || '-';
+    hasActiveSchedule && selectedSchedule?.mapel
+      ? selectedSchedule.mapel
+      : '-';
 
   return (
     <main className="flex-1 max-w-[1200px] w-full mx-auto px-4 sm:px-8 py-8">
@@ -474,6 +485,16 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             </div>
           </div>
 
+          {/* Nama Peserta (Tidak dapat diedit oleh siswa) */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
+            <label className="text-xs font-semibold text-slate-500">
+              Nama Peserta
+            </label>
+            <div className="sm:col-span-2 text-sm font-bold text-slate-900">
+              {resolvedFullName}
+            </div>
+          </div>
+
           {/* Kelas Peserta (Warna Hitam) */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
             <label className="text-xs font-semibold text-slate-500">
@@ -500,7 +521,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               Mata Pelajaran
             </label>
             <div className="sm:col-span-2">
-              {studentActiveSchedules.length > 1 ? (
+              {hasActiveSchedule && studentActiveSchedules.length > 1 ? (
                 <select
                   value={selectedSchedule?.id || ''}
                   onChange={(e) => {
@@ -522,23 +543,13 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               ) : (
                 <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-900">
                   <span>{activeSubjectLabel}</span>
-                  {selectedSchedule && isScheduleCompleted(selectedSchedule) && (
+                  {hasActiveSchedule && selectedSchedule && isScheduleCompleted(selectedSchedule) && (
                     <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[11px] font-bold">
                       Sudah Selesai
                     </span>
                   )}
                 </div>
               )}
-            </div>
-          </div>
-
-          {/* Nama Peserta (Tidak dapat diedit oleh siswa) */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 sm:items-center py-1.5 border-b border-slate-100">
-            <label className="text-xs font-semibold text-slate-500">
-              Nama Peserta
-            </label>
-            <div className="sm:col-span-2 text-sm font-bold text-slate-900">
-              {resolvedFullName}
             </div>
           </div>
 

@@ -47,10 +47,7 @@ function isStudentPasswordValid(
   if (!expectedPass) return true;
   const cleanEntered = enteredPassword.trim();
   if (cleanEntered === expectedPass) return true;
-  if (
-    expectedPass === expectedPass.toUpperCase() &&
-    cleanEntered.toUpperCase() === expectedPass
-  ) {
+  if (cleanEntered.toUpperCase() === expectedPass.toUpperCase()) {
     return true;
   }
   return false;
@@ -325,13 +322,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 type="text"
                 value={username}
                 onChange={(e) => {
-                  setUsername(e.target.value);
+                  setUsername(e.target.value.toUpperCase());
                   setErrorMsg('');
                 }}
                 placeholder="Username"
                 aria-label="Username"
                 autoComplete="off"
-                className="w-full pb-2 pt-1 text-[14px] text-slate-800 placeholder:text-slate-400 bg-transparent border-b border-slate-200 focus:border-[#0066ff] focus:outline-none transition-colors"
+                autoCorrect="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                className="w-full pb-2 pt-1 text-[14px] uppercase placeholder:normal-case text-slate-800 placeholder:text-slate-400 bg-transparent border-b border-slate-200 focus:border-[#0066ff] focus:outline-none transition-colors"
               />
             </div>
           </div>
@@ -353,13 +353,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => {
-                  setPassword(e.target.value);
+                  setPassword(e.target.value.toUpperCase());
                   setErrorMsg('');
                 }}
                 placeholder="Password"
                 aria-label="Password"
                 autoComplete="new-password"
-                className="w-full pb-2 pt-1 pr-8 text-[14px] text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-none"
+                autoCorrect="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                className="w-full pb-2 pt-1 pr-8 text-[14px] uppercase placeholder:normal-case text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-none"
               />
               <button
                 type="button"
