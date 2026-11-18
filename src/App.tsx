@@ -10,6 +10,7 @@ import {
   ParticipantConfirmationView,
   TestConfirmationView,
   resolvePackageForSchedule,
+  cleanMapelTitle,
 } from './components/ConfirmationViews';
 import { ExamRunnerView } from './components/ExamRunnerView';
 import { ExamResultView } from './components/ExamResultView';
@@ -431,6 +432,38 @@ function clearStudentDraftInLocal(username: string, packageId: string): void {
   }
 }
 
+function loadNormalizedAdminSettings(): Record<string, any> {
+  const defaults: Record<string, any> = {
+    tokenIntervalMenit: 10,
+    enforceMinFinishTime: false,
+    acakSoal: true,
+    acakOpsi: true,
+    wajibFullscreen: true,
+    kunciKeluarSistem: true,
+    tampilkanNilaiPeserta: false,
+    minMinutesBeforeFinish: 45,
+    pesanPelanggaran:
+      'Anda terdeteksi keluar dari layar CBT! Harap lapor ke Proktor / Pengawas untuk reset login.',
+    updatedAt: 0,
+  };
+  try {
+    const raw = localStorage.getItem('cbt_admin_settings');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        const normalized = { ...defaults, ...parsed };
+        if (!parsed.updatedAt && parsed.tokenIntervalMenit === 15) {
+          normalized.tokenIntervalMenit = 10;
+        }
+        return normalized;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return defaults;
+}
+
 export default function App() {
   const [stage, setStage] = useState<AppStage>('login');
   const stageRef = useRef<AppStage>(stage);
@@ -661,7 +694,23 @@ export default function App() {
     return INITIAL_EXAM_PACKAGES;
   });
 
-  const TOKEN_DURATION_SECONDS = 600; // 10 menit (600 detik)
+  const [adminSettings, setAdminSettings] = useState<Record<string, any>>(
+    loadNormalizedAdminSettings
+  );
+  const adminSettingsRef = useRef<Record<string, any>>(adminSettings);
+  useEffect(() => {
+    adminSettingsRef.current = adminSettings;
+  }, [adminSettings]);
+
+  const tokenIntervalMins = Math.min(
+    60,
+    Math.max(5, Number(adminSettings.tokenIntervalMenit) || 10)
+  );
+  const TOKEN_DURATION_SECONDS = tokenIntervalMins * 60;
+  const tokenDurationSecondsRef = useRef<number>(TOKEN_DURATION_SECONDS);
+  useEffect(() => {
+    tokenDurationSecondsRef.current = TOKEN_DURATION_SECONDS;
+  }, [TOKEN_DURATION_SECONDS]);
 
   const generateRandomToken = useCallback(() => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -727,6 +776,7 @@ export default function App() {
   const latestUpdatedAtRef = useRef<number>(0);
   const pendingPushCount = useRef<number>(0);
   const examStartedAtRef = useRef<number>(0);
+  const lastFullscreenRequestAtRef = useRef<number>(0);
   const draftSyncTimerRef = useRef<number | null>(null);
   const isSyncInFlightRef = useRef<boolean>(false);
   const lastSyncAttemptAtRef = useRef<number>(0);
@@ -771,6 +821,41 @@ export default function App() {
     []
   );
 
+  const handleUpdateAdminSettings = useCallback(
+    (nextCfg: Record<string, any>) => {
+      const nowTs = Date.now();
+      const stamped: Record<string, any> = {
+        ...nextCfg,
+        updatedAt: Math.max(Number(nextCfg.updatedAt) || 0, nowTs),
+      };
+      lastLocalMutationAt.current = nowTs;
+      adminSettingsRef.current = stamped;
+      setAdminSettings(stamped);
+      try {
+        localStorage.setItem('cbt_admin_settings', JSON.stringify(stamped));
+      } catch {
+        // ignore
+      }
+      pendingPushCount.current += 1;
+      saveVercelStorage({ adminSettings: stamped })
+        .then((res) => {
+          if (res.ok) {
+            if (typeof res.updatedAt === 'number') {
+              latestUpdatedAtRef.current = Math.max(
+                latestUpdatedAtRef.current,
+                res.updatedAt
+              );
+            }
+            markSyncedSuccess(res.engine);
+          }
+        })
+        .finally(() => {
+          pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
+        });
+    },
+    [markSyncedSuccess]
+  );
+
   const handleUpdateToken = useCallback(
     (nextToken: string, isManualUpdate = true) => {
       const cleanToken = nextToken.trim().toUpperCase() || DEFAULT_EXAM_TOKEN;
@@ -800,10 +885,21 @@ export default function App() {
           pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
         });
     },
-    [markSyncedSuccess]
+    [markSyncedSuccess, TOKEN_DURATION_SECONDS]
   );
 
-  // Automatic 10-minute token countdown timer (wall-clock based, single primary authority on Admin)
+  useEffect(() => {
+    if (tokenUpdatedAtRef.current > 0) {
+      const nextEndMs =
+        tokenUpdatedAtRef.current + TOKEN_DURATION_SECONDS * 1000;
+      tokenEndTimeRef.current = nextEndMs;
+      setTokenSecondsLeft(
+        Math.max(0, Math.ceil((nextEndMs - Date.now()) / 1000))
+      );
+    }
+  }, [TOKEN_DURATION_SECONDS]);
+
+  // Automatic token countdown timer (wall-clock based, single primary authority on Admin)
   useEffect(() => {
     const tick = () => {
       const diffMs = tokenEndTimeRef.current - Date.now();
@@ -811,7 +907,7 @@ export default function App() {
       setTokenSecondsLeft(secsLeft);
 
       if (isScheduleActive) {
-        // Admin rotates immediately when 10:00 hits; Proctor only acts as fallback 15s later if Admin is offline
+        // Admin rotates immediately when countdown hits 0; Proctor only acts as fallback 15s later if Admin is offline
         const shouldAdminRotate =
           stage === 'admin_dashboard' && diffMs <= 0;
         const shouldProctorFallbackRotate =
@@ -828,7 +924,13 @@ export default function App() {
 
     const timer = window.setInterval(tick, 1000);
     return () => window.clearInterval(timer);
-  }, [generateRandomToken, handleUpdateToken, isScheduleActive, stage]);
+  }, [
+    generateRandomToken,
+    handleUpdateToken,
+    isScheduleActive,
+    stage,
+    TOKEN_DURATION_SECONDS,
+  ]);
 
   const [participant, setParticipant] = useState<ParticipantProfile>({
     username: 'SA20266475',
@@ -1155,6 +1257,7 @@ export default function App() {
               prevRow.violationReason !== row.violationReason ||
               prevRow.violationTimestamp !== row.violationTimestamp ||
               prevRow.violationCount !== row.violationCount ||
+              prevRow.violationPackageId !== row.violationPackageId ||
               prevRow.lastResetAt !== row.lastResetAt ||
               prevRow.draftAnswers !== row.draftAnswers ||
               prevRow.draftPackageId !== row.draftPackageId ||
@@ -1182,6 +1285,7 @@ export default function App() {
             violationSchema: (row.violationSchema ?? null) as any,
             violationTimestamp: (row.violationTimestamp ?? null) as any,
             violationCount: row.violationCount ?? 0,
+            violationPackageId: (row.violationPackageId ?? null) as any,
             draftAnswers: (row.draftAnswers ?? null) as any,
             draftPackageId: (row.draftPackageId ?? null) as any,
             draftRemainingSeconds: (row.draftRemainingSeconds ?? null) as any,
@@ -1566,9 +1670,9 @@ export default function App() {
               );
               const syncedEndMs =
                 remoteTokenTs > 0 &&
-                remoteTokenTs + TOKEN_DURATION_SECONDS * 1000 > Date.now()
-                  ? remoteTokenTs + TOKEN_DURATION_SECONDS * 1000
-                  : Date.now() + TOKEN_DURATION_SECONDS * 1000;
+                remoteTokenTs + tokenDurationSecondsRef.current * 1000 > Date.now()
+                  ? remoteTokenTs + tokenDurationSecondsRef.current * 1000
+                  : Date.now() + tokenDurationSecondsRef.current * 1000;
               tokenEndTimeRef.current = syncedEndMs;
               setActiveToken(res.data.activeToken);
               setTokenSecondsLeft(
@@ -1593,7 +1697,7 @@ export default function App() {
             }
           }
 
-          // Sync remote adminSettings (deleted/custom mapel config) if newer than local
+          // Sync remote adminSettings (deleted/custom mapel config & exam settings) if newer than local
           if (
             res.data.adminSettings &&
             typeof res.data.adminSettings === 'object'
@@ -1601,16 +1705,30 @@ export default function App() {
             try {
               const rawLocalCfg = localStorage.getItem('cbt_admin_settings');
               const localCfg = rawLocalCfg ? JSON.parse(rawLocalCfg) : null;
-              const localCfgTs =
-                typeof localCfg?.updatedAt === 'number' ? localCfg.updatedAt : 0;
+              const localCfgTs = Math.max(
+                typeof localCfg?.updatedAt === 'number' ? localCfg.updatedAt : 0,
+                typeof adminSettingsRef.current?.updatedAt === 'number'
+                  ? adminSettingsRef.current.updatedAt
+                  : 0
+              );
+              const remoteRaw = res.data.adminSettings as Record<string, any>;
               const remoteCfgTs =
-                typeof res.data.adminSettings.updatedAt === 'number'
-                  ? res.data.adminSettings.updatedAt
+                typeof remoteRaw.updatedAt === 'number'
+                  ? remoteRaw.updatedAt
                   : 0;
+              const normalizedRemoteCfg: Record<string, any> = {
+                ...adminSettingsRef.current,
+                ...remoteRaw,
+              };
+              if (!remoteRaw.updatedAt && remoteRaw.tokenIntervalMenit === 15) {
+                normalizedRemoteCfg.tokenIntervalMenit = 10;
+              }
               if (!localCfg || remoteCfgTs > localCfgTs) {
+                adminSettingsRef.current = normalizedRemoteCfg;
+                setAdminSettings(normalizedRemoteCfg);
                 localStorage.setItem(
                   'cbt_admin_settings',
-                  JSON.stringify(res.data.adminSettings)
+                  JSON.stringify(normalizedRemoteCfg)
                 );
               }
             } catch {
@@ -2076,11 +2194,16 @@ export default function App() {
       // Ignore
     }
 
+    if (adminSettingsRef.current?.wajibFullscreen === false) {
+      return;
+    }
+
     if (doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement) {
       setIsFullscreenActive(true);
       return;
     }
 
+    lastFullscreenRequestAtRef.current = Date.now();
     if (docEl.requestFullscreen) {
       docEl
         .requestFullscreen({ navigationUI: 'hide' })
@@ -2173,8 +2296,12 @@ export default function App() {
         (r) => r.username.trim().toUpperCase() === cleanUser
       );
       const localDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
+      const sameViolationPkg =
+        !existingRow?.violationPackageId ||
+        existingRow.violationPackageId === currentPkgId;
 
       const prevRowVCount =
+        sameViolationPkg &&
         typeof existingRow?.violationCount === 'number' &&
         existingRow.violationCount > 0 &&
         existingRow.violationCount < MAX_VIOLATION_LIMIT
@@ -2232,6 +2359,7 @@ export default function App() {
                     violationSchema: 3,
                     violationTimestamp: nowTs,
                     violationCount: nextViolationCount,
+                    violationPackageId: currentPkgId,
                     draftAnswers: shouldWipeAnswers
                       ? undefined
                       : currentAnswersSnapshot,
@@ -2261,6 +2389,7 @@ export default function App() {
                 violationSchema: 3,
                 violationTimestamp: nowTs,
                 violationCount: nextViolationCount,
+                violationPackageId: currentPkgId,
                 draftAnswers: shouldWipeAnswers
                   ? undefined
                   : currentAnswersSnapshot,
@@ -2347,13 +2476,33 @@ export default function App() {
         exitCbtFullscreen();
 
         // Hanya catat pelanggaran jika siswa sudah berada di halaman soal (exam_running)
+        // dengan paket yang sudah memiliki butir soal dan pengaturan kunciKeluarSistem aktif
         if (
           stage === 'exam_running' &&
-          Date.now() - examStartedAtRef.current > 3000
+          (selectedPackage?.questions?.length || 0) > 0 &&
+          adminSettingsRef.current?.kunciKeluarSistem !== false &&
+          Date.now() - examStartedAtRef.current > 4500
         ) {
           lockStudentByViolation(
             'Keluar dari halaman soal ujian CBT (Menekan tombol Esc pada keyboard laptop)'
           );
+        } else if (stage === 'exam_running' && (selectedPackage?.questions?.length || 0) === 0) {
+          handleUpdateParticipants((prev) =>
+            prev.map((row) =>
+              row.username.trim().toUpperCase() === participant.username.trim().toUpperCase() &&
+              row.loginState === 'Sedang Mengerjakan'
+                ? {
+                    ...row,
+                    loginState: 'Belum Login',
+                    requestReset: false,
+                    draftAnswers: undefined,
+                    draftPackageId: undefined,
+                    draftRemainingSeconds: undefined,
+                  }
+                : row
+            )
+          );
+          setStage('login');
         } else if (
           stage === 'confirm_participant' ||
           stage === 'confirm_test' ||
@@ -2398,17 +2547,22 @@ export default function App() {
     lockStudentByViolation,
     handleUpdateParticipants,
     participant.username,
+    selectedPackage?.questions?.length,
   ]);
 
   // Detect student exit violation ONLY when inside active question page (exam_running)
-  // and student genuinely hides the tab / switches application
+  // with non-empty questions and student genuinely hides the tab / switches application
   useEffect(() => {
     if (stage !== 'exam_running') return;
+    if ((selectedPackage?.questions?.length || 0) === 0) return;
 
     const handleVisibilityViolation = () => {
+      if (adminSettingsRef.current?.kunciKeluarSistem === false) return;
+      const now = Date.now();
       if (
         document.visibilityState === 'hidden' &&
-        Date.now() - examStartedAtRef.current > 3000
+        now - examStartedAtRef.current > 4500 &&
+        now - lastFullscreenRequestAtRef.current > 1500
       ) {
         lockStudentByViolation(
           'Keluar dari halaman soal CBT / berpindah tab atau aplikasi saat ujian berlangsung'
@@ -2424,7 +2578,7 @@ export default function App() {
         handleVisibilityViolation
       );
     };
-  }, [stage, lockStudentByViolation]);
+  }, [stage, lockStudentByViolation, selectedPackage?.questions?.length]);
 
   const handleRequestResetFromLogin = useCallback(
     (username: string) => {
@@ -2459,7 +2613,7 @@ export default function App() {
   const handleLoginSuccess = (username: string) => {
     const cleanUser = username.trim().toUpperCase();
     const shortUser = shortenStudentUsername(cleanUser);
-    const matchedRow = participants.find(
+    const matchedRow = participantsRef.current.find(
       (p) =>
         p.username.trim().toUpperCase() === cleanUser ||
         shortenStudentUsername(p.username) === shortUser ||
@@ -2481,17 +2635,46 @@ export default function App() {
       return;
     }
 
-    requestCbtFullscreen();
-
     const resolvedUsername = matchedRow.username.trim().toUpperCase();
-    const isSainsPreset = resolvedUsername.startsWith('K02');
-    const resolvedFullName =
-      matchedRow?.namaPeserta ||
-      (isSainsPreset ? 'BAGAS ADITYA NUGRAHA' : cleanUser);
+    const resolvedFullName = matchedRow.namaPeserta || cleanUser;
     const resolvedKelas =
-      normalizeKelasCode(matchedRow?.kelas) ||
+      normalizeKelasCode(matchedRow.kelas) ||
       (activeSchedules[0] ? normalizeKelasCode(activeSchedules[0].kelas) : 'X') ||
       'X';
+
+    const exactStudentSchedules = activeSchedules.filter((s) =>
+      doesKelasMatch(resolvedKelas, s.kelas)
+    );
+    const studentClassSchedules =
+      exactStudentSchedules.length > 0 ? exactStudentSchedules : activeSchedules;
+
+    const completedSubjects = new Set(
+      resultsHistoryRef.current
+        .filter(
+          (r) =>
+            (r.participant?.username || '').trim().toUpperCase() ===
+            resolvedUsername
+        )
+        .map((r) => cleanMapelTitle(r.packageTitle || '').toLowerCase())
+        .filter(Boolean)
+    );
+
+    const firstUncompletedSchedule =
+      studentClassSchedules.find(
+        (s) => !completedSubjects.has(cleanMapelTitle(s.mapel).toLowerCase())
+      ) || studentClassSchedules[0];
+
+    if (
+      matchedRow.loginState === 'Selesai' &&
+      studentClassSchedules.length > 0 &&
+      studentClassSchedules.every((s) =>
+        completedSubjects.has(cleanMapelTitle(s.mapel).toLowerCase())
+      )
+    ) {
+      return;
+    }
+
+    requestCbtFullscreen();
 
     // Update or register participant in shared Vercel Storage (without locking or marking exam running yet)
     handleUpdateParticipants((prev) => {
@@ -2529,27 +2712,18 @@ export default function App() {
       ];
     });
 
-    const studentClassSchedules = activeSchedules.filter((s) =>
-      doesKelasMatch(resolvedKelas, s.kelas)
-    );
-    const scheduledPkg =
-      studentClassSchedules.length > 0
-        ? resolvePackageForSchedule(studentClassSchedules[0], packages)
-        : undefined;
+    const scheduledPkg = firstUncompletedSchedule
+      ? resolvePackageForSchedule(firstUncompletedSchedule, packages)
+      : undefined;
 
     setLastViolationInfo(null);
     setParticipant((prev) => ({
       ...prev,
       username: resolvedUsername,
-      nik: isSainsPreset ? '3174052209080004' : '3273011805080002',
       fullName: resolvedFullName,
       kelas: resolvedKelas,
-      activeSubjectTitle: studentClassSchedules[0]?.mapel,
-      gender: isSainsPreset ? 'Laki-Laki' : 'Perempuan',
-      selectedPackageId:
-        scheduledPkg?.id ||
-        (isSainsPreset ? packages[1]?.id || packages[0]?.id : packages[0]?.id) ||
-        '',
+      activeSubjectTitle: firstUncompletedSchedule?.mapel,
+      selectedPackageId: scheduledPkg?.id || packages[0]?.id || '',
     }));
     setStage('confirm_participant');
   };
@@ -2575,15 +2749,27 @@ export default function App() {
     );
     const localDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
 
+    const sameViolationPkg =
+      !matchedRow?.violationPackageId ||
+      matchedRow.violationPackageId === currentPkgId;
     const rowVCount =
-      typeof matchedRow?.violationCount === 'number'
+      sameViolationPkg && typeof matchedRow?.violationCount === 'number'
         ? matchedRow.violationCount
         : 0;
     const localVCount =
-      typeof localDraft?.violationCount === 'number'
+      sameViolationPkg && typeof localDraft?.violationCount === 'number'
         ? localDraft.violationCount
         : 0;
     const mergedViolationCount = Math.max(rowVCount, localVCount);
+
+    const isRemoteResetNewerThanLocalDraft = Boolean(
+      matchedRow &&
+        !matchedRow.draftAnswers &&
+        (matchedRow.lastResetAt || 0) > (localDraft?.updatedAt || 0)
+    );
+    if (isRemoteResetNewerThanLocalDraft) {
+      clearStudentDraftInLocal(cleanUser, currentPkgId);
+    }
 
     let restoredAnswers: Record<string, StudentAnswer> = {};
     let restoredRemainingSecs: number | undefined = undefined;
@@ -2596,10 +2782,13 @@ export default function App() {
     } else {
       // Pulihkan jawaban dan sisa waktu jika siswa kembali masuk setelah Reset Login (pelanggaran 1x-5x)
       const hasLocalAnswers =
-        localDraft &&
-        localDraft.packageId === currentPkgId &&
-        localDraft.answers &&
-        Object.keys(localDraft.answers).length > 0;
+        !isRemoteResetNewerThanLocalDraft &&
+        Boolean(
+          localDraft &&
+            localDraft.packageId === currentPkgId &&
+            localDraft.answers &&
+            Object.keys(localDraft.answers).length > 0
+        );
       const hasRemoteAnswers =
         matchedRow?.draftPackageId === currentPkgId &&
         matchedRow?.draftAnswers &&
@@ -2617,6 +2806,7 @@ export default function App() {
       }
 
       if (
+        !isRemoteResetNewerThanLocalDraft &&
         typeof localDraft?.remainingSeconds === 'number' &&
         localDraft.remainingSeconds > 0
       ) {
@@ -2648,6 +2838,8 @@ export default function App() {
               violationSchema: undefined,
               violationTimestamp: undefined,
               violationCount: effectiveViolationCount,
+              violationPackageId:
+                effectiveViolationCount > 0 ? currentPkgId : undefined,
               loginUpdatedAt: Date.now(),
               draftPackageId: currentPkgId,
               draftAnswers: restoredAnswers,
@@ -2822,6 +3014,7 @@ export default function App() {
               violationSchema: null as any,
               violationTimestamp: null as any,
               violationCount: 0,
+              violationPackageId: null as any,
               draftAnswers: null as any,
               draftPackageId: null as any,
               draftRemainingSeconds: null as any,
@@ -2845,6 +3038,7 @@ export default function App() {
                   violationSchema: undefined,
                   violationTimestamp: undefined,
                   violationCount: 0,
+                  violationPackageId: undefined,
                   loginUpdatedAt: nowTs,
                   draftAnswers: undefined,
                   draftPackageId: undefined,
@@ -2906,8 +3100,52 @@ export default function App() {
     [answers, markSyncedSuccess, participant, selectedPackage]
   );
 
+  const handleCancelEmptyExam = useCallback(() => {
+    if (draftSyncTimerRef.current) {
+      window.clearTimeout(draftSyncTimerRef.current);
+      draftSyncTimerRef.current = null;
+    }
+    const cleanUser = participant.username.trim().toUpperCase();
+    clearStudentDraftInLocal(
+      cleanUser,
+      selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id
+    );
+    examRemainingSecondsRef.current = undefined;
+    setExamInitialRemainingSeconds(undefined);
+    handleUpdateParticipants((prev) =>
+      prev.map((row) =>
+        row.username.trim().toUpperCase() === cleanUser
+          ? {
+              ...row,
+              loginState:
+                row.loginState === 'Sedang Mengerjakan'
+                  ? 'Belum Login'
+                  : row.loginState,
+              requestReset: false,
+              draftAnswers: undefined,
+              draftPackageId: undefined,
+              draftRemainingSeconds: undefined,
+            }
+          : row
+      )
+    );
+    exitCbtFullscreen();
+    setAnswers({});
+    answersRef.current = {};
+    setStage('login');
+  }, [
+    exitCbtFullscreen,
+    handleUpdateParticipants,
+    participant.username,
+    selectedPackage?.id,
+  ]);
+
   const handleLogout = () => {
     if (stage === 'exam_running') {
+      if ((selectedPackage?.questions?.length || 0) === 0) {
+        handleCancelEmptyExam();
+        return;
+      }
       // Jangan panggil setAnswers({}) di sini agar lockStudentByViolation
       // menyimpan jawaban untuk pelanggaran 1..5 dan hanya menghapus jika mencapai 6x
       lockStudentByViolation(
@@ -2944,7 +3182,10 @@ export default function App() {
         onUpdateProctors={handleUpdateProctors}
         activeToken={activeToken}
         tokenSecondsLeft={tokenSecondsLeft}
+        tokenDurationSeconds={TOKEN_DURATION_SECONDS}
         onUpdateToken={handleUpdateToken}
+        adminSettings={adminSettings}
+        onUpdateAdminSettings={handleUpdateAdminSettings}
         isScheduleActive={isScheduleActive}
         activeSchedules={activeSchedules}
         participants={participants}
@@ -2966,7 +3207,10 @@ export default function App() {
         adminUsername={adminUsername}
         activeToken={activeToken}
         tokenSecondsLeft={tokenSecondsLeft}
+        tokenDurationSeconds={TOKEN_DURATION_SECONDS}
         onUpdateToken={handleUpdateToken}
+        adminSettings={adminSettings}
+        onUpdateAdminSettings={handleUpdateAdminSettings}
         schedules={schedules}
         onUpdateSchedules={handleUpdateSchedules}
         participants={participants}
@@ -3016,6 +3260,11 @@ export default function App() {
           activeSchedules={activeSchedules}
           resultsHistory={resultsHistory}
           lastViolationInfo={lastViolationInfo}
+          violationMessage={
+            typeof adminSettings.pesanPelanggaran === 'string'
+              ? adminSettings.pesanPelanggaran
+              : undefined
+          }
           onRequestResetLogin={handleRequestResetFromLogin}
           onRefreshParticipants={() => syncFromVercelCloud({ force: true })}
           onQuickLoginAdmin={() => {
@@ -3055,6 +3304,11 @@ export default function App() {
       {/* Stage 1B: Halaman Login Khusus Proktor */}
       {stage === 'proctor_login' && (
         <ProctorLoginView
+          proctors={proctors}
+          onRefreshProctors={async () => {
+            await syncFromVercelCloud({ force: true });
+            return proctorsRef.current;
+          }}
           onProctorLoginSuccess={(proctorName, encryptionCode) => {
             requestCbtFullscreen();
             setProctorSession({ name: proctorName, encryptionCode });
@@ -3075,6 +3329,11 @@ export default function App() {
       {/* Stage 1C: Halaman Login Khusus Administrator */}
       {stage === 'admin_login' && (
         <AdminLoginView
+          adminSettings={adminSettings}
+          onRefreshAdminSettings={async () => {
+            await syncFromVercelCloud({ force: true });
+            return adminSettingsRef.current;
+          }}
           onAdminLoginSuccess={(adminUser) => {
             requestCbtFullscreen();
             setAdminUsername(adminUser);
@@ -3111,11 +3370,17 @@ export default function App() {
           initialProfile={participant}
           packages={packages}
           participants={participants}
+          resultsHistory={resultsHistory}
           activeToken={activeToken}
           isScheduleActive={isScheduleActive}
           activeSchedules={activeSchedules}
           onRefreshToken={handleRefreshToken}
-          onSyncRemoteData={({ packages: remotePkgs, schedules: remoteSchs, activeToken: remoteTok }) => {
+          onSyncRemoteData={({
+            packages: remotePkgs,
+            schedules: remoteSchs,
+            activeToken: remoteTok,
+            tokenUpdatedAt: remoteTokenTs,
+          }) => {
             if (Array.isArray(remotePkgs) && remotePkgs.length > 0) {
               const cleaned = filterOutSimulasiTka(remotePkgs);
               const merged = mergePackagesPreservingQuestions(
@@ -3136,6 +3401,20 @@ export default function App() {
             if (typeof remoteTok === 'string' && remoteTok) {
               activeTokenRef.current = remoteTok;
               setActiveToken(remoteTok);
+              if (typeof remoteTokenTs === 'number' && remoteTokenTs > 0) {
+                tokenUpdatedAtRef.current = Math.max(
+                  tokenUpdatedAtRef.current,
+                  remoteTokenTs
+                );
+                const nextEndMs =
+                  remoteTokenTs + TOKEN_DURATION_SECONDS * 1000 > Date.now()
+                    ? remoteTokenTs + TOKEN_DURATION_SECONDS * 1000
+                    : Date.now() + TOKEN_DURATION_SECONDS * 1000;
+                tokenEndTimeRef.current = nextEndMs;
+                setTokenSecondsLeft(
+                  Math.max(0, Math.ceil((nextEndMs - Date.now()) / 1000))
+                );
+              }
             }
           }}
           onSubmitProfile={handleConfirmParticipant}
@@ -3156,18 +3435,36 @@ export default function App() {
       {stage === 'exam_running' && (
         <ExamRunnerView
           examPackage={selectedPackage}
+          participantUsername={participant.username}
           answers={answers}
           onUpdateAnswer={handleUpdateAnswer}
           onFinishExam={handleFinishExam}
+          onCancelEmptyExam={handleCancelEmptyExam}
           initialRemainingSeconds={examInitialRemainingSeconds}
           onRemainingSecondsChange={handleRemainingSecondsChange}
-          violationCount={
-            participants.find(
+          shuffleQuestions={adminSettings.acakSoal !== false}
+          shuffleOptions={adminSettings.acakOpsi !== false}
+          minMinutesBeforeFinish={
+            adminSettings.enforceMinFinishTime
+              ? Number(adminSettings.minMinutesBeforeFinish) || 0
+              : 0
+          }
+          showResultScore={Boolean(adminSettings.tampilkanNilaiPeserta)}
+          violationCount={(() => {
+            const vRow = participants.find(
               (p) =>
                 p.username.trim().toUpperCase() ===
                 participant.username.trim().toUpperCase()
-            )?.violationCount || 0
-          }
+            );
+            if (
+              !vRow ||
+              (vRow.violationPackageId &&
+                vRow.violationPackageId !== selectedPackage.id)
+            ) {
+              return 0;
+            }
+            return vRow.violationCount || 0;
+          })()}
         />
       )}
 
@@ -3178,6 +3475,7 @@ export default function App() {
           examPackage={selectedPackage}
           answers={answers}
           timeUsedSeconds={timeUsedSeconds}
+          showResultScore={Boolean(adminSettings.tampilkanNilaiPeserta)}
           onRetakeOrChangePackage={() => setStage('confirm_participant')}
           onLogout={handleLogout}
         />

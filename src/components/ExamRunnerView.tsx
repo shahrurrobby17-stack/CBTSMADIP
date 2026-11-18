@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -21,9 +21,38 @@ interface ExamRunnerViewProps {
   answers: Record<string, StudentAnswer>;
   onUpdateAnswer: (questionId: string, updater: (prev: StudentAnswer) => StudentAnswer) => void;
   onFinishExam: (timeUsedSeconds: number) => void;
+  onCancelEmptyExam?: () => void;
   initialRemainingSeconds?: number;
   onRemainingSecondsChange?: (remainingSeconds: number) => void;
   violationCount?: number;
+  participantUsername?: string;
+  shuffleQuestions?: boolean;
+  shuffleOptions?: boolean;
+  minMinutesBeforeFinish?: number;
+  showResultScore?: boolean;
+}
+
+function hashSeed(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function seededShuffleArray<T>(items: T[], seedStr: string): T[] {
+  const arr = [...items];
+  let a = hashSeed(seedStr) || 1;
+  for (let i = arr.length - 1; i > 0; i--) {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    const rand = ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    const j = Math.floor(rand * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 type FontScale = 'sm' | 'md' | 'lg';
@@ -40,11 +69,44 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
   answers,
   onUpdateAnswer,
   onFinishExam,
+  onCancelEmptyExam,
   initialRemainingSeconds,
   onRemainingSecondsChange,
   violationCount = 0,
+  participantUsername = 'PESERTA',
+  shuffleQuestions = false,
+  shuffleOptions = false,
+  minMinutesBeforeFinish = 0,
+  showResultScore = false,
 }) => {
-  const questions = examPackage.questions;
+  const baseSeed = `${participantUsername.trim().toUpperCase()}__${examPackage.id}`;
+
+  const questions = useMemo(() => {
+    const rawList = Array.isArray(examPackage.questions)
+      ? examPackage.questions
+      : [];
+    const orderedQuestions = shuffleQuestions
+      ? seededShuffleArray(rawList, `${baseSeed}__questions`)
+      : rawList;
+
+    if (!shuffleOptions) {
+      return orderedQuestions;
+    }
+    return orderedQuestions.map((q) => {
+      if (
+        (q.type === 'pilihan_ganda' || q.type === 'pilihan_ganda_kompleks') &&
+        Array.isArray(q.options) &&
+        q.options.length > 1
+      ) {
+        return {
+          ...q,
+          options: seededShuffleArray(q.options, `${baseSeed}__opt__${q.id}`),
+        };
+      }
+      return q;
+    });
+  }, [examPackage.questions, shuffleQuestions, shuffleOptions, baseSeed]);
+
   const totalDurationSeconds = Math.max(
     60,
     (Number(examPackage.durationMinutes) || 90) * 60
@@ -63,6 +125,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [showFinishModal, setShowFinishModal] = useState(false);
   const [showDoubtWarningModal, setShowDoubtWarningModal] = useState(false);
+  const [minFinishWaitSeconds, setMinFinishWaitSeconds] = useState<number | null>(null);
   const [confirmFinishChecked, setConfirmFinishChecked] = useState(false);
 
   // Stable refs for timer accuracy across re-renders & background cloud polling
@@ -96,6 +159,9 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
 
   const safeIndex = Math.min(currentIndex, Math.max(0, questions.length - 1));
   const currentQuestion: Question | undefined = questions[safeIndex];
+  const displayQuestionNumber = shuffleQuestions
+    ? safeIndex + 1
+    : currentQuestion?.number || safeIndex + 1;
   const currentAnswer: StudentAnswer = currentQuestion
     ? answers[currentQuestion.id] || {
         questionId: currentQuestion.id,
@@ -112,6 +178,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
 
   // Countdown timer driven by wall-clock deadline so re-renders never freeze it
   useEffect(() => {
+    if (questions.length === 0) return;
     const tick = () => {
       const diffMs = endTimeRef.current - Date.now();
       const secsLeft = Math.max(0, Math.ceil(diffMs / 1000));
@@ -131,7 +198,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
     tick();
     const timer = window.setInterval(tick, 250);
     return () => window.clearInterval(timer);
-  }, [totalDurationSeconds]);
+  }, [totalDurationSeconds, questions.length]);
 
   // Keyboard navigation (Left / Right arrows when not typing in input)
   useEffect(() => {
@@ -235,6 +302,16 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
   };
 
   const handleRequestFinish = () => {
+    const minRequiredSeconds = Math.min(
+      Math.max(0, (Number(minMinutesBeforeFinish) || 0) * 60),
+      Math.max(0, totalDurationSeconds - 60)
+    );
+    const elapsedSeconds = Math.max(0, totalDurationSeconds - remainingSeconds);
+    if (remainingSeconds > 0 && minRequiredSeconds > 0 && elapsedSeconds < minRequiredSeconds) {
+      setMinFinishWaitSeconds(minRequiredSeconds - elapsedSeconds);
+      return;
+    }
+
     const anyDoubtful = questions.some((q) => answers[q.id]?.doubtful);
     if (anyDoubtful) {
       setShowDoubtWarningModal(true);
@@ -267,7 +344,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
           </p>
           <button
             type="button"
-            onClick={() => onFinishExam(1)}
+            onClick={() => (onCancelEmptyExam ? onCancelEmptyExam() : onFinishExam(1))}
             className="mt-5 px-5 py-2.5 rounded-full bg-[#0066ff] text-white text-xs font-semibold cursor-pointer"
           >
             Kembali
@@ -289,7 +366,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
               SOAL NO.
             </span>
             <span className="inline-flex items-center justify-center min-w-[38px] h-9 px-2.5 rounded-lg bg-[#0066ff] text-white font-mono text-base font-bold shadow-sm">
-              {currentQuestion.number}
+              {displayQuestionNumber}
             </span>
             <div className="hidden md:flex flex-col pl-2 border-l border-slate-200 leading-tight">
               <span className="text-xs font-semibold text-slate-700">
@@ -399,8 +476,37 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
         <div className="flex-1 flex flex-col">
           <div className="flex-1 p-5 sm:p-7 lg:overflow-y-auto lg:max-h-[62vh] flex flex-col justify-between">
             <div>
+              {/* Optional Reading / Literary / Contextual Stimulus */}
+              {(currentQuestion.stimulusTitle ||
+                currentQuestion.stimulusText ||
+                currentQuestion.stimulusHighlightBox ||
+                currentQuestion.stimulusSource) && (
+                <div className="mb-4 p-4 sm:p-5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                  {currentQuestion.stimulusTitle && (
+                    <h4 className="font-bold text-slate-900 text-xs sm:text-sm uppercase tracking-wide">
+                      {currentQuestion.stimulusTitle}
+                    </h4>
+                  )}
+                  {currentQuestion.stimulusText && (
+                    <div className={`text-slate-700 whitespace-pre-line ${fontSizeClass}`}>
+                      {currentQuestion.stimulusText}
+                    </div>
+                  )}
+                  {currentQuestion.stimulusHighlightBox && (
+                    <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-[#001a6e] font-semibold text-xs sm:text-sm whitespace-pre-line">
+                      {currentQuestion.stimulusHighlightBox}
+                    </div>
+                  )}
+                  {currentQuestion.stimulusSource && (
+                    <div className="text-[11px] text-slate-500 italic">
+                      Sumber: {currentQuestion.stimulusSource}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Question Text */}
-              <div className={`font-semibold text-slate-900 ${fontSizeClass}`}>
+              <div className={`font-semibold text-slate-900 whitespace-pre-line ${fontSizeClass}`}>
                 {currentQuestion.questionText}
               </div>
 
@@ -459,9 +565,12 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                 {currentQuestion.type === 'pilihan_ganda' &&
                   currentQuestion.options && (
                     <div className="space-y-2.5">
-                      {currentQuestion.options.map((opt) => {
+                      {currentQuestion.options.map((opt, optIdx) => {
                         const isSelected =
                           currentAnswer.selectedOptionId === opt.id;
+                        const displayLetter = shuffleOptions
+                          ? String.fromCharCode(65 + optIdx)
+                          : opt.id;
                         return (
                           <button
                             key={opt.id}
@@ -480,7 +589,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                                   : 'bg-slate-100 text-slate-700 border border-slate-300'
                               }`}
                             >
-                              {opt.id}
+                              {displayLetter}
                             </span>
                             <span className={`text-slate-800 ${fontSizeClass}`}>
                               {opt.text}
@@ -836,6 +945,18 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                     'bg-slate-800 border-slate-900 text-white font-bold';
                 }
 
+                const qDisplayNum = shuffleQuestions ? idx + 1 : q.number;
+                const matchedOptIdx =
+                  q.type === 'pilihan_ganda' && ans?.selectedOptionId && q.options
+                    ? q.options.findIndex((o) => o.id === ans.selectedOptionId)
+                    : -1;
+                const chosenDisplayLetter =
+                  matchedOptIdx >= 0
+                    ? shuffleOptions
+                      ? String.fromCharCode(65 + matchedOptIdx)
+                      : ans?.selectedOptionId
+                    : ans?.selectedOptionId;
+
                 return (
                   <button
                     key={q.id}
@@ -848,10 +969,10 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                       isCurrent ? 'ring-2 ring-[#0066ff] ring-offset-2' : ''
                     }`}
                   >
-                    <span>{q.number}</span>
-                    {q.type === 'pilihan_ganda' && ans?.selectedOptionId && (
+                    <span>{qDisplayNum}</span>
+                    {q.type === 'pilihan_ganda' && chosenDisplayLetter && (
                       <span className="text-[10px] opacity-90">
-                        ({ans.selectedOptionId})
+                        ({chosenDisplayLetter})
                       </span>
                     )}
                   </button>
@@ -897,7 +1018,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-200">
               <h3 className="text-base font-bold text-slate-800">
-                Informasi Butir Soal #{currentQuestion.number}
+                Informasi Butir Soal #{displayQuestionNumber}
               </h3>
               <button
                 type="button"
@@ -994,7 +1115,15 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                 className="mt-1 w-4 h-4 accent-[#0066ff]"
               />
               <span className="text-xs text-slate-800 leading-relaxed">
-                Centang kotak ini, kemudian tekan tombol <strong>Selesai</strong>. Anda akan melihat laporan hasil nilai dan pembahasan soal.
+                {showResultScore ? (
+                  <>
+                    Centang kotak ini, kemudian tekan tombol <strong>Selesai</strong> untuk mengakhiri ujian dan melihat nilai akhir Anda.
+                  </>
+                ) : (
+                  <>
+                    Centang kotak ini, kemudian tekan tombol <strong>Selesai</strong> untuk mengakhiri dan menyimpan seluruh jawaban ujian Anda.
+                  </>
+                )}
               </span>
             </label>
 
@@ -1017,6 +1146,36 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                 }`}
               >
                 Selesai
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: BATAS WAKTU MINIMAL SELESAI */}
+      {minFinishWaitSeconds !== null && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 text-center space-y-4">
+            <div className="w-12 h-12 rounded-full bg-blue-100 text-[#0066ff] flex items-center justify-center mx-auto">
+              <Clock className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-800">
+              Belum Dapat Mengakhiri Ujian
+            </h3>
+            <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+              Sesuai ketentuan ujian, tombol <strong>Selesai</strong> hanya dapat ditekan setelah minimal{' '}
+              <strong>{minMinutesBeforeFinish} menit</strong> waktu pengerjaan berjalan. Silakan periksa kembali jawaban Anda sekitar{' '}
+              <strong className="text-slate-800">
+                {Math.max(1, Math.ceil(minFinishWaitSeconds / 60))} menit
+              </strong> lagi.
+            </p>
+            <div className="pt-2 flex items-center justify-center">
+              <button
+                type="button"
+                onClick={() => setMinFinishWaitSeconds(null)}
+                className="px-6 py-2.5 rounded-full bg-[#0066ff] hover:bg-[#0052cc] text-white text-xs font-bold cursor-pointer"
+              >
+                Lanjutkan Mengerjakan
               </button>
             </div>
           </div>

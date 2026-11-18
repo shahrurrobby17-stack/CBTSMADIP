@@ -85,6 +85,7 @@ export interface ProctorParticipantRow {
   metaUpdatedAt?: number;
   draftUpdatedAt?: number;
   violationCount?: number;
+  violationPackageId?: string;
   draftAnswers?: Record<string, StudentAnswer>;
   draftPackageId?: string;
   draftRemainingSeconds?: number;
@@ -441,6 +442,7 @@ export function reconcileParticipantRow(
   let resolvedViolationSchema: number | undefined = undefined;
   let resolvedViolationTimestamp: number | undefined = undefined;
   let resolvedViolationCount: number | undefined = undefined;
+  let resolvedViolationPackageId: string | undefined = undefined;
 
   if (isLocked) {
     const vSource = incViolationTs >= existViolationTs ? incoming : existing;
@@ -454,6 +456,8 @@ export function reconcileParticipantRow(
       vFallback.violationReason ||
       'Pelanggaran keamanan ujian CBT';
     resolvedViolationAt = vSource.violationAt || vFallback.violationAt;
+    resolvedViolationPackageId =
+      vSource.violationPackageId || vFallback.violationPackageId;
     resolvedViolationCount = Math.max(
       typeof existing.violationCount === 'number' ? existing.violationCount : 0,
       typeof incoming.violationCount === 'number' ? incoming.violationCount : 0,
@@ -494,8 +498,13 @@ export function reconcileParticipantRow(
     );
     if (resolvedLoginState === 'Selesai') {
       resolvedViolationCount = 0;
+      resolvedViolationPackageId = undefined;
     } else if (maxVCount > 0) {
       resolvedViolationCount = maxVCount;
+      const vPkgSource = incViolationTs >= existViolationTs ? incoming : existing;
+      const vPkgFallback = incViolationTs >= existViolationTs ? existing : incoming;
+      resolvedViolationPackageId =
+        vPkgSource.violationPackageId || vPkgFallback.violationPackageId;
     }
   }
 
@@ -519,6 +528,7 @@ export function reconcileParticipantRow(
     violationSchema: resolvedViolationSchema,
     violationTimestamp: resolvedViolationTimestamp,
     violationCount: resolvedViolationCount,
+    violationPackageId: resolvedViolationPackageId,
     draftAnswers:
       resolvedLoginState === 'Selesai' ? undefined : bestDraftAnswers,
     draftPackageId:
@@ -741,6 +751,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20264821',
+    password: 'SMADIP1547*',
     namaPeserta: 'ANDRIAN FAJARICO PRASETYA',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -754,6 +765,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20267394',
+    password: 'SMADIP1556*',
     namaPeserta: 'AHMAD RIZKI NOVANSYAH',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -767,6 +779,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20262918',
+    password: 'SMADIP1565*',
     namaPeserta: 'ARYA RESTU KUSUMA',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -780,6 +793,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20268563',
+    password: 'SMADIP1574*',
     namaPeserta: 'AUREL RIZKY ADI PRATAMA',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -793,6 +807,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20265147',
+    password: 'SMADIP1583*',
     namaPeserta: 'AHMAD DENY FIKRUDIN',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -806,6 +821,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Non Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20269302',
+    password: 'SMADIP1592*',
     namaPeserta: 'ALDISA FRANDIKA LIAN PRATAMA',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -819,6 +835,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20266475',
+    password: 'ANBKTKA26*',
     namaPeserta: 'NADIA PUTRI PRATAMA',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -832,6 +849,7 @@ const INITIAL_PARTICIPANT_ROWS: ProctorParticipantRow[] = [
     status: 'Active',
     kodeTes: 'SAS26SMADIP1',
     username: 'SA20261839',
+    password: 'SAINSTKA*',
     namaPeserta: 'BAGAS ADITYA NUGRAHA',
     kelompok: 'Ruang 1',
     ruang: 'Ruang 1',
@@ -856,6 +874,7 @@ interface ProctorDashboardViewProps {
   encryptionCode: string;
   activeToken: string;
   tokenSecondsLeft: number;
+  tokenDurationSeconds?: number;
   onUpdateToken: (newToken: string) => void;
   isScheduleActive: boolean;
   activeSchedules: AdminScheduleItem[];
@@ -877,6 +896,8 @@ interface ProctorDashboardViewProps {
   onResetDefaultPackages: () => void;
   resultsHistory: ExamResultSummary[];
   onClearHistory: () => void;
+  adminSettings?: Record<string, any>;
+  onUpdateAdminSettings?: (nextCfg: Record<string, any>) => void;
   onLogoutProctor: () => void;
 }
 
@@ -885,6 +906,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   encryptionCode,
   activeToken,
   tokenSecondsLeft,
+  tokenDurationSeconds = 600,
   isScheduleActive,
   activeSchedules,
   participants: externalParticipants,
@@ -897,6 +919,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   onResetDefaultPackages,
   resultsHistory,
   onClearHistory,
+  adminSettings,
+  onUpdateAdminSettings,
   onLogoutProctor,
 }) => {
   // Default active tab is 'kelompok_tes' to match the reference screenshot immediately
@@ -944,12 +968,14 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   const [statusTesTipeSoal, setStatusTesTipeSoal] = useState('Semua Tipe Soal');
   const [showQuestionPreviewModal, setShowQuestionPreviewModal] = useState(false);
   const [previewQuestionIdx, setPreviewQuestionIdx] = useState(0);
+  const effectiveTokenDurationSecs = Math.max(60, tokenDurationSeconds || 600);
+  const tokenIntervalMinutes = Math.round(effectiveTokenDurationSecs / 60);
   const tokenMinutes = String(Math.floor(tokenSecondsLeft / 60)).padStart(2, '0');
   const tokenSeconds = String(tokenSecondsLeft % 60).padStart(2, '0');
   const tokenCountdownLabel = `${tokenMinutes}:${tokenSeconds}`;
   const tokenProgressPct = Math.max(
     0,
-    Math.min(100, (tokenSecondsLeft / 600) * 100)
+    Math.min(100, (tokenSecondsLeft / effectiveTokenDurationSecs) * 100)
   );
   const [newQuestionType, setNewQuestionType] = useState<QuestionType>('pilihan_ganda');
   const [newCategory, setNewCategory] = useState('Literasi & Penalaran Umum');
@@ -1018,12 +1044,17 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     searchQuery,
   ]);
 
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<
+    Set<string>
+  >(() => new Set());
+
   const allVisibleSelected =
-    filteredRows.length > 0 && filteredRows.every((r) => r.selected);
+    filteredRows.length > 0 &&
+    filteredRows.every((r) => selectedParticipantIds.has(r.id));
 
   const selectedVisibleCount = useMemo(
-    () => participants.filter((r) => r.selected).length,
-    [participants]
+    () => participants.filter((r) => selectedParticipantIds.has(r.id)).length,
+    [participants, selectedParticipantIds]
   );
 
   const handleApplyFilter = () => {
@@ -1034,7 +1065,9 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   };
 
   const handleMoveSelectedToRuang = (explicitRuang?: string) => {
-    const selectedRows = participants.filter((r) => r.selected);
+    const selectedRows = participants.filter((r) =>
+      selectedParticipantIds.has(r.id)
+    );
     if (selectedRows.length === 0) {
       showNotice(
         'Klik tombol centang biru untuk memilih minimal satu siswa terlebih dahulu.'
@@ -1061,6 +1094,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
           : r
       )
     );
+    setSelectedParticipantIds((prev) => {
+      const next = new Set(prev);
+      selectedIdSet.forEach((id) => next.delete(id));
+      return next;
+    });
     showNotice(
       `${selectedRows.length} siswa berhasil dipindahkan ke ${destinationRuang} (juga diperbarui pada Kartu Login Peserta).`
     );
@@ -1068,29 +1106,40 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const handleToggleSelectAll = () => {
     const targetVal = !allVisibleSelected;
-    const visibleIds = new Set(filteredRows.map((r) => r.id));
-    setParticipants((prev) =>
-      prev.map((r) =>
-        visibleIds.has(r.id) ? { ...r, selected: targetVal } : r
-      )
-    );
+    setSelectedParticipantIds((prev) => {
+      const next = new Set(prev);
+      filteredRows.forEach((r) => {
+        if (targetVal) {
+          next.add(r.id);
+        } else {
+          next.delete(r.id);
+        }
+      });
+      return next;
+    });
   };
 
   const handleToggleRow = (id: string) => {
-    setParticipants((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, selected: !r.selected } : r))
-    );
+    setSelectedParticipantIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   };
 
   const handleAssignSelected = () => {
-    const selectedCount = filteredRows.filter((r) => r.selected).length;
+    const visibleSelectedIds = new Set(
+      filteredRows.filter((r) => selectedParticipantIds.has(r.id)).map((r) => r.id)
+    );
+    const selectedCount = visibleSelectedIds.size;
     if (selectedCount === 0) {
       showNotice('Pilih minimal satu peserta terlebih dahulu.');
       return;
     }
-    const visibleSelectedIds = new Set(
-      filteredRows.filter((r) => r.selected).map((r) => r.id)
-    );
     const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
@@ -1106,14 +1155,14 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   };
 
   const handleUnassignSelected = () => {
-    const selectedCount = filteredRows.filter((r) => r.selected).length;
+    const visibleSelectedIds = new Set(
+      filteredRows.filter((r) => selectedParticipantIds.has(r.id)).map((r) => r.id)
+    );
+    const selectedCount = visibleSelectedIds.size;
     if (selectedCount === 0) {
       showNotice('Pilih minimal satu peserta terlebih dahulu.');
       return;
     }
-    const visibleSelectedIds = new Set(
-      filteredRows.filter((r) => r.selected).map((r) => r.id)
-    );
     const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
@@ -1144,21 +1193,36 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     const cleanUser = (username || '').trim().toUpperCase();
     const nowTs = Date.now();
     setParticipants((prev) =>
-      prev.map((r) =>
-        r.id === id || (cleanUser && r.username.trim().toUpperCase() === cleanUser)
-          ? {
-              ...r,
-              loginState: 'Belum Login',
-              requestReset: false,
-              violationReason: undefined,
-              violationAt: undefined,
-              violationSchema: undefined,
-              violationTimestamp: undefined,
-              lastResetAt: nowTs,
-              loginUpdatedAt: nowTs,
-            }
-          : r
-      )
+      prev.map((r) => {
+        if (
+          r.id !== id &&
+          (!cleanUser || r.username.trim().toUpperCase() !== cleanUser)
+        ) {
+          return r;
+        }
+        const wasFinished = r.loginState === 'Selesai';
+        return {
+          ...r,
+          loginState: 'Belum Login',
+          requestReset: false,
+          violationReason: undefined,
+          violationAt: undefined,
+          violationSchema: undefined,
+          violationTimestamp: undefined,
+          lastResetAt: nowTs,
+          loginUpdatedAt: nowTs,
+          ...(wasFinished
+            ? {
+                violationCount: 0,
+                violationPackageId: undefined,
+                draftAnswers: undefined,
+                draftPackageId: undefined,
+                draftRemainingSeconds: undefined,
+                draftUpdatedAt: nowTs,
+              }
+            : {}),
+        };
+      })
     );
     showNotice(`Sesi login peserta ${name} berhasil di-reset. Siswa kini dapat login kembali.`);
   };
@@ -1166,19 +1230,26 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
   const handleResetAllLockedParticipants = () => {
     const nowTs = Date.now();
     setParticipants((prev) =>
-      prev.map((r) => ({
-        ...r,
-        loginState:
-          r.loginState === 'Terkunci (Pelanggaran)' ? 'Belum Login' : r.loginState,
-        requestReset: false,
-        violationReason: undefined,
-        violationAt: undefined,
-        violationSchema: undefined,
-        violationTimestamp: undefined,
-        lastResetAt: nowTs,
-        loginUpdatedAt:
-          r.loginState === 'Terkunci (Pelanggaran)' ? nowTs : r.loginUpdatedAt,
-      }))
+      prev.map((r) => {
+        const needsReset =
+          isParticipantLockedByViolation(r) ||
+          Boolean(r.requestReset) ||
+          r.loginState === 'Terkunci (Pelanggaran)';
+        if (!needsReset) return r;
+        return {
+          ...r,
+          loginState:
+            r.loginState === 'Terkunci (Pelanggaran)' ? 'Belum Login' : r.loginState,
+          requestReset: false,
+          violationReason: undefined,
+          violationAt: undefined,
+          violationSchema: undefined,
+          violationTimestamp: undefined,
+          lastResetAt: nowTs,
+          loginUpdatedAt:
+            r.loginState === 'Terkunci (Pelanggaran)' ? nowTs : r.loginUpdatedAt,
+        };
+      })
     );
     showNotice('Seluruh permintaan Reset Login peserta telah dibersihkan.');
   };
@@ -1189,10 +1260,15 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     const deletedNamesSet = new Set<string>();
     let isCustomMapelConfigured = false;
     try {
-      const saved = localStorage.getItem('cbt_admin_settings');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object') {
+      let parsed: Record<string, any> | null =
+        adminSettings && typeof adminSettings === 'object' ? adminSettings : null;
+      if (!parsed) {
+        const saved = localStorage.getItem('cbt_admin_settings');
+        if (saved) {
+          parsed = JSON.parse(saved);
+        }
+      }
+      if (parsed && typeof parsed === 'object') {
           isCustomMapelConfigured = Boolean(parsed.customMapelConfigured);
           if (Array.isArray(parsed.deletedMapelCodes)) {
             parsed.deletedMapelCodes.forEach((c: any) => {
@@ -1243,7 +1319,6 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
               });
             }
           }
-        }
       }
     } catch {
       // fallback
@@ -1341,7 +1416,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     });
 
     return result;
-  }, [packages]);
+  }, [packages, adminSettings]);
 
   const visiblePackagesForKelas = useMemo(() => {
     if (statusTesKelas === 'Semua Kelas') return displayPackages;
@@ -1742,12 +1817,17 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
       });
     });
 
-    // 2. Hapus dari mapelList di cbt_admin_settings & simpan ke localStorage
+    // 2. Hapus dari mapelList di cbt_admin_settings & sinkronkan
     try {
-      const saved = localStorage.getItem('cbt_admin_settings');
-      const parsed = saved ? JSON.parse(saved) : {};
-      const baseMapelList = Array.isArray(parsed.mapelList)
-        ? parsed.mapelList
+      const baseCfg =
+        adminSettings && typeof adminSettings === 'object'
+          ? { ...adminSettings }
+          : (() => {
+              const saved = localStorage.getItem('cbt_admin_settings');
+              return saved ? JSON.parse(saved) : {};
+            })();
+      const baseMapelList = Array.isArray(baseCfg.mapelList)
+        ? baseCfg.mapelList
         : DEFAULT_MAPEL_LIST;
       const updatedList = baseMapelList.filter((m: any) => {
         const mKode = (m?.kode || '').trim().toUpperCase();
@@ -1761,25 +1841,30 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
       });
       const nextDeletedCodes = Array.from(
         new Set([
-          ...(Array.isArray(parsed.deletedMapelCodes)
-            ? parsed.deletedMapelCodes
+          ...(Array.isArray(baseCfg.deletedMapelCodes)
+            ? baseCfg.deletedMapelCodes
             : []),
           ...(cleanTargetKode ? [cleanTargetKode] : []),
         ])
       );
       const nextDeletedNames = Array.from(
         new Set([
-          ...(Array.isArray(parsed.deletedMapelNames)
-            ? parsed.deletedMapelNames
+          ...(Array.isArray(baseCfg.deletedMapelNames)
+            ? baseCfg.deletedMapelNames
             : []),
           ...(cleanTargetNama ? [cleanTargetNama] : []),
         ])
       );
-      parsed.mapelList = updatedList;
-      parsed.customMapelConfigured = true;
-      parsed.deletedMapelCodes = nextDeletedCodes;
-      parsed.deletedMapelNames = nextDeletedNames;
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(parsed));
+      const updatedCfg = {
+        ...baseCfg,
+        mapelList: updatedList,
+        customMapelConfigured: true,
+        deletedMapelCodes: nextDeletedCodes,
+        deletedMapelNames: nextDeletedNames,
+        updatedAt: Date.now(),
+      };
+      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedCfg));
+      onUpdateAdminSettings?.(updatedCfg);
     } catch {
       // ignore
     }
@@ -2337,12 +2422,14 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                             </td>
                           </tr>
                         ) : (
-                          filteredRows.map((row) => (
+                          filteredRows.map((row) => {
+                            const isRowSelected = selectedParticipantIds.has(row.id);
+                            return (
                             <tr
                               key={row.id}
                               onClick={() => handleToggleRow(row.id)}
                               className={`transition-colors cursor-pointer ${
-                                row.selected
+                                isRowSelected
                                   ? 'bg-blue-50/35 hover:bg-blue-50/60'
                                   : 'hover:bg-slate-50/90'
                               }`}
@@ -2356,12 +2443,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                                   onClick={() => handleToggleRow(row.id)}
                                   aria-label={`Pilih ${row.namaPeserta}`}
                                   title={
-                                    row.selected
+                                    isRowSelected
                                       ? `Batal pilih ${row.namaPeserta}`
                                       : `Pilih ${row.namaPeserta}`
                                   }
                                   className={`w-5 h-5 rounded-md flex items-center justify-center transition-all cursor-pointer ${
-                                    row.selected
+                                    isRowSelected
                                       ? 'bg-[#0095ff] border-2 border-[#0095ff] text-white shadow-2xs ring-2 ring-blue-100'
                                       : 'bg-blue-50/50 hover:bg-blue-100/80 border-2 border-[#0095ff]/60 text-[#0095ff]/35 hover:text-[#0095ff]'
                                   }`}
@@ -2395,7 +2482,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                                 {row.namaPeserta}
                               </td>
                             </tr>
-                          ))
+                            );
+                          })
                         )
                       ) : (
                         availableExamRooms.map((room) => {
@@ -2435,12 +2523,14 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                                   </td>
                                 </tr>
                               ) : (
-                                roomRows.map((row) => (
+                                roomRows.map((row) => {
+                                  const isRowSelected = selectedParticipantIds.has(row.id);
+                                  return (
                                   <tr
                                     key={row.id}
                                     onClick={() => handleToggleRow(row.id)}
                                     className={`transition-colors cursor-pointer ${
-                                      row.selected
+                                      isRowSelected
                                         ? 'bg-blue-50/35 hover:bg-blue-50/60'
                                         : 'hover:bg-slate-50/90'
                                     }`}
@@ -2454,12 +2544,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                                         onClick={() => handleToggleRow(row.id)}
                                         aria-label={`Pilih ${row.namaPeserta}`}
                                         title={
-                                          row.selected
+                                          isRowSelected
                                             ? `Batal pilih ${row.namaPeserta}`
                                             : `Pilih ${row.namaPeserta}`
                                         }
                                         className={`w-5 h-5 rounded-md flex items-center justify-center transition-all cursor-pointer ${
-                                          row.selected
+                                          isRowSelected
                                             ? 'bg-[#0095ff] border-2 border-[#0095ff] text-white shadow-2xs ring-2 ring-blue-100'
                                             : 'bg-blue-50/50 hover:bg-blue-100/80 border-2 border-[#0095ff]/60 text-[#0095ff]/35 hover:text-[#0095ff]'
                                         }`}
@@ -2493,7 +2583,8 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                                       {row.namaPeserta}
                                     </td>
                                   </tr>
-                                ))
+                                  );
+                                })
                               )}
                             </React.Fragment>
                           );
@@ -2592,7 +2683,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                   Informasi Server Proktor — CBT SMA Islam Diponegoro Wagir
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Selamat datang di Dashboard Proktor Aplikasi Sumatif Akhir Semester. Kartu <strong>Token Ujian Aktif</strong> kini berada di menu <strong>Beranda</strong> ini dan diperbarui otomatis setiap 10 menit dari server Administrator. Gunakan menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk memantau nilai akhir peserta.
+                  Selamat datang di Dashboard Proktor Aplikasi Sumatif Akhir Semester. Kartu <strong>Token Ujian Aktif</strong> kini berada di menu <strong>Beranda</strong> ini dan diperbarui otomatis setiap {tokenIntervalMinutes} menit dari server Administrator. Gunakan menu <strong>Kelompok Tes</strong> untuk mengaktifkan (Assign) peserta ujian, menu <strong>Status Tes</strong> untuk mengelola Bank Soal, dan menu <strong>Laporan Pengolahan</strong> untuk memantau nilai akhir peserta.
                 </p>
               </div>
             </div>

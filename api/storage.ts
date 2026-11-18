@@ -2,11 +2,17 @@ import fs from 'fs';
 import path from 'path';
 
 const STORAGE_KEY = 'smadip_cbt_vercel_storage_v1';
+const STUDENTS_HASH_KEY = 'smadip_cbt_vercel_students_v1';
+const RESULTS_HASH_KEY = 'smadip_cbt_vercel_results_v1';
+const META_KEY = 'smadip_cbt_vercel_meta_v1';
+const LOCK_KEY = 'smadip_cbt_vercel_lock_v1';
 
-// Global in-memory cache across warm serverless invocations
+// Global in-memory cache and write mutex across warm serverless invocations
 declare global {
   // eslint-disable-next-line no-var
   var __SMADIP_CBT_MEM_STORE__: Record<string, unknown> | null | undefined;
+  // eslint-disable-next-line no-var
+  var __SMADIP_CBT_WRITE_QUEUE__: Promise<void> | undefined;
 }
 
 const DEFAULT_DEMO_PARTICIPANT_IDS = new Set([
@@ -362,13 +368,148 @@ function getKvConfig(): { url: string; token: string } | null {
   return null;
 }
 
-async function readFromVercelKV(kv: {
+function parseKvHashResult(raw: unknown): Record<string, Record<string, any>> {
+  const out: Record<string, Record<string, any>> = {};
+  if (!raw) return out;
+  if (Array.isArray(raw)) {
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      const field = String(raw[i] ?? '').trim();
+      const valRaw = raw[i + 1];
+      if (!field || valRaw == null) continue;
+      try {
+        const parsed =
+          typeof valRaw === 'string' ? JSON.parse(valRaw) : valRaw;
+        if (parsed && typeof parsed === 'object') {
+          out[field] = parsed as Record<string, any>;
+        }
+      } catch {
+        // ignore corrupt entry
+      }
+    }
+    return out;
+  }
+  if (typeof raw === 'object') {
+    for (const [field, valRaw] of Object.entries(
+      raw as Record<string, unknown>
+    )) {
+      if (!field || valRaw == null) continue;
+      try {
+        const parsed =
+          typeof valRaw === 'string' ? JSON.parse(valRaw) : valRaw;
+        if (parsed && typeof parsed === 'object') {
+          out[field] = parsed as Record<string, any>;
+        }
+      } catch {
+        // ignore corrupt entry
+      }
+    }
+  }
+  return out;
+}
+
+function parseKvJsonValue(raw: unknown): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function kvPipeline(
+  kv: { url: string; token: string },
+  commands: unknown[][]
+): Promise<{ ok: boolean; results: unknown[] }> {
+  try {
+    const response = await fetch(`${kv.url}/pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${kv.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commands),
+    });
+    if (!response.ok) return { ok: false, results: [] };
+    const json = (await response.json()) as Array<{
+      result?: unknown;
+      error?: string;
+    }>;
+    if (!Array.isArray(json)) return { ok: false, results: [] };
+    return {
+      ok: true,
+      results: json.map((entry) => entry?.result),
+    };
+  } catch {
+    return { ok: false, results: [] };
+  }
+}
+
+async function acquireKvLock(
+  kv: { url: string; token: string },
+  lockToken: string,
+  ttlMs = 6000
+): Promise<boolean> {
+  const maxAttempts = 10;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const res = await kvPipeline(kv, [
+      ['SET', LOCK_KEY, lockToken, 'NX', 'PX', ttlMs],
+    ]);
+    if (res.ok && res.results[0] === 'OK') {
+      return true;
+    }
+    const jitterMs = 35 + Math.floor(Math.random() * 55);
+    await new Promise((resolve) => setTimeout(resolve, jitterMs));
+  }
+  return false;
+}
+
+async function releaseKvLock(
+  kv: { url: string; token: string },
+  lockToken: string
+): Promise<void> {
+  try {
+    await kvPipeline(kv, [
+      [
+        'EVAL',
+        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+        1,
+        LOCK_KEY,
+        lockToken,
+      ],
+    ]);
+  } catch {
+    // Lock has short TTL and expires automatically
+  }
+}
+
+async function withKvDistributedLock<T>(
+  kv: { url: string; token: string } | null,
+  fn: () => Promise<T>
+): Promise<T> {
+  if (!kv) {
+    return fn();
+  }
+  const lockToken = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  const acquired = await acquireKvLock(kv, lockToken, 6000);
+  try {
+    return await fn();
+  } finally {
+    if (acquired) {
+      await releaseKvLock(kv, lockToken);
+    }
+  }
+}
+
+async function readMetaUpdatedAtFromKV(kv: {
   url: string;
   token: string;
-}): Promise<Record<string, unknown> | null> {
+}): Promise<number> {
   try {
     const response = await fetch(
-      `${kv.url}/get/${encodeURIComponent(STORAGE_KEY)}`,
+      `${kv.url}/get/${encodeURIComponent(META_KEY)}`,
       {
         method: 'GET',
         headers: {
@@ -376,22 +517,236 @@ async function readFromVercelKV(kv: {
         },
       }
     );
-    if (!response.ok) return null;
-    const json = (await response.json()) as { result?: string | null };
-    if (!json.result) return null;
-    return typeof json.result === 'string'
-      ? (JSON.parse(json.result) as Record<string, unknown>)
-      : (json.result as Record<string, unknown>);
+    if (!response.ok) return 0;
+    const json = (await response.json()) as { result?: unknown };
+    const parsed = parseKvJsonValue(json?.result);
+    return typeof parsed?.updatedAt === 'number' ? parsed.updatedAt : 0;
   } catch {
+    return 0;
+  }
+}
+
+async function readFromVercelKV(kv: {
+  url: string;
+  token: string;
+}): Promise<Record<string, unknown> | null> {
+  const pipe = await kvPipeline(kv, [
+    ['GET', STORAGE_KEY],
+    ['HGETALL', STUDENTS_HASH_KEY],
+    ['HGETALL', RESULTS_HASH_KEY],
+    ['GET', META_KEY],
+  ]);
+
+  let baseDoc: Record<string, unknown> | null = null;
+  let studentHashMap: Record<string, Record<string, any>> = {};
+  let resultsHashMap: Record<string, Record<string, any>> = {};
+  let metaDoc: Record<string, unknown> | null = null;
+
+  if (pipe.ok && pipe.results.length >= 1) {
+    baseDoc = parseKvJsonValue(pipe.results[0]);
+    studentHashMap = parseKvHashResult(pipe.results[1]);
+    resultsHashMap = parseKvHashResult(pipe.results[2]);
+    metaDoc = parseKvJsonValue(pipe.results[3]);
+  } else {
+    try {
+      const response = await fetch(
+        `${kv.url}/get/${encodeURIComponent(STORAGE_KEY)}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${kv.token}`,
+          },
+        }
+      );
+      if (!response.ok) return null;
+      const json = (await response.json()) as { result?: unknown };
+      baseDoc = parseKvJsonValue(json?.result);
+    } catch {
+      return null;
+    }
+  }
+
+  const hashStudentRows = Object.values(studentHashMap);
+  const hashResultRows = Object.values(resultsHashMap);
+  if (!baseDoc && hashStudentRows.length === 0 && hashResultRows.length === 0) {
     return null;
   }
+
+  const doc: Record<string, unknown> = baseDoc ? { ...baseDoc } : {};
+  const deletedParticipantIds = new Set<string>(
+    Array.isArray(doc.deletedParticipantIds)
+      ? (doc.deletedParticipantIds as unknown[])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      : []
+  );
+
+  // Merge base participants with atomic per-student hash entries
+  const baseParticipants = Array.isArray(doc.participants)
+    ? (doc.participants as Record<string, any>[])
+    : [];
+  if (hashStudentRows.length > 0 || baseParticipants.length > 0) {
+    const combinedByUser = new Map<string, Record<string, any>>();
+    const extraNoUser: Record<string, any>[] = [];
+
+    for (const row of baseParticipants) {
+      if (!row || typeof row !== 'object') continue;
+      const id = String(row.id || '').trim();
+      if (id && deletedParticipantIds.has(id)) continue;
+      const u = String(row.username || '')
+        .trim()
+        .toUpperCase();
+      if (u) {
+        const existing = combinedByUser.get(u);
+        combinedByUser.set(
+          u,
+          existing ? mergeServerDuplicateRows(existing, row) : row
+        );
+      } else {
+        extraNoUser.push(row);
+      }
+    }
+
+    for (const hashRow of hashStudentRows) {
+      if (!hashRow || typeof hashRow !== 'object') continue;
+      const id = String(hashRow.id || '').trim();
+      if (id && deletedParticipantIds.has(id)) continue;
+      const u = String(hashRow.username || '')
+        .trim()
+        .toUpperCase();
+      if (u) {
+        const existing = combinedByUser.get(u);
+        combinedByUser.set(
+          u,
+          existing ? mergeServerDuplicateRows(existing, hashRow) : hashRow
+        );
+      } else {
+        extraNoUser.push(hashRow);
+      }
+    }
+
+    doc.participants = sanitizeParticipantsList([
+      ...combinedByUser.values(),
+      ...extraNoUser,
+    ]);
+  }
+
+  // Merge base resultsHistory with atomic per-result hash entries
+  const baseResults = Array.isArray(doc.resultsHistory)
+    ? (doc.resultsHistory as Record<string, any>[])
+    : [];
+  if (hashResultRows.length > 0 || baseResults.length > 0) {
+    const seenResultIds = new Set<string>();
+    const combinedResults: Record<string, any>[] = [];
+    for (const item of [...hashResultRows, ...baseResults]) {
+      if (!item || typeof item !== 'object') continue;
+      const id = String(item.id || '').trim();
+      if (id && seenResultIds.has(id)) continue;
+      if (id) seenResultIds.add(id);
+      combinedResults.push(item);
+    }
+    doc.resultsHistory = combinedResults;
+  }
+
+  const baseUpdatedAt =
+    typeof doc.updatedAt === 'number' ? doc.updatedAt : 0;
+  const metaUpdatedAt =
+    typeof metaDoc?.updatedAt === 'number' ? metaDoc.updatedAt : 0;
+  const effectiveUpdatedAt = Math.max(baseUpdatedAt, metaUpdatedAt);
+  if (effectiveUpdatedAt > 0) {
+    doc.updatedAt = effectiveUpdatedAt;
+  }
+
+  return doc;
 }
 
 async function writeToVercelKV(
   kv: { url: string; token: string },
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  options?: {
+    syncStudentsHash?: boolean;
+    syncResultsHash?: boolean;
+    clearResultsHash?: boolean;
+  }
 ): Promise<boolean> {
   try {
+    const nowTs =
+      typeof payload.updatedAt === 'number' ? payload.updatedAt : Date.now();
+    const commands: unknown[][] = [
+      ['SET', STORAGE_KEY, JSON.stringify(payload)],
+      ['SET', META_KEY, JSON.stringify({ updatedAt: nowTs })],
+    ];
+
+    const shouldSyncStudents = options?.syncStudentsHash ?? true;
+    if (shouldSyncStudents && Array.isArray(payload.participants)) {
+      const desiredUsers = new Set<string>();
+      const pairs: string[] = [];
+      for (const row of payload.participants as Record<string, any>[]) {
+        if (!row || typeof row !== 'object') continue;
+        const u = String(row.username || '')
+          .trim()
+          .toUpperCase();
+        if (u) {
+          desiredUsers.add(u);
+          pairs.push(u, JSON.stringify(row));
+        }
+      }
+
+      if (pairs.length === 0) {
+        commands.push(['DEL', STUDENTS_HASH_KEY]);
+      } else {
+        // Read existing hash keys first so we never wipe the entire hash with DEL before HSET
+        const hkeysPipe = await kvPipeline(kv, [['HKEYS', STUDENTS_HASH_KEY]]);
+        const existingKeys =
+          hkeysPipe.ok && Array.isArray(hkeysPipe.results[0])
+            ? (hkeysPipe.results[0] as unknown[])
+                .map((k) => String(k ?? '').trim())
+                .filter(Boolean)
+            : [];
+        const obsoleteKeys = existingKeys.filter((k) => !desiredUsers.has(k));
+
+        // Chunk HSET calls to stay comfortably within Redis command size limits
+        const chunkPairSize = 100; // 50 rows per HSET
+        for (let i = 0; i < pairs.length; i += chunkPairSize) {
+          commands.push([
+            'HSET',
+            STUDENTS_HASH_KEY,
+            ...pairs.slice(i, i + chunkPairSize),
+          ]);
+        }
+        if (obsoleteKeys.length > 0) {
+          commands.push(['HDEL', STUDENTS_HASH_KEY, ...obsoleteKeys]);
+        }
+      }
+    }
+
+    const shouldSyncResults = options?.syncResultsHash ?? true;
+    if (options?.clearResultsHash) {
+      commands.push(['DEL', RESULTS_HASH_KEY]);
+    } else if (shouldSyncResults && Array.isArray(payload.resultsHistory)) {
+      const rPairs: string[] = [];
+      for (const item of payload.resultsHistory as Record<string, any>[]) {
+        if (!item || typeof item !== 'object') continue;
+        const id = String(item.id || '').trim();
+        if (id) {
+          rPairs.push(id, JSON.stringify(item));
+        }
+      }
+      if (rPairs.length > 0) {
+        const chunkPairSize = 100;
+        for (let i = 0; i < rPairs.length; i += chunkPairSize) {
+          commands.push([
+            'HSET',
+            RESULTS_HASH_KEY,
+            ...rPairs.slice(i, i + chunkPairSize),
+          ]);
+        }
+      }
+    }
+
+    const pipe = await kvPipeline(kv, commands);
+    if (pipe.ok) return true;
+
     const response = await fetch(
       `${kv.url}/set/${encodeURIComponent(STORAGE_KEY)}`,
       {
@@ -407,6 +762,193 @@ async function writeToVercelKV(
   } catch {
     return false;
   }
+}
+
+async function tryAtomicKvFastPatch(
+  kv: { url: string; token: string },
+  body: Record<string, unknown>
+): Promise<{ handled: boolean; updatedAt: number }> {
+  const allowedFastKeys = new Set([
+    'participantPatch',
+    'resultAppend',
+    'schemaVersion',
+  ]);
+  const bodyKeys = Object.keys(body);
+  const isFastEligible =
+    bodyKeys.length > 0 &&
+    bodyKeys.every((k) => allowedFastKeys.has(k)) &&
+    (body.participantPatch !== undefined || body.resultAppend !== undefined);
+
+  if (!isFastEligible) {
+    return { handled: false, updatedAt: 0 };
+  }
+
+  return enqueueSerializedWrite(() =>
+    withKvDistributedLock(kv, async () => {
+      const nowTs = Date.now();
+  const writeCommands: unknown[][] = [];
+
+  if (body.participantPatch !== undefined) {
+    const rawPatches = (
+      Array.isArray(body.participantPatch)
+        ? body.participantPatch
+        : [body.participantPatch]
+    ).filter((p) => p && typeof p === 'object') as Record<string, any>[];
+
+    const usernames = Array.from(
+      new Set(
+        rawPatches
+          .map((p) => String(p.username || '').trim().toUpperCase())
+          .filter(Boolean)
+      )
+    );
+
+    if (usernames.length > 0) {
+      const readPipe = await kvPipeline(kv, [
+        ['HMGET', STUDENTS_HASH_KEY, ...usernames],
+      ]);
+      if (!readPipe.ok) {
+        return { handled: false, updatedAt: 0 };
+      }
+
+      const hmgetArr = Array.isArray(readPipe.results[0])
+        ? (readPipe.results[0] as unknown[])
+        : [];
+      const existingByUser = new Map<string, Record<string, any>>();
+      let hasMissingInHash = false;
+
+      usernames.forEach((u, idx) => {
+        const parsed = parseKvJsonValue(hmgetArr[idx]);
+        if (parsed) {
+          existingByUser.set(u, parsed as Record<string, any>);
+        } else {
+          hasMissingInHash = true;
+        }
+      });
+
+      // Fallback once to base doc only for students missing from hash
+      if (hasMissingInHash) {
+        const basePipe = await kvPipeline(kv, [['GET', STORAGE_KEY]]);
+        if (basePipe.ok) {
+          const baseDoc = parseKvJsonValue(basePipe.results[0]);
+          const baseList = Array.isArray(baseDoc?.participants)
+            ? (baseDoc!.participants as Record<string, any>[])
+            : [];
+          for (const row of baseList) {
+            if (!row || typeof row !== 'object') continue;
+            const u = String(row.username || '')
+              .trim()
+              .toUpperCase();
+            if (u && usernames.includes(u) && !existingByUser.has(u)) {
+              existingByUser.set(u, row);
+            }
+          }
+        }
+      }
+
+      const hsetPairs: string[] = [];
+      for (const patch of rawPatches) {
+        const patchUser = String(patch.username || '')
+          .trim()
+          .toUpperCase();
+        if (!patchUser) continue;
+
+        const existingRow = existingByUser.get(patchUser);
+        let mergedRow: Record<string, any>;
+        if (existingRow) {
+          const candidate = { ...existingRow };
+          for (const [k, val] of Object.entries(patch)) {
+            if (val === undefined || val === null) {
+              delete candidate[k];
+            } else {
+              candidate[k] = val;
+            }
+          }
+          mergedRow = mergeServerDuplicateRows(existingRow, candidate);
+        } else {
+          const cleanNew: Record<string, any> = {
+            id: String(patch.id || `p_${nowTs}`),
+            selected: false,
+            status: patch.status || 'Active',
+            kodeTes: patch.kodeTes || 'SAS26SMADIP1',
+            username: patchUser,
+            namaPeserta: patch.namaPeserta || patchUser,
+            kelompok: patch.kelompok || 'Ruang 1',
+            kelas: patch.kelas || 'X',
+            loginState: patch.loginState || 'Belum Login',
+            requestReset: Boolean(patch.requestReset),
+          };
+          for (const [k, val] of Object.entries(patch)) {
+            if (val !== undefined && val !== null) {
+              cleanNew[k] = val;
+            }
+          }
+          mergedRow = cleanNew;
+        }
+
+        const sanitizedSingle = sanitizeParticipantsList([mergedRow])[0];
+        if (sanitizedSingle) {
+          existingByUser.set(patchUser, sanitizedSingle);
+          hsetPairs.push(patchUser, JSON.stringify(sanitizedSingle));
+        }
+      }
+
+      if (hsetPairs.length > 0) {
+        writeCommands.push(['HSET', STUDENTS_HASH_KEY, ...hsetPairs]);
+      }
+    }
+  }
+
+  if (body.resultAppend && typeof body.resultAppend === 'object') {
+    const resItem = body.resultAppend as Record<string, any>;
+    const resId = String(resItem.id || `res_${nowTs}`).trim();
+    writeCommands.push(['HSET', RESULTS_HASH_KEY, resId, JSON.stringify(resItem)]);
+  }
+
+  if (writeCommands.length === 0) {
+    return { handled: false, updatedAt: 0 };
+  }
+
+  writeCommands.push(['SET', META_KEY, JSON.stringify({ updatedAt: nowTs })]);
+  const writePipe = await kvPipeline(kv, writeCommands);
+  if (!writePipe.ok) {
+    return { handled: false, updatedAt: 0 };
+  }
+
+  // Also keep in-memory cache coherent if warm
+  const cached = globalThis.__SMADIP_CBT_MEM_STORE__;
+  if (cached && typeof cached === 'object') {
+    if (body.participantPatch !== undefined) {
+      cached.participants = applyParticipantPatches(
+        cached.participants,
+        body.participantPatch
+      );
+    }
+    if (body.resultAppend && typeof body.resultAppend === 'object') {
+      const prevHist = Array.isArray(cached.resultsHistory)
+        ? (cached.resultsHistory as Record<string, any>[])
+        : [];
+      const app = body.resultAppend as Record<string, any>;
+      if (!prevHist.some((x) => x?.id === app.id)) {
+        cached.resultsHistory = [app, ...prevHist];
+      }
+    }
+    cached.updatedAt = nowTs;
+  }
+
+      return { handled: true, updatedAt: nowTs };
+    })
+  );
+}
+
+function enqueueSerializedWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = globalThis.__SMADIP_CBT_WRITE_QUEUE__ || Promise.resolve();
+  const next = prev.then(fn, fn);
+  globalThis.__SMADIP_CBT_WRITE_QUEUE__ = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
 }
 
 function readFromFileOrMemory(): Record<string, unknown> | null {
@@ -615,6 +1157,7 @@ function mergeServerDuplicateRows(
   let resolvedViolationSchema: number | undefined = undefined;
   let resolvedViolationTimestamp: number | undefined = undefined;
   let resolvedViolationCount: number | undefined = undefined;
+  let resolvedViolationPackageId: string | undefined = undefined;
 
   if (isLocked) {
     const vSource = incViolationTs >= existViolationTs ? incoming : existing;
@@ -628,6 +1171,8 @@ function mergeServerDuplicateRows(
       vFallback.violationReason ||
       'Pelanggaran keamanan ujian CBT';
     resolvedViolationAt = vSource.violationAt || vFallback.violationAt;
+    resolvedViolationPackageId =
+      vSource.violationPackageId || vFallback.violationPackageId;
     resolvedViolationCount = Math.max(
       typeof existing.violationCount === 'number' ? existing.violationCount : 0,
       typeof incoming.violationCount === 'number' ? incoming.violationCount : 0,
@@ -669,8 +1214,13 @@ function mergeServerDuplicateRows(
     );
     if (resolvedLoginState === 'Selesai') {
       resolvedViolationCount = 0;
+      resolvedViolationPackageId = undefined;
     } else if (maxVCount > 0) {
       resolvedViolationCount = maxVCount;
+      const vPkgSource = incViolationTs >= existViolationTs ? incoming : existing;
+      const vPkgFallback = incViolationTs >= existViolationTs ? existing : incoming;
+      resolvedViolationPackageId =
+        vPkgSource.violationPackageId || vPkgFallback.violationPackageId;
     }
   }
 
@@ -696,6 +1246,11 @@ function mergeServerDuplicateRows(
     result.violationSchema = resolvedViolationSchema;
     result.violationTimestamp = resolvedViolationTimestamp;
     result.violationCount = resolvedViolationCount;
+    if (resolvedViolationPackageId) {
+      result.violationPackageId = resolvedViolationPackageId;
+    } else {
+      delete result.violationPackageId;
+    }
   } else {
     delete result.violationReason;
     delete result.violationAt;
@@ -705,6 +1260,11 @@ function mergeServerDuplicateRows(
       result.violationCount = resolvedViolationCount;
     } else {
       delete result.violationCount;
+    }
+    if (resolvedViolationPackageId && (resolvedViolationCount || 0) > 0) {
+      result.violationPackageId = resolvedViolationPackageId;
+    } else {
+      delete result.violationPackageId;
     }
   }
 
@@ -1031,14 +1591,6 @@ export default async function handler(req: any, res: any) {
   const engine = kv ? 'vercel-kv' : 'vercel-serverless';
 
   if (req.method === 'GET') {
-    let data: Record<string, unknown> | null = null;
-    if (kv) {
-      data = await readFromVercelKV(kv);
-    }
-    if (!data) {
-      data = readFromFileOrMemory();
-    }
-
     let sinceParam = 0;
     try {
       const rawSince =
@@ -1052,6 +1604,28 @@ export default async function handler(req: any, res: any) {
       }
     } catch {
       sinceParam = 0;
+    }
+
+    // Fast lightweight check on meta timestamp before reading full payload
+    if (kv && sinceParam > 0) {
+      const metaUpdatedAt = await readMetaUpdatedAtFromKV(kv);
+      if (metaUpdatedAt > 0 && metaUpdatedAt === sinceParam) {
+        return res.status(200).json({
+          ok: true,
+          engine,
+          updatedAt: metaUpdatedAt,
+          unchanged: true,
+          data: null,
+        });
+      }
+    }
+
+    let data: Record<string, unknown> | null = null;
+    if (kv) {
+      data = await readFromVercelKV(kv);
+    }
+    if (!data) {
+      data = readFromFileOrMemory();
     }
 
     // Only skip full payload when server updatedAt matches client's since timestamp exactly.
@@ -1088,29 +1662,44 @@ export default async function handler(req: any, res: any) {
 
   if (req.method === 'POST' || req.method === 'PUT') {
     try {
-      const body =
-        typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
-      const existing =
-        (kv ? await readFromVercelKV(kv) : null) ||
-        readFromFileOrMemory() ||
-        {};
+      const body = (
+        typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {}
+      ) as Record<string, unknown>;
 
-      // Ignore writes from stale un-refreshed browser tabs running older bundle versions
-      if (body.schemaVersion !== 3) {
-        const cleanExisting =
-          existing && Array.isArray(existing.participants)
-            ? {
-                ...existing,
-                participants: sanitizeParticipantsList(existing.participants),
-              }
-            : existing;
-        return res.status(200).json({
-          ok: true,
-          engine,
-          updatedAt: cleanExisting.updatedAt || Date.now(),
-          data: cleanExisting,
-        });
+      // Fast atomic KV hash path for concurrent student login/draft/violation/submit updates
+      if (kv && body.schemaVersion === 3) {
+        const fastResult = await tryAtomicKvFastPatch(kv, body);
+        if (fastResult.handled) {
+          return res.status(200).json({
+            ok: true,
+            engine,
+            updatedAt: fastResult.updatedAt,
+            data: { updatedAt: fastResult.updatedAt },
+          });
+        }
       }
+
+      const result = await enqueueSerializedWrite(() =>
+        withKvDistributedLock(kv, async () => {
+          const existing =
+            (kv ? await readFromVercelKV(kv) : null) ||
+            readFromFileOrMemory() ||
+            {};
+
+        // Ignore writes from stale un-refreshed browser tabs running older bundle versions
+        if (body.schemaVersion !== 3) {
+          const cleanExisting =
+            existing && Array.isArray(existing.participants)
+              ? {
+                  ...existing,
+                  participants: sanitizeParticipantsList(existing.participants),
+                }
+              : existing;
+          return {
+            updatedAt: cleanExisting.updatedAt || Date.now(),
+            data: cleanExisting,
+          };
+        }
 
       const combinedDeletedParticipantIds = Array.from(
         new Set([
@@ -1325,16 +1914,40 @@ export default async function handler(req: any, res: any) {
         updatedAt: Date.now(),
       };
 
-      writeToFileAndMemory(merged);
-      if (kv) {
-        await writeToVercelKV(kv, merged);
-      }
+        const hasParticipantsMutation =
+          body.participants !== undefined ||
+          body.participantPatch !== undefined ||
+          (Array.isArray(body.deletedParticipantIds) &&
+            body.deletedParticipantIds.length > 0);
+        const isResultsCleared =
+          incResultsClearedAt > 0 &&
+          incResultsClearedAt >= existResultsClearedAt;
+        const hasResultsMutation =
+          body.resultsHistory !== undefined ||
+          body.resultAppend !== undefined ||
+          isResultsCleared;
+
+        writeToFileAndMemory(merged);
+        if (kv) {
+          await writeToVercelKV(kv, merged, {
+            syncStudentsHash: hasParticipantsMutation,
+            syncResultsHash: hasResultsMutation,
+            clearResultsHash: isResultsCleared,
+          });
+        }
+
+        return {
+          updatedAt: merged.updatedAt,
+          data: merged,
+        };
+        })
+      );
 
       return res.status(200).json({
         ok: true,
         engine,
-        updatedAt: merged.updatedAt,
-        data: merged,
+        updatedAt: result.updatedAt,
+        data: result.data,
       });
     } catch (err) {
       return res.status(400).json({

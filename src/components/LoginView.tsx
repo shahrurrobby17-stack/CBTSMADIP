@@ -32,9 +32,35 @@ interface LoginViewProps {
   activeSchedules?: AdminScheduleItem[];
   resultsHistory?: ExamResultSummary[];
   lastViolationInfo?: ViolationAlertInfo | null;
+  violationMessage?: string;
   onRequestResetLogin?: (username: string) => void;
   onRefreshParticipants?: () => Promise<ProctorParticipantRow[]>;
   onExitApp?: () => void;
+}
+
+function isStudentPasswordValid(
+  row: ProctorParticipantRow | undefined,
+  enteredPassword: string
+): boolean {
+  if (!row) return false;
+  const expectedPass = String(row.password || '').trim();
+  if (!expectedPass) return true;
+  const cleanEntered = enteredPassword.trim();
+  if (cleanEntered === expectedPass) return true;
+  if (
+    expectedPass === expectedPass.toUpperCase() &&
+    cleanEntered.toUpperCase() === expectedPass
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeMapelKey(raw?: string): string {
+  return String(raw || '')
+    .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .trim()
+    .toLowerCase();
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({
@@ -43,6 +69,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   activeSchedules = [],
   resultsHistory = [],
   lastViolationInfo,
+  violationMessage,
   onRefreshParticipants,
   onOpenProctorModal,
   onExitApp,
@@ -110,6 +137,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
     if (
       onRefreshParticipants &&
       (!row ||
+        !isStudentPasswordValid(row, cleanPass) ||
         isParticipantLockedByViolation(row) ||
         row.status !== 'Active' ||
         row.loginState === 'Selesai')
@@ -129,6 +157,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
     if (!row) {
       setErrorMsg('Username anda tidak terdaftar');
+      return;
+    }
+    if (!isStudentPasswordValid(row, cleanPass)) {
+      setErrorMsg('Password yang Anda masukkan salah.');
       return;
     }
     if (isParticipantLockedByViolation(row)) {
@@ -157,11 +189,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
             (r) =>
               r?.participant?.username?.trim().toUpperCase() === rowUsername
           )
-          .map((r) => String(r.packageTitle || '').trim().toLowerCase())
+          .map((r) => normalizeMapelKey(r.packageTitle))
           .filter(Boolean)
       );
       const hasUncompletedActiveSubject = relevantSchedules.some((s) => {
-        const mapelLower = String(s.mapel || '').trim().toLowerCase();
+        const mapelLower = normalizeMapelKey(s.mapel);
         return mapelLower && !completedTitles.has(mapelLower);
       });
       if (!hasUncompletedActiveSubject) {
@@ -227,6 +259,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     Pelanggaran {Math.min(activeViolationCount, 6)}/6
                   </span>
                 </div>
+                {violationMessage && violationMessage.trim() && (
+                  <p className="text-xs leading-relaxed font-medium text-rose-800 bg-white/80 px-2.5 py-2 rounded-lg border border-rose-200">
+                    {violationMessage}
+                  </p>
+                )}
                 <p className="text-xs leading-relaxed text-rose-700">
                   Peserta <strong>{activeLockedParticipant.namaPeserta}</strong> (
                   <span className="font-mono font-bold">

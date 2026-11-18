@@ -1,16 +1,19 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   LogOut,
   Award,
   Clock,
+  CheckCircle2,
 } from 'lucide-react';
 import { ExamPackage, ParticipantProfile, StudentAnswer } from '../types/cbt';
+import { evaluateQuestionScore } from '../data/cbtData';
 
 interface ExamResultViewProps {
   profile: ParticipantProfile;
   examPackage: ExamPackage;
   answers: Record<string, StudentAnswer>;
   timeUsedSeconds: number;
+  showResultScore?: boolean;
   onRetakeOrChangePackage: () => void;
   onLogout: () => void;
 }
@@ -18,7 +21,9 @@ interface ExamResultViewProps {
 export const ExamResultView: React.FC<ExamResultViewProps> = ({
   profile,
   examPackage,
+  answers,
   timeUsedSeconds,
+  showResultScore = false,
   onLogout,
 }) => {
   const formatDuration = (secs: number) => {
@@ -26,6 +31,28 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
     const s = secs % 60;
     return `${m} menit ${s} detik`;
   };
+
+  const scoreStats = useMemo(() => {
+    const questions = Array.isArray(examPackage?.questions)
+      ? examPackage.questions
+      : [];
+    let totalPoints = 0;
+    let maxPoints = 0;
+    let correctCount = 0;
+    questions.forEach((q) => {
+      maxPoints += q.points || 0;
+      const res = evaluateQuestionScore(q, answers[q.id]);
+      if (res.isCorrect) correctCount += 1;
+      totalPoints += res.earnedPoints;
+    });
+    const finalScore =
+      maxPoints > 0 ? Math.round((totalPoints / maxPoints) * 100) : 0;
+    return {
+      totalQuestions: questions.length,
+      correctCount,
+      finalScore,
+    };
+  }, [answers, examPackage]);
 
   return (
     <main className="flex-1 max-w-[760px] w-full mx-auto px-4 sm:px-8 py-8 space-y-6">
@@ -64,6 +91,30 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
             </div>
           </div>
         </div>
+
+        {showResultScore && (
+          <div className="py-5 grid grid-cols-1 sm:grid-cols-2 gap-4 border-b border-slate-100">
+            <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200">
+              <div className="text-xs font-semibold text-blue-700">
+                Nilai Akhir Anda
+              </div>
+              <div className="mt-1 font-mono text-3xl font-extrabold text-[#001a6e] tabular-nums">
+                {scoreStats.finalScore}
+              </div>
+            </div>
+            <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200">
+              <div className="text-xs font-semibold text-emerald-700">
+                Jawaban Benar
+              </div>
+              <div className="mt-1 text-lg font-bold text-emerald-800 flex items-center gap-1.5 tabular-nums">
+                <CheckCircle2 className="w-5 h-5" />
+                <span>
+                  {scoreStats.correctCount} dari {scoreStats.totalQuestions} Soal
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Action Button */}
         <div className="pt-5 flex items-center justify-end">

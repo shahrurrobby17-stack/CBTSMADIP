@@ -84,118 +84,187 @@ interface AdminLoginViewProps {
   onAdminLoginSuccess: (adminUsername: string) => void;
   onBackToStudentLogin: () => void;
   onGoToProctorLogin: () => void;
+  adminSettings?: Record<string, any>;
+  onRefreshAdminSettings?: () => Promise<Record<string, any> | null | undefined>;
+}
+
+const BUILTIN_DEFAULT_ADMINS = [
+  {
+    id: 'adm_1',
+    adminId: 'K05060108-KB6K',
+    namaLengkap: 'SHAHRUR ROBBY, S.Pd.',
+    email: 'shahrurrobby17@gmail.com',
+    status: 'Aktif',
+    password: 'SAS2026',
+  },
+  {
+    id: 'adm_2',
+    adminId: 'ADMIN_SMADIP',
+    namaLengkap: 'TIM TEKNIS CBT SMA ISLAM DIPONEGORO',
+    email: 'admin.cbt@smadiponegorowagir.sch.id',
+    status: 'Aktif',
+    password: 'SAS2026',
+  },
+];
+
+function resolveAdminAccountFromSettings(
+  settingsObj: Record<string, any> | null | undefined,
+  cleanInputUpper: string
+): Record<string, any> | undefined {
+  if (!cleanInputUpper) return undefined;
+
+  let effectiveSettings: Record<string, any> | null =
+    settingsObj && typeof settingsObj === 'object' ? settingsObj : null;
+  if (!effectiveSettings) {
+    try {
+      const saved = localStorage.getItem('cbt_admin_settings');
+      if (saved) {
+        effectiveSettings = JSON.parse(saved);
+      }
+    } catch {
+      // ignore storage error
+    }
+  }
+
+  const storedList = Array.isArray(effectiveSettings?.adminList)
+    ? (effectiveSettings!.adminList as Record<string, any>[])
+    : [];
+  const adminList =
+    storedList.length > 0 ? storedList : BUILTIN_DEFAULT_ADMINS;
+
+  // 1. Direct match by adminId, username, namaLengkap, or email in adminList
+  const directMatch = adminList.find((adm) => {
+    if (!adm || typeof adm !== 'object') return false;
+    const uName = String(adm.username || '').trim().toUpperCase();
+    const fullName = String(adm.namaLengkap || '').trim().toUpperCase();
+    const aId = String(adm.adminId || '').trim().toUpperCase();
+    const email = String(adm.email || '').trim().toUpperCase();
+    return (
+      (uName && uName === cleanInputUpper) ||
+      (fullName && fullName === cleanInputUpper) ||
+      (aId && aId === cleanInputUpper) ||
+      (email && email === cleanInputUpper)
+    );
+  });
+  if (directMatch) return directMatch;
+
+  // 2. Legacy aliases resolve to primary admin record in adminList so status & password changes apply to aliases too
+  const primaryAdminId =
+    typeof effectiveSettings?.adminId === 'string' &&
+    effectiveSettings.adminId.trim()
+      ? effectiveSettings.adminId.trim().toUpperCase()
+      : 'K05060108-KB6K';
+
+  const validPrimaryUsernames = new Set([
+    'SHAHRUR ROBBY, S.PD.',
+    'SHAHRUR ROBBY, S.PD',
+    'SHAHRUR ROBBY',
+    'SHAHRUR',
+    'ROBBY',
+    'SHAHRURROBBY17',
+    'SHAHRURROBBY17@GMAIL.COM',
+    'ADMIN',
+    'ADMINISTRATOR',
+    'ADMIN_CBT',
+    'ADMINCBT',
+    'SMADIP',
+    'SMADIPONEGORO',
+    'K05060108',
+    'K05060108-KB6K',
+    primaryAdminId,
+    typeof effectiveSettings?.adminUsername === 'string'
+      ? effectiveSettings.adminUsername.trim().toUpperCase()
+      : '',
+    typeof effectiveSettings?.adminNama === 'string'
+      ? effectiveSettings.adminNama.trim().toUpperCase()
+      : '',
+  ]);
+
+  if (validPrimaryUsernames.has(cleanInputUpper)) {
+    return (
+      adminList.find(
+        (adm) =>
+          String(adm?.adminId || '').trim().toUpperCase() === primaryAdminId ||
+          adm?.id === 'adm_1'
+      ) ||
+      (storedList.length === 0 ? BUILTIN_DEFAULT_ADMINS[0] : undefined)
+    );
+  }
+
+  // 3. Technical admin aliases resolve to ADMIN_SMADIP entry in adminList
+  const validTechUsernames = new Set([
+    'TIM_TEKNIS',
+    'TIM TEKNIS',
+    'ADMIN_TEKNIS',
+    'ADMIN_SMADIP',
+    'ADMINSMADIP',
+    'TIM TEKNIS CBT SMA ISLAM DIPONEGORO',
+  ]);
+
+  if (validTechUsernames.has(cleanInputUpper)) {
+    return (
+      adminList.find(
+        (adm) =>
+          String(adm?.adminId || '').trim().toUpperCase() === 'ADMIN_SMADIP' ||
+          adm?.id === 'adm_2'
+      ) ||
+      (storedList.length === 0 ? BUILTIN_DEFAULT_ADMINS[1] : undefined)
+    );
+  }
+
+  return undefined;
+}
+
+function isAdminPasswordValid(
+  account: Record<string, any> | undefined,
+  enteredPass: string
+): boolean {
+  if (!account) return false;
+  const expectedPass = String(account.password || 'SAS2026').trim();
+  if (!expectedPass) return false;
+  const cleanEntered = enteredPass.trim();
+  if (cleanEntered === expectedPass) return true;
+  if (
+    expectedPass === expectedPass.toUpperCase() &&
+    cleanEntered.toUpperCase() === expectedPass
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
   onAdminLoginSuccess,
   onBackToStudentLogin,
   onGoToProctorLogin,
+  adminSettings,
+  onRefreshAdminSettings,
 }) => {
   const [usernameInput, setUsernameInput] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isCheckingLogin, setIsCheckingLogin] = useState(false);
 
   // Resolve ID Administrator secara otomatis ketika Username dimasukkan dengan benar
-  const resolvedAdminId = useMemo(() => {
+  const resolvedAdminAccount = useMemo(() => {
     const clean = usernameInput.trim().toUpperCase();
-    if (!clean) return '';
+    return resolveAdminAccountFromSettings(adminSettings, clean);
+  }, [usernameInput, adminSettings]);
 
-    let primaryAdminId = 'K05060108-KB6K';
-    try {
-      const saved = localStorage.getItem('cbt_admin_settings');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (typeof parsed.adminId === 'string' && parsed.adminId.trim()) {
-          primaryAdminId = parsed.adminId.trim().toUpperCase();
-        }
-        if (
-          typeof parsed.adminUsername === 'string' &&
-          parsed.adminUsername.trim().toUpperCase() === clean
-        ) {
-          return primaryAdminId;
-        }
-        if (
-          typeof parsed.adminNama === 'string' &&
-          parsed.adminNama.trim().toUpperCase() === clean
-        ) {
-          return primaryAdminId;
-        }
-        if (Array.isArray(parsed.adminList)) {
-          const matchedFromList = parsed.adminList.find((adm: any) => {
-            const uName = String(adm?.username || '').trim().toUpperCase();
-            const fullName = String(adm?.namaLengkap || '').trim().toUpperCase();
-            const aId = String(adm?.adminId || '').trim().toUpperCase();
-            const email = String(adm?.email || '').trim().toUpperCase();
-            return (
-              (uName && uName === clean) ||
-              (fullName && fullName === clean) ||
-              (aId && aId === clean) ||
-              (email && email === clean)
-            );
-          });
-          if (matchedFromList?.adminId) {
-            return String(matchedFromList.adminId).trim().toUpperCase();
-          }
-        }
-      }
-    } catch {
-      // Ignore storage error
-    }
+  const resolvedAdminId = resolvedAdminAccount?.adminId
+    ? String(resolvedAdminAccount.adminId).trim().toUpperCase()
+    : '';
 
-    const validPrimaryUsernames = new Set([
-      'SHAHRUR ROBBY, S.PD.',
-      'SHAHRUR ROBBY, S.PD',
-      'SHAHRUR ROBBY',
-      'SHAHRUR',
-      'ROBBY',
-      'SHAHRURROBBY17',
-      'SHAHRURROBBY17@GMAIL.COM',
-      'ADMIN',
-      'ADMINISTRATOR',
-      'ADMIN_SMADIP',
-      'ADMINSMADIP',
-      'ADMIN_CBT',
-      'ADMINCBT',
-      'SMADIP',
-      'SMADIPONEGORO',
-      'K05060108',
-      'K05060108-KB6K',
-      primaryAdminId,
-    ]);
-
-    if (validPrimaryUsernames.has(clean)) {
-      return primaryAdminId;
-    }
-
-    const validTechUsernames = new Set([
-      'TIM_TEKNIS',
-      'TIM TEKNIS',
-      'ADMIN_TEKNIS',
-      'TIM TEKNIS CBT SMA ISLAM DIPONEGORO',
-    ]);
-
-    if (validTechUsernames.has(clean)) {
-      return 'ADMIN_SMADIP';
-    }
-
-    return '';
-  }, [usernameInput]);
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCheckingLogin) return;
     const cleanUsername = usernameInput.trim();
+    const cleanUpper = cleanUsername.toUpperCase();
     const cleanPass = password.trim();
 
     if (!cleanUsername) {
       setErrorMsg('Username Administrator wajib diisi terlebih dahulu.');
-      return;
-    }
-
-    if (!resolvedAdminId) {
-      setErrorMsg(
-        'Username Administrator tidak terdaftar. Masukkan Username yang benar agar ID Administrator muncul otomatis.'
-      );
       return;
     }
 
@@ -204,7 +273,43 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
       return;
     }
 
-    if (cleanPass.toUpperCase() !== 'SAS2026') {
+    let matchedAccount = resolveAdminAccountFromSettings(adminSettings, cleanUpper);
+    const locallyValid =
+      Boolean(matchedAccount) &&
+      String(matchedAccount?.status || 'Aktif').trim() === 'Aktif' &&
+      isAdminPasswordValid(matchedAccount, cleanPass);
+
+    if (!locallyValid && onRefreshAdminSettings) {
+      setIsCheckingLogin(true);
+      try {
+        const freshSettings = await onRefreshAdminSettings();
+        if (freshSettings && typeof freshSettings === 'object') {
+          matchedAccount =
+            resolveAdminAccountFromSettings(freshSettings, cleanUpper) ||
+            matchedAccount;
+        }
+      } catch {
+        // fallback to local settings
+      } finally {
+        setIsCheckingLogin(false);
+      }
+    }
+
+    if (!matchedAccount || !matchedAccount.adminId) {
+      setErrorMsg(
+        'Username Administrator tidak terdaftar. Masukkan Username yang benar agar ID Administrator muncul otomatis.'
+      );
+      return;
+    }
+
+    if (String(matchedAccount.status || 'Aktif').trim() !== 'Aktif') {
+      setErrorMsg(
+        'Akun Administrator berstatus Non Aktif. Hubungi Penanggung Jawab / Super Admin untuk mengaktifkan akun ini.'
+      );
+      return;
+    }
+
+    if (!isAdminPasswordValid(matchedAccount, cleanPass)) {
       setErrorMsg('Password Administrator yang Anda masukkan salah.');
       return;
     }
@@ -230,7 +335,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
       // Ignore
     }
 
-    onAdminLoginSuccess(resolvedAdminId);
+    onAdminLoginSuccess(String(matchedAccount.adminId).trim().toUpperCase());
   };
 
   return (
@@ -355,9 +460,10 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
           <div className="pt-2 space-y-2.5">
             <button
               type="submit"
-              className="w-full py-2.5 px-6 rounded-lg bg-[#0088ff] hover:bg-[#006fd6] active:scale-[0.99] text-white text-[14px] font-semibold shadow-[0_6px_16px_rgba(0,136,255,0.28)] transition-all cursor-pointer"
+              disabled={isCheckingLogin}
+              className="w-full py-2.5 px-6 rounded-lg bg-[#0088ff] hover:bg-[#006fd6] active:scale-[0.99] text-white text-[14px] font-semibold shadow-[0_6px_16px_rgba(0,136,255,0.28)] transition-all cursor-pointer disabled:opacity-70"
             >
-              Sign-In Administrator
+              {isCheckingLogin ? 'Memeriksa Akun...' : 'Sign-In Administrator'}
             </button>
 
             <button
@@ -609,6 +715,7 @@ interface AdminDashboardViewProps {
   adminUsername: string;
   activeToken: string;
   tokenSecondsLeft: number;
+  tokenDurationSeconds?: number;
   onUpdateToken: (newToken: string) => void;
   schedules: AdminScheduleItem[];
   onUpdateSchedules: (nextSchedules: AdminScheduleItem[]) => void;
@@ -627,6 +734,8 @@ interface AdminDashboardViewProps {
   onResetDefaultPackages: () => void;
   resultsHistory: ExamResultSummary[];
   onClearHistory: () => void;
+  adminSettings?: Record<string, any>;
+  onUpdateAdminSettings?: (nextCfg: Record<string, any>) => void;
   storageEngine?: 'vercel-kv' | 'vercel-serverless' | 'local';
   lastSyncedLabel?: string;
   onForceSyncStorage?: () => void;
@@ -871,6 +980,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   adminUsername,
   activeToken,
   tokenSecondsLeft,
+  tokenDurationSeconds = 600,
   onUpdateToken,
   schedules,
   onUpdateSchedules,
@@ -883,6 +993,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   onResetDefaultPackages,
   resultsHistory,
   onClearHistory,
+  adminSettings: externalAdminSettings,
+  onUpdateAdminSettings,
   storageEngine = 'vercel-serverless',
   lastSyncedLabel = 'Tersimpan Otomatis',
   onForceSyncStorage,
@@ -953,12 +1065,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     setCustomTokenInput(activeToken);
   }, [activeToken]);
 
+  const effectiveTokenDurationSecs = Math.max(60, tokenDurationSeconds || 600);
+  const tokenIntervalMinutes = Math.round(effectiveTokenDurationSecs / 60);
   const tokenMinutes = String(Math.floor(tokenSecondsLeft / 60)).padStart(2, '0');
   const tokenSeconds = String(tokenSecondsLeft % 60).padStart(2, '0');
   const tokenCountdownLabel = `${tokenMinutes}:${tokenSeconds}`;
   const tokenProgressPct = Math.max(
     0,
-    Math.min(100, (tokenSecondsLeft / 600) * 100)
+    Math.min(100, (tokenSecondsLeft / effectiveTokenDurationSecs) * 100)
   );
   const [newQuestionType, setNewQuestionType] = useState<QuestionType>('pilihan_ganda');
   const [newCategory, setNewCategory] = useState('Literasi & Numerasi');
@@ -1056,6 +1170,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       noHp: '0812-3456-7890',
       role: 'Penanggung Jawab / Super Admin',
       status: 'Aktif',
+      password: 'SAS2026',
     },
     {
       id: 'adm_2',
@@ -1066,6 +1181,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       noHp: '0857-1122-3344',
       role: 'Administrator Server & Database',
       status: 'Aktif',
+      password: 'SAS2026',
     },
   ];
 
@@ -1095,21 +1211,29 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     deletedMapelNames: [] as string[],
     durasiDefault: 90,
     minMinutesBeforeFinish: 45,
+    enforceMinFinishTime: false,
     acakSoal: true,
     acakOpsi: true,
     wajibFullscreen: true,
     kunciKeluarSistem: true,
     tampilkanNilaiPeserta: false,
-    tokenIntervalMenit: 15,
+    tokenIntervalMenit: 10,
     pesanPelanggaran:
       'Anda terdeteksi keluar dari layar CBT! Harap lapor ke Proktor / Pengawas untuk reset login.',
+    updatedAt: 0,
   };
 
   const [appConfig, setAppConfig] = useState<typeof defaultAdminConfig>(() => {
     try {
-      const saved = localStorage.getItem('cbt_admin_settings');
-      if (saved) {
-        const parsed = JSON.parse(saved);
+      const sourceObj =
+        externalAdminSettings && typeof externalAdminSettings === 'object'
+          ? externalAdminSettings
+          : (() => {
+              const saved = localStorage.getItem('cbt_admin_settings');
+              return saved ? JSON.parse(saved) : null;
+            })();
+      if (sourceObj) {
+        const parsed = sourceObj;
         const isCustomMapelConfigured = Boolean(parsed.customMapelConfigured);
         const deletedCodesSet = new Set<string>(
           Array.isArray(parsed.deletedMapelCodes)
@@ -1176,14 +1300,25 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       ...adm,
                       namaLengkap: 'SHAHRUR ROBBY, S.Pd.',
                       email: 'shahrurrobby17@gmail.com',
+                      password: adm.password || 'SAS2026',
                     }
-                  : adm
+                  : {
+                      ...adm,
+                      password: adm.password || 'SAS2026',
+                    }
               )
             : defaultAdminList;
+
+        const normalizedInterval =
+          !parsed.updatedAt && parsed.tokenIntervalMenit === 15
+            ? 10
+            : Number(parsed.tokenIntervalMenit) || 10;
 
         return {
           ...defaultAdminConfig,
           ...parsed,
+          tokenIntervalMenit: normalizedInterval,
+          enforceMinFinishTime: Boolean(parsed.enforceMinFinishTime),
           logoKartuPeserta:
             parsed.logoKartuPeserta ||
             localStorage.getItem('cbt_kartu_peserta_logo') ||
@@ -1206,6 +1341,46 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       logoKartuPeserta: localStorage.getItem('cbt_kartu_peserta_logo') || '',
     };
   });
+
+  useEffect(() => {
+    if (!externalAdminSettings || typeof externalAdminSettings !== 'object') {
+      return;
+    }
+    const remoteTs =
+      typeof externalAdminSettings.updatedAt === 'number'
+        ? externalAdminSettings.updatedAt
+        : 0;
+    const localTs =
+      typeof appConfig.updatedAt === 'number' ? appConfig.updatedAt : 0;
+    if (remoteTs > localTs) {
+      setAppConfig((prev) => ({
+        ...prev,
+        ...externalAdminSettings,
+      }));
+    }
+  }, [externalAdminSettings, appConfig.updatedAt]);
+
+  const persistAdminConfig = (
+    nextCfg: typeof defaultAdminConfig,
+    options?: { syncCloud?: boolean }
+  ) => {
+    const stamped = {
+      ...nextCfg,
+      updatedAt: Date.now(),
+    };
+    setAppConfig(stamped);
+    try {
+      localStorage.setItem('cbt_admin_settings', JSON.stringify(stamped));
+    } catch {
+      // ignore
+    }
+    if (onUpdateAdminSettings) {
+      onUpdateAdminSettings(stamped);
+    } else if (options?.syncCloud) {
+      saveVercelStorage({ adminSettings: stamped });
+    }
+    return stamped;
+  };
 
   const logoKartuInputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -1306,7 +1481,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [newAdminNip, setNewAdminNip] = useState('');
   const [newAdminEmail, setNewAdminEmail] = useState('');
   const [newAdminNoHp, setNewAdminNoHp] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('SAS2026');
   const [newAdminRole, setNewAdminRole] = useState('Administrator Server & Database');
+  const [editingAdminPassId, setEditingAdminPassId] = useState<string | null>(null);
+  const [editingAdminPassValue, setEditingAdminPassValue] = useState('');
 
   // State untuk tambah kolom kelas baru di menu Pengaturan
   const [newPengaturanKelasKode, setNewPengaturanKelasKode] = useState('');
@@ -1398,12 +1576,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       deletedMapelCodes: nextDeletedCodes,
       deletedMapelNames: nextDeletedNames,
     };
-    setAppConfig(updatedConfig);
-    try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
-    } catch {
-      // ignore
-    }
+    persistAdminConfig(updatedConfig, { syncCloud: true });
 
     // Daftarkan juga secara otomatis ke paket soal CBT agar langsung muncul di Status Tes
     const newPkgId = 'mapel_pkg_' + cleanKode.toLowerCase().replace(/[^a-z0-9]/g, '_');
@@ -1707,12 +1880,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           deletedMapelCodes: nextDeletedCodes,
           deletedMapelNames: nextDeletedNames,
         };
-        setAppConfig(updatedConfig);
-        try {
-          localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
-        } catch {
-          // ignore
-        }
+        persistAdminConfig(updatedConfig, { syncCloud: true });
 
         // Daftarkan ke paket CBT agar langsung muncul di Status Tes
         onUpdatePackages((prevPackages) => {
@@ -1872,12 +2040,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       deletedMapelCodes: nextDeletedCodes,
       deletedMapelNames: nextDeletedNames,
     };
-    setAppConfig(updatedConfig);
-    try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
-    } catch {
-      // ignore
-    }
+    persistAdminConfig(updatedConfig, { syncCloud: true });
 
     // Juga hapus dari daftar paket soal CBT agar sinkron di status tes
     onUpdatePackages((prevPackages) => {
@@ -1907,12 +2070,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       ...appConfig,
       mapelList: updatedList,
     };
-    setAppConfig(updatedConfig);
-    try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
-    } catch {
-      // ignore
-    }
+    persistAdminConfig(updatedConfig, { syncCloud: true });
   };
 
   const handleAddAdminToSettings = () => {
@@ -1926,6 +2084,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       showNotice(`Administrator dengan ID ${cleanId} sudah terdaftar.`);
       return;
     }
+    const finalPassword = newAdminPassword.trim() || 'SAS2026';
     const newEntry = {
       id: `adm_${Date.now()}`,
       adminId: cleanId,
@@ -1935,33 +2094,63 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       noHp: newAdminNoHp.trim() || '-',
       role: newAdminRole,
       status: 'Aktif',
+      password: finalPassword,
     };
     const updatedList = [...currentList, newEntry];
-    setAppConfig({
+    const updatedConfig = {
       ...appConfig,
       adminList: updatedList,
-    });
+    };
+    persistAdminConfig(updatedConfig, { syncCloud: true });
     setNewAdminId('');
     setNewAdminNama('');
     setNewAdminNip('');
     setNewAdminEmail('');
     setNewAdminNoHp('');
+    setNewAdminPassword('SAS2026');
     setShowAdminForm(false);
-    showNotice(`Administrator ${newEntry.namaLengkap} (${cleanId}) berhasil ditambahkan ke pengaturan.`);
+    showNotice(`Administrator ${newEntry.namaLengkap} (${cleanId}) berhasil ditambahkan dan disinkronkan!`);
   };
 
   const handleToggleAdminStatusInSettings = (adminIdToToggle: string) => {
     const currentList = Array.isArray(appConfig.adminList) ? appConfig.adminList : defaultAdminList;
+    const targetAdmin = currentList.find((a: any) => a.adminId === adminIdToToggle);
+    const activeCount = currentList.filter((a: any) => (a.status || 'Aktif') === 'Aktif').length;
+    if (targetAdmin && (targetAdmin.status || 'Aktif') === 'Aktif' && activeCount <= 1) {
+      showNotice('Minimal harus terdapat 1 akun administrator dengan status Aktif.');
+      return;
+    }
     const updatedList = currentList.map((a: any) =>
       a.adminId === adminIdToToggle
         ? { ...a, status: a.status === 'Aktif' ? 'Non Aktif' : 'Aktif' }
         : a
     );
-    setAppConfig({
+    const updatedConfig = {
       ...appConfig,
       adminList: updatedList,
-    });
-    showNotice(`Status aktif administrator ${adminIdToToggle} berhasil diperbarui.`);
+    };
+    persistAdminConfig(updatedConfig, { syncCloud: true });
+    showNotice(`Status aktif administrator ${adminIdToToggle} berhasil diperbarui dan disinkronkan.`);
+  };
+
+  const handleSaveAdminPassword = (adminIdToUpdate: string) => {
+    const cleanNewPass = editingAdminPassValue.trim();
+    if (!cleanNewPass || cleanNewPass.length < 4) {
+      showNotice('Password Administrator minimal 4 karakter.');
+      return;
+    }
+    const currentList = Array.isArray(appConfig.adminList) ? appConfig.adminList : defaultAdminList;
+    const updatedList = currentList.map((a: any) =>
+      a.adminId === adminIdToUpdate ? { ...a, password: cleanNewPass } : a
+    );
+    const updatedConfig = {
+      ...appConfig,
+      adminList: updatedList,
+    };
+    persistAdminConfig(updatedConfig, { syncCloud: true });
+    setEditingAdminPassId(null);
+    setEditingAdminPassValue('');
+    showNotice(`Password administrator ${adminIdToUpdate} berhasil diperbarui dan disinkronkan.`);
   };
 
   const handleDeleteAdminFromSettings = (adminIdToDelete: string) => {
@@ -1970,12 +2159,17 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       showNotice('Minimal harus terdapat 1 akun administrator utama aktif.');
       return;
     }
-    const updatedList = currentList.filter((a: any) => a.adminId !== adminIdToDelete);
-    setAppConfig({
+    const remaining = currentList.filter((a: any) => a.adminId !== adminIdToDelete);
+    if (!remaining.some((a: any) => (a.status || 'Aktif') === 'Aktif')) {
+      showNotice('Tidak dapat menghapus: minimal 1 administrator aktif harus tersisa.');
+      return;
+    }
+    const updatedConfig = {
       ...appConfig,
-      adminList: updatedList,
-    });
-    showNotice(`Administrator ${adminIdToDelete} berhasil dihapus dari pengaturan.`);
+      adminList: remaining,
+    };
+    persistAdminConfig(updatedConfig, { syncCloud: true });
+    showNotice(`Administrator ${adminIdToDelete} berhasil dihapus dan disinkronkan.`);
   };
 
   const handleAddKelasToSettings = () => {
@@ -2022,11 +2216,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const handleSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
-    const stampedConfig = { ...appConfig, updatedAt: Date.now() };
-    setAppConfig(stampedConfig);
+    persistAdminConfig(appConfig, { syncCloud: true });
     try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(stampedConfig));
-      saveVercelStorage({ adminSettings: stampedConfig });
       if (appConfig.namaProktor && proctors.length > 0) {
         setProctors((prev) =>
           prev.map((pr, idx) =>
@@ -2054,14 +2245,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   };
 
   const handleResetSettings = () => {
-    const stampedDefault = { ...defaultAdminConfig, updatedAt: Date.now() };
-    setAppConfig(stampedDefault);
-    try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(stampedDefault));
-      saveVercelStorage({ adminSettings: stampedDefault });
-    } catch {
-      // ignore
-    }
+    persistAdminConfig(defaultAdminConfig, { syncCloud: true });
     showNotice('Pengaturan dikembalikan ke konfigurasi standar.');
   };
 
@@ -2111,12 +2295,17 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     searchQuery,
   ]);
 
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<
+    Set<string>
+  >(() => new Set());
+
   const allVisibleSelected =
-    filteredRows.length > 0 && filteredRows.every((r) => r.selected);
+    filteredRows.length > 0 &&
+    filteredRows.every((r) => selectedParticipantIds.has(r.id));
 
   const selectedVisibleCount = useMemo(
-    () => participants.filter((r) => r.selected).length,
-    [participants]
+    () => participants.filter((r) => selectedParticipantIds.has(r.id)).length,
+    [participants, selectedParticipantIds]
   );
 
   const handleApplyFilter = () => {
@@ -2127,7 +2316,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   };
 
   const handleMoveSelectedToRuang = (explicitRuang?: string) => {
-    const selectedRows = participants.filter((r) => r.selected);
+    const selectedRows = participants.filter((r) =>
+      selectedParticipantIds.has(r.id)
+    );
     if (selectedRows.length === 0) {
       showNotice(
         'Klik tombol centang biru untuk memilih minimal satu siswa terlebih dahulu.'
@@ -2154,6 +2345,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           : r
       )
     );
+    setSelectedParticipantIds((prev) => {
+      const next = new Set(prev);
+      selectedIdSet.forEach((id) => next.delete(id));
+      return next;
+    });
     showNotice(
       `${selectedRows.length} siswa berhasil dipindahkan ke ${destinationRuang} (juga diperbarui pada Kartu Login Peserta).`
     );
@@ -2161,29 +2357,40 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const handleToggleSelectAll = () => {
     const targetVal = !allVisibleSelected;
-    const visibleIds = new Set(filteredRows.map((r) => r.id));
-    setParticipants((prev) =>
-      prev.map((r) =>
-        visibleIds.has(r.id) ? { ...r, selected: targetVal } : r
-      )
-    );
+    setSelectedParticipantIds((prev) => {
+      const next = new Set(prev);
+      filteredRows.forEach((r) => {
+        if (targetVal) {
+          next.add(r.id);
+        } else {
+          next.delete(r.id);
+        }
+      });
+      return next;
+    });
   };
 
   const handleToggleRow = (id: string) => {
-    setParticipants((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, selected: !r.selected } : r))
-    );
+    setSelectedParticipantIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   };
 
   const handleAssignSelected = () => {
-    const selectedCount = filteredRows.filter((r) => r.selected).length;
+    const visibleSelectedIds = new Set(
+      filteredRows.filter((r) => selectedParticipantIds.has(r.id)).map((r) => r.id)
+    );
+    const selectedCount = visibleSelectedIds.size;
     if (selectedCount === 0) {
       showNotice('Centang minimal satu peserta terlebih dahulu.');
       return;
     }
-    const visibleSelectedIds = new Set(
-      filteredRows.filter((r) => r.selected).map((r) => r.id)
-    );
     const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
@@ -2198,14 +2405,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   };
 
   const handleUnassignSelected = () => {
-    const selectedCount = filteredRows.filter((r) => r.selected).length;
+    const visibleSelectedIds = new Set(
+      filteredRows.filter((r) => selectedParticipantIds.has(r.id)).map((r) => r.id)
+    );
+    const selectedCount = visibleSelectedIds.size;
     if (selectedCount === 0) {
       showNotice('Centang minimal satu peserta terlebih dahulu.');
       return;
     }
-    const visibleSelectedIds = new Set(
-      filteredRows.filter((r) => r.selected).map((r) => r.id)
-    );
     const nowTs = Date.now();
     setParticipants((prev) =>
       prev.map((r) =>
@@ -2236,7 +2443,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     const nowTs = Date.now();
     const newRow: ProctorParticipantRow = {
       id: `ap_${nowTs}`,
-      selected: true,
+      selected: false,
       status: 'Non Active',
       kodeTes: 'SAS26SMADIP1',
       username: autoGeneratedUsername,
@@ -2248,6 +2455,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       metaUpdatedAt: nowTs,
     };
     setParticipants((prev) => [...prev, newRow]);
+    setSelectedParticipantIds((prev) => {
+      const next = new Set(prev);
+      next.add(newRow.id);
+      return next;
+    });
     setNewParticipantName('');
     showNotice(
       `Peserta ${newRow.namaPeserta} (Kelas ${newRow.kelas}) berhasil ditambahkan (Username: ${newRow.username} | Password: ${newRow.password}).`
@@ -3773,12 +3985,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             </td>
                           </tr>
                         ) : (
-                          filteredRows.map((row) => (
+                          filteredRows.map((row) => {
+                            const isRowSelected = selectedParticipantIds.has(row.id);
+                            return (
                             <tr
                               key={row.id}
                               onClick={() => handleToggleRow(row.id)}
                               className={`transition-colors cursor-pointer ${
-                                row.selected
+                                isRowSelected
                                   ? 'bg-blue-50/35 hover:bg-blue-50/60'
                                   : 'hover:bg-slate-50/90'
                               }`}
@@ -3792,12 +4006,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                   onClick={() => handleToggleRow(row.id)}
                                   aria-label={`Pilih ${row.namaPeserta}`}
                                   title={
-                                    row.selected
+                                    isRowSelected
                                       ? `Batal pilih ${row.namaPeserta}`
                                       : `Pilih ${row.namaPeserta}`
                                   }
                                   className={`w-5 h-5 rounded-md flex items-center justify-center transition-all cursor-pointer ${
-                                    row.selected
+                                    isRowSelected
                                       ? 'bg-[#0095ff] border-2 border-[#0095ff] text-white shadow-2xs ring-2 ring-blue-100'
                                       : 'bg-blue-50/50 hover:bg-blue-100/80 border-2 border-[#0095ff]/60 text-[#0095ff]/35 hover:text-[#0095ff]'
                                   }`}
@@ -3831,7 +4045,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                 {row.namaPeserta}
                               </td>
                             </tr>
-                          ))
+                            );
+                          })
                         )
                       ) : (
                         availableExamRooms.map((room) => {
@@ -3871,12 +4086,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                   </td>
                                 </tr>
                               ) : (
-                                roomRows.map((row) => (
+                                roomRows.map((row) => {
+                                  const isRowSelected = selectedParticipantIds.has(row.id);
+                                  return (
                                   <tr
                                     key={row.id}
                                     onClick={() => handleToggleRow(row.id)}
                                     className={`transition-colors cursor-pointer ${
-                                      row.selected
+                                      isRowSelected
                                         ? 'bg-blue-50/35 hover:bg-blue-50/60'
                                         : 'hover:bg-slate-50/90'
                                     }`}
@@ -3890,12 +4107,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                         onClick={() => handleToggleRow(row.id)}
                                         aria-label={`Pilih ${row.namaPeserta}`}
                                         title={
-                                          row.selected
+                                          isRowSelected
                                             ? `Batal pilih ${row.namaPeserta}`
                                             : `Pilih ${row.namaPeserta}`
                                         }
                                         className={`w-5 h-5 rounded-md flex items-center justify-center transition-all cursor-pointer ${
-                                          row.selected
+                                          isRowSelected
                                             ? 'bg-[#0095ff] border-2 border-[#0095ff] text-white shadow-2xs ring-2 ring-blue-100'
                                             : 'bg-blue-50/50 hover:bg-blue-100/80 border-2 border-[#0095ff]/60 text-[#0095ff]/35 hover:text-[#0095ff]'
                                         }`}
@@ -3929,7 +4146,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                       {row.namaPeserta}
                                     </td>
                                   </tr>
-                                ))
+                                  );
+                                })
                               )}
                             </React.Fragment>
                           );
@@ -3999,7 +4217,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       onClick={() => {
                         onUpdateToken(activeToken);
                         showNotice(
-                          `Token aktif (${activeToken}) berhasil disimpan & durasi 10 menit di-reset.`
+                          `Token aktif (${activeToken}) berhasil disimpan & durasi ${tokenIntervalMinutes} menit di-reset.`
                         );
                       }}
                       className={`px-4 py-2 rounded-lg text-xs font-semibold ${
@@ -4024,7 +4242,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         setCustomTokenInput(t);
                         onUpdateToken(t);
                         showNotice(
-                          `Token baru dirilis (${t}) — durasi otomatis 10 menit dimulai ulang.`
+                          `Token baru dirilis (${t}) — durasi otomatis ${tokenIntervalMinutes} menit dimulai ulang.`
                         );
                       }}
                       className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold ${
@@ -4059,7 +4277,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </div>
                 <div className="bg-white p-5 rounded-xl border border-slate-200/80 shadow-2xs">
                   <div className="text-xs font-semibold text-slate-500">
-                    Token Ujian Saat Ini (10 Menit)
+                    Token Ujian Saat Ini ({tokenIntervalMinutes} Menit)
                   </div>
                   <div className="mt-2 flex items-baseline justify-between gap-2">
                     {isAnyScheduleActive ? (
@@ -4796,23 +5014,30 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           onClick={() => {
                             const nowTs = Date.now();
                             setParticipants((prev) =>
-                              prev.map((row) => ({
-                                ...row,
-                                loginState:
-                                  row.loginState === 'Terkunci (Pelanggaran)'
-                                    ? 'Belum Login'
-                                    : row.loginState,
-                                requestReset: false,
-                                violationReason: undefined,
-                                violationAt: undefined,
-                                violationSchema: undefined,
-                                violationTimestamp: undefined,
-                                lastResetAt: nowTs,
-                                loginUpdatedAt:
-                                  row.loginState === 'Terkunci (Pelanggaran)'
-                                    ? nowTs
-                                    : row.loginUpdatedAt,
-                              }))
+                              prev.map((row) => {
+                                const needsReset =
+                                  isParticipantLockedByViolation(row) ||
+                                  Boolean(row.requestReset) ||
+                                  row.loginState === 'Terkunci (Pelanggaran)';
+                                if (!needsReset) return row;
+                                return {
+                                  ...row,
+                                  loginState:
+                                    row.loginState === 'Terkunci (Pelanggaran)'
+                                      ? 'Belum Login'
+                                      : row.loginState,
+                                  requestReset: false,
+                                  violationReason: undefined,
+                                  violationAt: undefined,
+                                  violationSchema: undefined,
+                                  violationTimestamp: undefined,
+                                  lastResetAt: nowTs,
+                                  loginUpdatedAt:
+                                    row.loginState === 'Terkunci (Pelanggaran)'
+                                      ? nowTs
+                                      : row.loginUpdatedAt,
+                                };
+                              })
                             );
                             showNotice(
                               'Seluruh permintaan Reset Login peserta telah dibersihkan.'
@@ -4968,22 +5193,36 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                     const targetUser = p.username.trim().toUpperCase();
                                     const nowTs = Date.now();
                                     setParticipants((prev) =>
-                                      prev.map((row) =>
-                                        row.id === p.id ||
-                                        row.username.trim().toUpperCase() === targetUser
-                                          ? {
-                                              ...row,
-                                              loginState: 'Belum Login',
-                                              requestReset: false,
-                                              violationReason: undefined,
-                                              violationAt: undefined,
-                                              violationSchema: undefined,
-                                              violationTimestamp: undefined,
-                                              lastResetAt: nowTs,
-                                              loginUpdatedAt: nowTs,
-                                            }
-                                          : row
-                                      )
+                                      prev.map((row) => {
+                                        if (
+                                          row.id !== p.id &&
+                                          row.username.trim().toUpperCase() !== targetUser
+                                        ) {
+                                          return row;
+                                        }
+                                        const wasFinished = row.loginState === 'Selesai';
+                                        return {
+                                          ...row,
+                                          loginState: 'Belum Login',
+                                          requestReset: false,
+                                          violationReason: undefined,
+                                          violationAt: undefined,
+                                          violationSchema: undefined,
+                                          violationTimestamp: undefined,
+                                          lastResetAt: nowTs,
+                                          loginUpdatedAt: nowTs,
+                                          ...(wasFinished
+                                            ? {
+                                                violationCount: 0,
+                                                violationPackageId: undefined,
+                                                draftAnswers: undefined,
+                                                draftPackageId: undefined,
+                                                draftRemainingSeconds: undefined,
+                                                draftUpdatedAt: nowTs,
+                                              }
+                                            : {}),
+                                        };
+                                      })
                                     );
                                     showNotice(
                                       `Login peserta ${p.namaPeserta} (${p.username}) berhasil di-reset. Siswa kini dapat login kembali.`
@@ -6876,8 +7115,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           />
                         </div>
                       </div>
-                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between pt-2 border-t border-slate-100 gap-2">
-                        <div className="flex-1 max-w-sm">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 items-end gap-3 pt-2 border-t border-slate-100">
+                        <div>
                           <label className="block font-semibold text-slate-600 mb-1 text-xs">
                             Email Resmi Administrator
                           </label>
@@ -6889,7 +7128,19 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                             className="w-full px-3 py-1.5 border border-slate-300 rounded-lg bg-white text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none text-xs"
                           />
                         </div>
-                        <div className="flex items-center justify-end gap-2 self-end">
+                        <div>
+                          <label className="block font-semibold text-slate-600 mb-1 text-xs">
+                            Password Login Admin *
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Default: SAS2026"
+                            value={newAdminPassword}
+                            onChange={(e) => setNewAdminPassword(e.target.value)}
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded-lg bg-white font-mono text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none text-xs"
+                          />
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
                           {showAdminForm && (
                             <button
                               type="button"
@@ -6947,12 +7198,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           <th className="py-2.5 px-3">Kontak / WhatsApp</th>
                           <th className="py-2.5 px-3">Email Resmi</th>
                           <th className="py-2.5 px-3">Peran / Hak Akses</th>
+                          <th className="py-2.5 px-3">Password</th>
                           <th className="py-2.5 px-3 text-center">Status</th>
                           <th className="py-2.5 px-3 text-center w-20">Aksi</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {(appConfig.adminList || []).map((adm: any, idx: number) => {
+                          const isEditingPass = editingAdminPassId === adm.adminId;
                           return (
                             <tr key={adm.id || adm.adminId + idx} className="hover:bg-slate-50/80 transition-colors">
                               <td className="py-2.5 px-3 text-center text-slate-500 font-medium">{idx + 1}</td>
@@ -6977,6 +7230,53 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                                 <span className="inline-block px-2 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-[11px] font-semibold">
                                   {adm.role || 'Administrator'}
                                 </span>
+                              </td>
+                              <td className="py-2.5 px-3">
+                                {isEditingPass ? (
+                                  <div className="flex items-center gap-1">
+                                    <input
+                                      type="text"
+                                      value={editingAdminPassValue}
+                                      onChange={(e) => setEditingAdminPassValue(e.target.value)}
+                                      className="w-28 px-2 py-1 border border-blue-400 rounded font-mono text-[11px] text-slate-800 bg-white focus:outline-none"
+                                      placeholder="Min 4 huruf"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSaveAdminPassword(adm.adminId)}
+                                      className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold cursor-pointer"
+                                    >
+                                      Simpan
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingAdminPassId(null);
+                                        setEditingAdminPassValue('');
+                                      }}
+                                      className="px-1.5 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold cursor-pointer"
+                                    >
+                                      Batal
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-mono font-semibold text-slate-700 text-[11px]">
+                                      {adm.password || 'SAS2026'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingAdminPassId(adm.adminId);
+                                        setEditingAdminPassValue(adm.password || 'SAS2026');
+                                      }}
+                                      className="p-1 rounded text-[#0095ff] hover:bg-blue-50 cursor-pointer"
+                                      title={`Ubah password ${adm.namaLengkap}`}
+                                    >
+                                      <Edit className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                )}
                               </td>
                               <td className="py-2.5 px-3 text-center">
                                 <button
@@ -7012,7 +7312,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         })}
                         {(!appConfig.adminList || appConfig.adminList.length === 0) && (
                           <tr>
-                            <td colSpan={9} className="py-6 text-center text-slate-400">
+                            <td colSpan={10} className="py-6 text-center text-slate-400">
                               Belum ada akun administrator yang didaftarkan. Gunakan formulir di atas untuk menambahkan.
                             </td>
                           </tr>
@@ -7682,7 +7982,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         onChange={(e) =>
                           setAppConfig({
                             ...appConfig,
-                            tokenIntervalMenit: Number(e.target.value) || 15,
+                            tokenIntervalMenit: Number(e.target.value) || 10,
                           })
                         }
                         className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white font-mono text-slate-800 focus:ring-2 focus:ring-[#0095ff] outline-none"
@@ -7694,6 +7994,27 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   </div>
 
                   <div className="pt-2 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    <label className="flex items-center gap-3 p-3 bg-white border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(appConfig.enforceMinFinishTime)}
+                        onChange={(e) =>
+                          setAppConfig({
+                            ...appConfig,
+                            enforceMinFinishTime: e.target.checked,
+                          })
+                        }
+                        className="w-4 h-4 text-[#001a6e] rounded border-slate-300 focus:ring-[#0095ff]"
+                      />
+                      <div>
+                        <span className="font-semibold text-slate-800 block">
+                          Aktifkan Batas Waktu Minimal Selesai ({appConfig.minMinutesBeforeFinish || 0} Menit)
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          Jika dicentang, peserta baru dapat menekan Selesai setelah waktu minimal di atas terlewati.
+                        </span>
+                      </div>
+                    </label>
                     <label className="flex items-center gap-3 p-3 bg-white border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50">
                       <input
                         type="checkbox"

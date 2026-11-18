@@ -1,16 +1,20 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, ShieldCheck, KeyRound, ArrowLeft, Lock, UserCheck } from 'lucide-react';
+import { AdminProctorItem } from './AdminViews';
 
 interface ProctorLoginViewProps {
   onProctorLoginSuccess: (proctorName: string, encryptionCode: string) => void;
   onBackToStudentLogin: () => void;
   onGoToAdminLogin?: () => void;
+  proctors?: AdminProctorItem[];
+  onRefreshProctors?: () => Promise<AdminProctorItem[]>;
 }
 
 export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
   onProctorLoginSuccess,
   onBackToStudentLogin,
-  onGoToAdminLogin,
+  proctors = [],
+  onRefreshProctors,
 }) => {
   const [proctorName, setProctorName] = useState('');
   const [password, setPassword] = useState('');
@@ -18,20 +22,88 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [showEncryption, setShowEncryption] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isCheckingLogin, setIsCheckingLogin] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const findProctor = (list: AdminProctorItem[], cleanNameUpper: string) =>
+    list.find(
+      (p) =>
+        String(p.fullName || '').trim().toUpperCase() === cleanNameUpper ||
+        String(p.proctorId || '').trim().toUpperCase() === cleanNameUpper
+    );
+
+  const isProctorPasswordValid = (
+    item: AdminProctorItem | undefined,
+    cleanPass: string
+  ) => {
+    if (!item) return false;
+    const expectedPass = String(item.password || '').trim();
+    if (!expectedPass) return true;
+    if (cleanPass === expectedPass) return true;
+    if (
+      expectedPass === expectedPass.toUpperCase() &&
+      cleanPass.toUpperCase() === expectedPass
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCheckingLogin) return;
     const cleanName = proctorName.trim();
+    const cleanNameUpper = cleanName.toUpperCase();
     const cleanPass = password.trim();
-    const cleanEnc = encryptionCode.trim();
+    const cleanEnc = encryptionCode.trim().toUpperCase();
 
     if (!cleanName || !cleanPass || !cleanEnc) {
       setErrorMsg('Nama Proktor, Kata Sandi, dan Kode Enkripsi wajib diisi lengkap.');
       return;
     }
 
-    if (cleanEnc.length < 4) {
-      setErrorMsg('Kode Enkripsi tidak valid (minimal 4 karakter).');
+    let matched = findProctor(proctors, cleanNameUpper);
+    const matchesLocally =
+      Boolean(matched) &&
+      matched?.status === 'Active' &&
+      isProctorPasswordValid(matched, cleanPass) &&
+      String(matched?.encryptionCode || '').trim().toUpperCase() === cleanEnc;
+
+    if (!matchesLocally && onRefreshProctors) {
+      setIsCheckingLogin(true);
+      try {
+        const freshProctors = await onRefreshProctors();
+        if (Array.isArray(freshProctors) && freshProctors.length > 0) {
+          matched = findProctor(freshProctors, cleanNameUpper) || matched;
+        }
+      } catch {
+        // fallback to local list
+      } finally {
+        setIsCheckingLogin(false);
+      }
+    }
+
+    if (!matched) {
+      setErrorMsg(
+        'Nama atau ID Proktor tidak terdaftar pada Daftar Proktor server.'
+      );
+      return;
+    }
+
+    if (matched.status !== 'Active') {
+      setErrorMsg(
+        'Akun Proktor berstatus Non Active. Hubungi Administrator untuk mengaktifkan akses proktor Anda.'
+      );
+      return;
+    }
+
+    if (!isProctorPasswordValid(matched, cleanPass)) {
+      setErrorMsg('Kata Sandi Proktor yang Anda masukkan salah.');
+      return;
+    }
+
+    const expectedEnc = String(matched.encryptionCode || '').trim().toUpperCase();
+    if (!expectedEnc || cleanEnc !== expectedEnc) {
+      setErrorMsg('Kode Enkripsi tidak sesuai dengan data ruang ujian Anda.');
       return;
     }
 
@@ -56,7 +128,10 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
       // Ignore
     }
 
-    onProctorLoginSuccess(cleanName.toUpperCase(), cleanEnc.toUpperCase());
+    onProctorLoginSuccess(
+      String(matched.fullName || cleanName).trim().toUpperCase(),
+      expectedEnc
+    );
   };
 
   return (
@@ -165,9 +240,10 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
           <div className="pt-2 space-y-2.5">
             <button
               type="submit"
-              className="w-full py-2.5 px-6 rounded-full bg-[#0066ff] hover:bg-[#0052cc] active:scale-[0.99] text-white text-[14px] font-semibold shadow-[0_6px_16px_rgba(0,102,255,0.28)] transition-all cursor-pointer"
+              disabled={isCheckingLogin}
+              className="w-full py-2.5 px-6 rounded-full bg-[#0066ff] hover:bg-[#0052cc] active:scale-[0.99] text-white text-[14px] font-semibold shadow-[0_6px_16px_rgba(0,102,255,0.28)] transition-all cursor-pointer disabled:opacity-70"
             >
-              Login Proktor
+              {isCheckingLogin ? 'Memverifikasi Akun...' : 'Login Proktor'}
             </button>
 
             <button

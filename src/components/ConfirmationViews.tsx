@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Play, Clock, FileText, AlertCircle } from 'lucide-react';
-import { AdminScheduleItem, ExamPackage, ParticipantProfile } from '../types/cbt';
+import {
+  AdminScheduleItem,
+  ExamPackage,
+  ExamResultSummary,
+  ParticipantProfile,
+} from '../types/cbt';
 import {
   ProctorParticipantRow,
   doesKelasMatch,
@@ -10,7 +15,7 @@ import {
 import { getPkgClass } from './AdminViews';
 import { fetchVercelStorage } from '../utils/vercelStorage';
 
-function cleanMapelTitle(raw?: string): string {
+export function cleanMapelTitle(raw?: string): string {
   return String(raw || '')
     .replace(/^Simulasi TKA\s*-\s*/i, '')
     .trim()
@@ -128,6 +133,7 @@ interface ParticipantConfirmationProps {
   initialProfile: ParticipantProfile;
   packages: ExamPackage[];
   participants?: ProctorParticipantRow[];
+  resultsHistory?: ExamResultSummary[];
   activeToken: string;
   isScheduleActive: boolean;
   activeSchedules: AdminScheduleItem[];
@@ -136,6 +142,7 @@ interface ParticipantConfirmationProps {
     packages?: ExamPackage[];
     schedules?: AdminScheduleItem[];
     activeToken?: string;
+    tokenUpdatedAt?: number;
   }) => void;
   onSubmitProfile: (profile: ParticipantProfile) => void;
 }
@@ -144,6 +151,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   initialProfile,
   packages,
   participants = [],
+  resultsHistory = [],
   activeToken,
   activeSchedules,
   onSyncRemoteData,
@@ -186,8 +194,52 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
     return activeSchedules;
   }, [activeSchedules, studentKelas]);
 
+  const completedSubjectsSet = useMemo(() => {
+    const cleanUser = (
+      matchedParticipant?.username ||
+      initialProfile.username ||
+      ''
+    )
+      .trim()
+      .toUpperCase();
+    const isRowReset =
+      matchedParticipant && matchedParticipant.loginState !== 'Selesai';
+    if (!cleanUser) return new Set<string>();
+    const titles = resultsHistory
+      .filter((r) => {
+        if (r?.participant?.username?.trim().toUpperCase() !== cleanUser) {
+          return false;
+        }
+        // Only treat past results as active blocks when student has not been unlocked via Reset Login for retake,
+        // or when multiple schedules are active and another mapel was already submitted
+        return !isRowReset || studentActiveSchedules.length > 1;
+      })
+      .map((r) => cleanMapelTitle(r.packageTitle))
+      .filter(Boolean);
+    return new Set(titles);
+  }, [
+    initialProfile.username,
+    matchedParticipant,
+    resultsHistory,
+    studentActiveSchedules.length,
+  ]);
+
+  const isScheduleCompleted = useMemo(
+    () => (sch?: AdminScheduleItem) =>
+      Boolean(sch && completedSubjectsSet.has(cleanMapelTitle(sch.mapel))),
+    [completedSubjectsSet]
+  );
+
+  const uncompletedStudentSchedules = useMemo(
+    () => studentActiveSchedules.filter((s) => !isScheduleCompleted(s)),
+    [studentActiveSchedules, isScheduleCompleted]
+  );
+
+  const allActiveSchedulesCompleted =
+    studentActiveSchedules.length > 0 && uncompletedStudentSchedules.length === 0;
+
   const [selectedScheduleId, setSelectedScheduleId] = useState<string>(
-    studentActiveSchedules[0]?.id || ''
+    uncompletedStudentSchedules[0]?.id || studentActiveSchedules[0]?.id || ''
   );
 
   useEffect(() => {
@@ -195,19 +247,31 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       setSelectedScheduleId('');
       return;
     }
-    const stillExists = studentActiveSchedules.some(
+    const currentSelected = studentActiveSchedules.find(
       (s) => s.id === selectedScheduleId
     );
-    if (!stillExists) {
-      setSelectedScheduleId(studentActiveSchedules[0].id);
+    if (
+      !currentSelected ||
+      (isScheduleCompleted(currentSelected) &&
+        uncompletedStudentSchedules.length > 0)
+    ) {
+      setSelectedScheduleId(
+        uncompletedStudentSchedules[0]?.id || studentActiveSchedules[0].id
+      );
     }
-  }, [studentActiveSchedules, selectedScheduleId]);
+  }, [
+    studentActiveSchedules,
+    uncompletedStudentSchedules,
+    selectedScheduleId,
+    isScheduleCompleted,
+  ]);
 
   const selectedSchedule = useMemo(
     () =>
       studentActiveSchedules.find((s) => s.id === selectedScheduleId) ||
+      uncompletedStudentSchedules[0] ||
       studentActiveSchedules[0],
-    [studentActiveSchedules, selectedScheduleId]
+    [studentActiveSchedules, uncompletedStudentSchedules, selectedScheduleId]
   );
 
   const nonTkaPackages = useMemo(
@@ -280,16 +344,24 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       Array.isArray(activePackage?.questions) &&
       activePackage.questions.length > 0;
 
-    // If token doesn't match local state yet OR local package has 0 questions, check live server storage immediately
+    if (allActiveSchedulesCompleted || isScheduleCompleted(selectedSchedule)) {
+      setError(
+        'Anda sudah menyelesaikan mata pelajaran ini. Hubungi Proktor/Administrator jika membutuhkan Reset Login atau pilih jadwal ujian lain yang belum dikerjakan.'
+      );
+      return;
+    }
+
+    // If token doesn't match local state yet OR local package has 0 questions, check live server storage immediately (bypass cooldown cache)
     if (!isTokenValid || !remoteActiveSchedule || !localHasQuestions) {
       setIsVerifyingToken(true);
       try {
-        const res = await fetchVercelStorage();
+        const res = await fetchVercelStorage({ force: true });
         if (res.ok && res.data) {
           onSyncRemoteData?.({
             packages: res.data.packages,
             schedules: res.data.schedules,
             activeToken: res.data.activeToken,
+            tokenUpdatedAt: res.data.tokenUpdatedAt,
           });
 
           const serverToken = String(res.data.activeToken || '')
@@ -431,18 +503,30 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               {studentActiveSchedules.length > 1 ? (
                 <select
                   value={selectedSchedule?.id || ''}
-                  onChange={(e) => setSelectedScheduleId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedScheduleId(e.target.value);
+                    setError('');
+                  }}
                   className="w-full px-3.5 py-2 text-sm font-bold text-slate-900 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600 focus:bg-white transition-colors"
                 >
-                  {studentActiveSchedules.map((sch) => (
-                    <option key={sch.id} value={sch.id}>
-                      {sch.mapel}
-                    </option>
-                  ))}
+                  {studentActiveSchedules.map((sch) => {
+                    const done = isScheduleCompleted(sch);
+                    return (
+                      <option key={sch.id} value={sch.id} disabled={done}>
+                        {sch.mapel}
+                        {done ? ' (Sudah Selesai)' : ''}
+                      </option>
+                    );
+                  })}
                 </select>
               ) : (
-                <div className="text-sm font-bold text-slate-900">
-                  {activeSubjectLabel}
+                <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-900">
+                  <span>{activeSubjectLabel}</span>
+                  {selectedSchedule && isScheduleCompleted(selectedSchedule) && (
+                    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[11px] font-bold">
+                      Sudah Selesai
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -482,11 +566,17 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             </div>
           </div>
 
+          {allActiveSchedulesCompleted && (
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-medium text-emerald-800">
+              Seluruh mata pelajaran ujian yang aktif untuk kelas Anda telah selesai dikerjakan. Hubungi Proktor/Administrator jika Anda perlu Reset Login untuk mengulang.
+            </div>
+          )}
+
           <div className="pt-4">
             <button
               type="submit"
-              disabled={isVerifyingToken}
-              className="w-full py-2.5 px-6 rounded-full text-sm font-semibold transition-all bg-[#0066ff] hover:bg-[#0052cc] text-white shadow-[0_6px_16px_rgba(0,102,255,0.28)] cursor-pointer disabled:opacity-60"
+              disabled={isVerifyingToken || allActiveSchedulesCompleted}
+              className="w-full py-2.5 px-6 rounded-full text-sm font-semibold transition-all bg-[#0066ff] hover:bg-[#0052cc] text-white shadow-[0_6px_16px_rgba(0,102,255,0.28)] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {isVerifyingToken ? 'Memverifikasi Token...' : 'Submit'}
             </button>
