@@ -47,7 +47,7 @@ export function generateParticipantCardsPDF(
   participants: (ProctorParticipantRow | ParticipantCardExportData)[],
   filename = 'Kartu_Peserta_Ujian_SAS_SMA_Islam_Diponegoro_Wagir.pdf',
   schoolName = 'SMA ISLAM DIPONEGORO WAGIR',
-  headmasterName = 'ROMEO GALISTRA, S.Pd.',
+  _headmasterName = 'ROMEO GALISTRA, S.Pd.',
   logoDataUrl?: string
 ): void {
   if (!participants || participants.length === 0) return;
@@ -192,15 +192,12 @@ export function generateParticipantCardsPDF(
     doc.setFontSize(6);
     doc.setTextColor(0, 0, 0);
     const sigX = cardX + colWidth - 24;
-    doc.text(`Wagir, ${printedDate}`, sigX, bottomY + 1.5, { align: 'center' });
-    doc.text('Kepala Sekolah,', sigX, bottomY + 4.3, { align: 'center' });
+    doc.text('Mengetahui,', sigX, bottomY + 1.5, { align: 'center' });
 
-    // Signature line
-    doc.setLineWidth(0.25);
-    doc.line(sigX - 15, bottomY + 11.7, sigX + 15, bottomY + 11.7);
+    doc.text('Ttd.', sigX, bottomY + 11.5, { align: 'center' });
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(6);
-    doc.text(headmasterName, sigX, bottomY + 14.5, { align: 'center' });
+    doc.setFontSize(6.2);
+    doc.text('Panitia Ujian', sigX, bottomY + 14.3, { align: 'center' });
 
     // Bottom decorative horizontal line of card
     doc.setDrawColor(0, 0, 0);
