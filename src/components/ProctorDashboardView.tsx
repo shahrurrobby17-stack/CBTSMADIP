@@ -1612,6 +1612,12 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const ensureFullscreenMode = () => {
     try {
+      const isMobileDevice =
+        window.innerWidth < 768 ||
+        Boolean(window.matchMedia?.('(pointer: coarse)').matches) ||
+        /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (!isMobileDevice) return;
+
       const doc = document as Document & {
         webkitFullscreenElement?: Element | null;
         msFullscreenElement?: Element | null;

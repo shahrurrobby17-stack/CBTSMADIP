@@ -2247,6 +2247,24 @@ export default function App() {
     }
   }, []);
 
+  // On laptop/desktop, keep the installed PWA app window title bar visible on login, admin, and proctor pages
+  useEffect(() => {
+    const isMobileDevice =
+      window.innerWidth < 768 ||
+      Boolean(window.matchMedia?.('(pointer: coarse)').matches) ||
+      /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (
+      !isMobileDevice &&
+      (stage === 'login' ||
+        stage === 'admin_login' ||
+        stage === 'proctor_login' ||
+        stage === 'admin_dashboard' ||
+        stage === 'proctor_dashboard')
+    ) {
+      exitCbtFullscreen();
+    }
+  }, [stage, exitCbtFullscreen]);
+
   const [showExitAppConfirmModal, setShowExitAppConfirmModal] = useState(false);
 
   const handleExitApp = useCallback(() => {
@@ -3195,7 +3213,10 @@ export default function App() {
         onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
         resultsHistory={resultsHistory}
         onClearHistory={() => handleUpdateResultsHistory([])}
-        onLogoutProctor={() => setStage('login')}
+        onLogoutProctor={() => {
+          exitCbtFullscreen();
+          setStage('login');
+        }}
       />
     );
   }
@@ -3225,7 +3246,10 @@ export default function App() {
         storageEngine={storageEngine}
         lastSyncedLabel={lastSyncedLabel}
         onForceSyncStorage={pushToVercelCloud}
-        onLogoutAdmin={() => setStage('login')}
+        onLogoutAdmin={() => {
+          exitCbtFullscreen();
+          setStage('login');
+        }}
       />
     );
   }
@@ -3268,7 +3292,6 @@ export default function App() {
           onRequestResetLogin={handleRequestResetFromLogin}
           onRefreshParticipants={() => syncFromVercelCloud({ force: true })}
           onQuickLoginAdmin={() => {
-            requestCbtFullscreen();
             setAdminUsername('K05060108-KB6K');
             if (authSpinTimerRef.current) {
               window.clearTimeout(authSpinTimerRef.current);
@@ -3280,7 +3303,6 @@ export default function App() {
             }, 5000);
           }}
           onQuickLoginProctor={() => {
-            requestCbtFullscreen();
             const activeProctorName =
               proctors[0]?.fullName || proctorSession.name || 'DRS. H. AHMAD FAUZI, M.PD.';
             const activeProctorEnc =
@@ -3310,7 +3332,6 @@ export default function App() {
             return proctorsRef.current;
           }}
           onProctorLoginSuccess={(proctorName, encryptionCode) => {
-            requestCbtFullscreen();
             setProctorSession({ name: proctorName, encryptionCode });
             if (authSpinTimerRef.current) {
               window.clearTimeout(authSpinTimerRef.current);
@@ -3335,7 +3356,6 @@ export default function App() {
             return adminSettingsRef.current;
           }}
           onAdminLoginSuccess={(adminUser) => {
-            requestCbtFullscreen();
             setAdminUsername(adminUser);
             if (authSpinTimerRef.current) {
               window.clearTimeout(authSpinTimerRef.current);

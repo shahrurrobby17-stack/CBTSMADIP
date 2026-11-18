@@ -109,19 +109,25 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
 
     setErrorMsg('');
 
-    // Langsung memicu Fullscreen pada interaksi klik Login Proktor
+    // Hanya aktifkan mode fullscreen otomatis di perangkat mobile, jangan di laptop agar header/bar aplikasi tetap tampil
     try {
-      const doc = document as Document & {
-        webkitFullscreenElement?: Element | null;
-      };
-      const docEl = document.documentElement as HTMLElement & {
-        webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
-      };
-      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
-        if (docEl.requestFullscreen) {
-          docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
-        } else if (docEl.webkitRequestFullscreen) {
-          docEl.webkitRequestFullscreen();
+      const isMobileDevice =
+        window.innerWidth < 768 ||
+        Boolean(window.matchMedia?.('(pointer: coarse)').matches) ||
+        /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (isMobileDevice) {
+        const doc = document as Document & {
+          webkitFullscreenElement?: Element | null;
+        };
+        const docEl = document.documentElement as HTMLElement & {
+          webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
+        };
+        if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+          if (docEl.requestFullscreen) {
+            docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+          } else if (docEl.webkitRequestFullscreen) {
+            docEl.webkitRequestFullscreen();
+          }
         }
       }
     } catch {
