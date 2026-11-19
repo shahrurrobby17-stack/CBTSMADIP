@@ -48,6 +48,7 @@ function killOrphanedServerProcesses() {
 
 async function startServer() {
   const app = express();
+  const server = http.createServer(app);
   const PORT = 3000;
 
   app.use(express.json({ limit: '10mb' }));
@@ -62,6 +63,8 @@ async function startServer() {
       server: {
         middlewareMode: true,
         hmr: false,
+        ws: { server },
+        allowedHosts: true,
         watch: null,
       },
       appType: 'spa',
@@ -74,8 +77,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
-
-  const server = http.createServer(app);
 
   let retries = 0;
   server.on('error', (err: NodeJS.ErrnoException) => {
