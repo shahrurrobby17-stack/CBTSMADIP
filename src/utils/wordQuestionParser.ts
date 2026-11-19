@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
   Question,
   QuestionType,
@@ -8,6 +9,64 @@ import {
   MatchingResponse,
   QuestionTableData,
 } from '../types/cbt';
+
+let pdfWorkerConfigured = false;
+async function ensurePdfWorkerConfigured(): Promise<void> {
+  if (pdfWorkerConfigured || typeof window === 'undefined') return;
+  try {
+    const workerMod = await import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url');
+    if (workerMod?.default) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = workerMod.default;
+      pdfWorkerConfigured = true;
+    }
+  } catch {
+    // Non-Vite test environment
+  }
+}
+
+const SUPERSCRIPT_CHAR_MAP: Record<string, string> = {
+  '0': '⁰',
+  '1': '¹',
+  '2': '²',
+  '3': '³',
+  '4': '⁴',
+  '5': '⁵',
+  '6': '⁶',
+  '7': '⁷',
+  '8': '⁸',
+  '9': '⁹',
+  '+': '⁺',
+  '-': '⁻',
+  n: 'ⁿ',
+  i: 'ⁱ',
+};
+
+const SUBSCRIPT_CHAR_MAP: Record<string, string> = {
+  '0': '₀',
+  '1': '₁',
+  '2': '₂',
+  '3': '₃',
+  '4': '₄',
+  '5': '₅',
+  '6': '₆',
+  '7': '₇',
+  '8': '₈',
+  '9': '₉',
+  '+': '₊',
+  '-': '₋',
+};
+
+function convertToUnicodeScript(
+  raw: string,
+  kind: 'sup' | 'sub'
+): string {
+  const map = kind === 'sup' ? SUPERSCRIPT_CHAR_MAP : SUBSCRIPT_CHAR_MAP;
+  let out = '';
+  for (const ch of raw) {
+    out += map[ch] ?? ch;
+  }
+  return out;
+}
 
 interface TextSegment {
   text: string;
@@ -508,6 +567,7 @@ function parseSingleDocxParagraphElement(
 
     let runIsRed = paragraphLevelRed;
     let runText = '';
+    let vertAlign: 'sup' | 'sub' | null = null;
 
     for (let rc = 0; rc < rEl.children.length; rc++) {
       const rChild = rEl.children[rc];
@@ -525,6 +585,14 @@ function parseSingleDocxParagraphElement(
             if (rStyleId && meta.redStyleIds.has(rStyleId)) {
               runIsRed = true;
             }
+          } else if (rSubLocal === 'vertAlign') {
+            const va = (
+              rSub.getAttribute('w:val') ||
+              rSub.getAttribute('val') ||
+              ''
+            ).toLowerCase();
+            if (va === 'superscript') vertAlign = 'sup';
+            else if (va === 'subscript') vertAlign = 'sub';
           }
         }
       } else if (rcLocal === 't' || rcLocal === 'delText') {
@@ -537,6 +605,13 @@ function parseSingleDocxParagraphElement(
     }
 
     if (runText.length > 0) {
+      if (
+        vertAlign &&
+        runText.trim().length <= 8 &&
+        /^[0-9+\-ni()\s.,]+$/i.test(runText.trim())
+      ) {
+        runText = convertToUnicodeScript(runText, vertAlign);
+      }
       segments.push({
         text: runText,
         isRed: runIsRed && runText.trim().length > 0,
@@ -1229,6 +1304,10 @@ interface ParagraphRecord {
 interface DraftQuestion {
   explicitNumber?: number;
   detectedType?: QuestionType;
+  sectionKey?: string;
+  stimulusTitle?: string;
+  stimulusText?: string;
+  stimulusTable?: QuestionTableData;
   questionLines: string[];
   unprefixedParagraphs: ParsedParagraph[];
   allParagraphs?: ParagraphRecord[];
@@ -1237,7 +1316,7 @@ interface DraftQuestion {
   explicitTextAnswers?: string[];
   explicitStatements?: StatementItem[];
   explicitMatchingPairs?: { premise: string; response: string }[];
-  stimulusTable?: QuestionTableData;
+  explicitPoints?: number;
 }
 
 /**
@@ -1250,7 +1329,7 @@ export function detectQuestionTypeFromText(
   if (!t) return null;
 
   if (
-    /\b(pilihan\s+ganda\s+kompleks|pg\s+kompleks|pgk|mcma|multiple\s+response|pilih(?:lah)?\s+lebih\s+dari\s+satu|jawaban\s+benar\s+lebih\s+dari\s+satu|pilih(?:lah)?\s+(?:2|3|dua|tiga)\s+jawaban)\b/i.test(
+    /\b(pilihan\s+ganda\s+kompleks|pg\s+kompleks|pgk|mcma|multiple\s+response|pilih(?:lah)?\s+lebih\s+dari\s+satu|jawaban\s+benar\s+(?:bisa\s+)?lebih\s+dari\s+(?:satu|1)|pilih\s+semua\s+yang\s+benar|pilih(?:lah)?\s+(?:2|3|dua|tiga)\s+jawaban)\b/i.test(
       t
     )
   ) {
@@ -1258,7 +1337,7 @@ export function detectQuestionTypeFromText(
   }
 
   if (
-    /\b(benar\s*[\/\-]\s*salah|benar\s+atau\s+salah|benar\s+salah|tentukan\s+benar\s+atau\s+salah|sesuai\s*[\/\-]\s*tidak\s+sesuai|sesuai\s+atau\s+tidak\s+sesuai|kategori\s+benar\s+salah|b\s*\/\s*s)\b/i.test(
+    /\b(benar\s*[\/\-]\s*salah|benar\s+atau\s+salah|benar\s+salah|tentukan\s+benar\s+atau\s+salah|sesuai\s*[\/\-]\s*tidak\s+sesuai|sesuai\s+atau\s+tidak\s+sesuai|kategori\s+benar\s+salah|b\s*\/\s*s|b\s+atau\s+s)\b/i.test(
       t
     )
   ) {
@@ -1293,17 +1372,16 @@ export function detectQuestionTypeFromText(
 
 /**
  * Checks if a paragraph is a standalone section header for a question type
- * (e.g., "I. PILIHAN GANDA", "BAGIAN B: BENAR / SALAH", "II. PILIHAN GANDA KOMPLEKS", "III. ISIAN SINGKAT")
+ * (e.g., "BAGIAN I: PILIHAN GANDA (1 JAWABAN BENAR)", "BAGIAN II: PILIHAN GANDA KOMPLEKS", "BAGIAN III: BENAR ATAU SALAH")
  */
 function matchSectionTypeHeader(text: string): QuestionType | null {
   const trimmed = text.trim();
-  if (!trimmed || trimmed.length > 110) return null;
-  // Must not look like a full question sentence ending with '?' or '...'
+  if (!trimmed || trimmed.length > 130) return null;
   if (/\?|\.\.\./.test(trimmed)) return null;
 
   const cleaned = trimmed
     .replace(
-      /^(?:bagian|section|romawi|tipe|jenis|kelompok)?\s*(?:[ivx]+|[a-e]|\d+)?\s*[\.\)\-:]?\s*/i,
+      /^(?:(?:bagian|section|romawi|tipe|jenis|kelompok)\s*(?:[ivx]+|[a-e]|\d+)?\s*[\.\)\-:]?\s*|(?:[ivx]+|[a-e]|\d+)\s*[\.\)\-:]\s*)/i,
       ''
     )
     .trim();
@@ -1337,7 +1415,9 @@ function matchSectionTypeHeader(text: string): QuestionType | null {
     return 'isian_singkat';
   }
   if (
-    /^(?:soal\s+)?(?:pilihan\s+ganda|pg)(?:\s*\(pg\))?\s*[:\-]?$/i.test(cleaned)
+    /^(?:soal\s+)?(?:pilihan\s+ganda|pg)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+      cleaned
+    )
   ) {
     return 'pilihan_ganda';
   }
@@ -1346,15 +1426,34 @@ function matchSectionTypeHeader(text: string): QuestionType | null {
 }
 
 /**
- * Regex helpers for options and numbered questions
+ * Regex helpers for options, checkboxes, stimuli, and numbered questions
  */
 const OPTION_LINE_REGEX =
   /^(?:([\*✓✔☑]|\[[xvXV✓✔]\])\s*)?(?:[•\-\*▪▫◦☐]\s*)?(?:\(\s*([A-Ea-e])\s*\)|\[\s*([A-Ea-e])\s*\]|([A-Ea-e])\s*([\*✓✔☑])?\s*[\.\)\-:])\s*(.*)$/;
 const OPTION_TAB_REGEX = /^([\*✓✔☑])?\s*([A-Ea-e])(?:\t+|\s{2,})(.+)$/;
+const CHECKBOX_OPTION_REGEX =
+  /^(?:\[\s*([✓✔vxVX]?)\s*\]|([☐☑✅✓✔]))\s+(.+)$/;
+const STIMULUS_HEADER_REGEX =
+  /^(?:STIMULUS|WACANA|TEKS\s+BACAAN|STUDI\s+KASUS)(?:\s+(\d+))?\s*(?:[:\-]\s*(.*))?$/i;
 const NUMBERED_QUESTION_REGEX =
   /^(?:soal\s*(?:no\.?|nomor)?\s*|no\.?\s*)?(\d+)\s*[\.\)\-:]\s*(.+)$/i;
 const EXPLICIT_KEY_LINE_REGEX =
   /^(?:kunci(?:\s*jawaban)?|jawaban(?:\s*benar)?|answer(?:\s*key)?|kunci)\s*[:=]\s*(.+)$/i;
+
+function matchStimulusHeader(rawText: string): {
+  num?: number;
+  title: string;
+} | null {
+  const cleaned = rawText
+    .replace(/^[\p{Extended_Pictographic}\uFE0F\u200D\s]+/gu, '')
+    .trim();
+  const m = cleaned.match(STIMULUS_HEADER_REGEX);
+  if (!m) return null;
+  return {
+    num: m[1] ? parseInt(m[1], 10) : undefined,
+    title: cleaned,
+  };
+}
 
 function extractTrailingCorrectMarker(rawText: string): {
   cleanedText: string;
@@ -1381,9 +1480,35 @@ function extractTrailingCorrectMarker(rawText: string): {
 }
 
 function matchOptionLine(
-  para: ParsedParagraph
-): { letter: string; text: string; isRed: boolean } | null {
+  para: ParsedParagraph,
+  nextCheckboxIndex: number = 0
+): {
+  letter: string;
+  text: string;
+  isRed: boolean;
+  isCheckbox?: boolean;
+} | null {
   const trimmed = para.fullText.trim();
+  const cbM = trimmed.match(CHECKBOX_OPTION_REGEX);
+  if (cbM) {
+    const insideChecked = Boolean(cbM[1]);
+    const glyphChecked = cbM[2] && cbM[2] !== '☐';
+    const letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+    const letter =
+      letters[nextCheckboxIndex] || String.fromCharCode(65 + nextCheckboxIndex);
+    const { cleanedText, isMarkedCorrect } = extractTrailingCorrectMarker(
+      (cbM[3] || '').trim()
+    );
+    return {
+      letter,
+      text: cleanedText || `Pernyataan ${nextCheckboxIndex + 1}`,
+      isRed: Boolean(
+        para.hasRed || insideChecked || glyphChecked || isMarkedCorrect
+      ),
+      isCheckbox: true,
+    };
+  }
+
   const m = trimmed.match(OPTION_LINE_REGEX);
   if (m) {
     const leadingMark = Boolean(m[1]);
@@ -1431,8 +1556,13 @@ function matchNumberedQuestionLine(
   const trimmed = para.fullText.trim();
   const m = trimmed.match(NUMBERED_QUESTION_REGEX);
   if (m) {
+    const qNum = parseInt(m[1], 10);
+    // Reject years (e.g., "1803), John Dalton...") or absurd inline numbers
+    if (qNum <= 0 || qNum > 200) {
+      return null;
+    }
     return {
-      qNum: parseInt(m[1], 10),
+      qNum,
       qText: m[2].trim(),
     };
   }
@@ -2346,6 +2476,142 @@ function tryExtractQuestionsFromBankSoalTable(
   return null;
 }
 
+interface CollectedStimulus {
+  num?: number;
+  title: string;
+  paragraphs: string[];
+  table?: QuestionTableData;
+  attachedCount: number;
+}
+
+/**
+ * Extracts per-row Benar/Salah numbered questions from a table like:
+ * No | Pernyataan Ilmiah & Studi Kasus Numerasi | Pilihan (B - S)
+ */
+function tryExtractBenarSalahRowQuestionsFromTable(
+  table: ParsedTable,
+  sectionInstruction?: string
+): DraftQuestion[] | null {
+  const rows = table.rows.filter((r) =>
+    r.some((c) => c.fullText.trim().length > 0)
+  );
+  if (rows.length < 2) return null;
+
+  const headers = rows[0].map((c) => c.fullText.replace(/\n+/g, ' ').trim().toLowerCase());
+  const noCol = headers.findIndex(
+    (h) => h === 'no' || h === 'no.' || h === 'nomor'
+  );
+  const stmtCol = headers.findIndex(
+    (h) =>
+      h.includes('pernyataan') ||
+      h.includes('statement') ||
+      h.includes('kalimat') ||
+      h.includes('uraian')
+  );
+  const pilihanCol = headers.findIndex(
+    (h) =>
+      h.includes('pilihan') ||
+      h.includes('opsi') ||
+      h === 'b / s' ||
+      h === 'b - s' ||
+      h === 'b/s'
+  );
+
+  if (noCol === -1 || stmtCol === -1 || pilihanCol === -1) {
+    return null;
+  }
+
+  // Verify data rows have numbered col0 and "B - S" / "B / S" / "Benar - Salah" in pilihanCol
+  const drafts: DraftQuestion[] = [];
+  for (let rIdx = 1; rIdx < rows.length; rIdx++) {
+    const r = rows[rIdx];
+    const numRaw = r[noCol]?.fullText.trim() || '';
+    const numMatch = numRaw.match(/^(\d+)\.?$/);
+    const stmtText = r[stmtCol]?.fullText.replace(/\n+/g, ' ').trim() || '';
+    const pilCell = r[pilihanCol];
+    const pilText = pilCell?.fullText.trim() || '';
+
+    if (
+      !numMatch ||
+      !stmtText ||
+      !/^(?:b\s*[\-\/]\s*s|benar\s*[\-\/]\s*salah)$/i.test(pilText)
+    ) {
+      return null;
+    }
+
+    const qNum = parseInt(numMatch[1], 10);
+    // Check red highlight inside pilihan cell segments ("B" red vs "S" red) or statement cell
+    let detectedBenar: boolean | undefined = undefined;
+    if (pilCell && pilCell.paragraphs.length > 0) {
+      for (const p of pilCell.paragraphs) {
+        for (const seg of p.segments) {
+          if (!seg.isRed) continue;
+          const t = seg.text.trim().toUpperCase();
+          if (t === 'B' || t === 'BENAR') detectedBenar = true;
+          else if (t === 'S' || t === 'SALAH') detectedBenar = false;
+        }
+      }
+    }
+    if (detectedBenar === undefined && (r[stmtCol]?.hasRed || pilCell?.hasRed)) {
+      detectedBenar = true;
+    }
+
+    drafts.push({
+      explicitNumber: qNum,
+      detectedType: 'benar_salah',
+      questionLines: [
+        sectionInstruction ||
+          'Analisislah setiap pernyataan ilmiah di bawah ini, kemudian pilihlah BENAR atau SALAH!',
+      ],
+      unprefixedParagraphs: [],
+      options: [],
+      explicitKeys:
+        detectedBenar !== undefined ? [detectedBenar ? 'BENAR' : 'SALAH'] : [],
+      explicitStatements: [
+        {
+          id: 'st1',
+          statement: stmtText,
+          correctValue: detectedBenar ? 'Benar' : 'Salah',
+        },
+      ],
+    });
+  }
+
+  return drafts.length >= 1 ? drafts : null;
+}
+
+/**
+ * Extracts points weights per section (e.g. "BAGIAN I: Pilihan Ganda | 15 Soal | 2 Point / nomor")
+ * from an answer key/scoring rubric table.
+ */
+function tryParseRubricWeightsTable(
+  table: ParsedTable
+): Record<string, number> {
+  const weights: Record<string, number> = {};
+  const rows = table.rows.filter((r) =>
+    r.some((c) => c.fullText.trim().length > 0)
+  );
+  if (rows.length < 2) return weights;
+  const headerJoined = rows[0].map((c) => c.fullText.toLowerCase()).join(' ');
+  if (!headerJoined.includes('bobot') && !headerJoined.includes('skor')) {
+    return weights;
+  }
+  for (let rIdx = 1; rIdx < rows.length; rIdx++) {
+    const label = rows[rIdx][0]?.fullText.trim() || '';
+    const weightCol = rows[rIdx]
+      .slice(1)
+      .map((c) => c.fullText.trim())
+      .find((t) => /(\d+)\s*(?:point|poin|skor)/i.test(t));
+    if (!label || !weightCol) continue;
+    const ptsMatch = weightCol.match(/(\d+)/);
+    const qType = detectQuestionTypeFromText(label);
+    if (ptsMatch && qType) {
+      weights[qType] = parseInt(ptsMatch[1], 10);
+    }
+  }
+  return weights;
+}
+
 /**
  * Builds DraftQuestions from a sequence of DocumentBlocks (paragraphs and tables).
  */
@@ -2358,7 +2624,7 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         const t = sp.fullText.trim();
         if (!t) continue;
         if (
-          /^(soal\s+ujian|bank\s+soal|daftar\s+soal|template\s+soal|petunjuk\s+pengerjaan)/i.test(
+          /^(soal\s+ujian|bank\s+soal|daftar\s+soal|template\s+soal|petunjuk\s+pengerjaan\s*:?\s*$)/i.test(
             t
           ) &&
           t.length < 80
@@ -2374,10 +2640,15 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
 
   let currentDraft: DraftQuestion | null = null;
   let currentSectionType: QuestionType | undefined = undefined;
+  let currentSectionInstruction: string | undefined = undefined;
   let inInternalNumberedList = false;
   let internalListCounter = 0;
   let inAnswerKeySection = false;
   const answerKeyByNumber: Record<number, string> = {};
+  const rubricWeightsByType: Record<string, number> = {};
+  const stimuliByNumber: Record<number, CollectedStimulus> = {};
+  let activeStimulus: CollectedStimulus | undefined = undefined;
+  let collectingStimulus = false;
   const drafts: DraftQuestion[] = [];
 
   const createEmptyDraft = (explicitNumber?: number): DraftQuestion => ({
@@ -2390,9 +2661,46 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
     explicitKeys: [],
   });
 
+  const attachStimulusToDraft = (draft: DraftQuestion) => {
+    const stemJoined = draft.questionLines.join(' ');
+    const explicitStimRef = stemJoined.match(/\bstimulus\s+(\d+)\b/i);
+    let chosenStimulus: CollectedStimulus | undefined = undefined;
+
+    if (explicitStimRef) {
+      const sNum = parseInt(explicitStimRef[1], 10);
+      chosenStimulus = stimuliByNumber[sNum];
+    } else if (activeStimulus) {
+      const referencesPrevious =
+        /\b(?:stimulus|wacana|teks|tabel|data|eksperimen|reaksi|grafik|bacaan)\s+(?:di\s*atas|tersebut|ini)\b/i.test(
+          stemJoined
+        );
+      if (
+        activeStimulus.attachedCount === 0 ||
+        referencesPrevious ||
+        draft.detectedType === 'pilihan_ganda'
+      ) {
+        chosenStimulus = activeStimulus;
+      }
+    }
+
+    if (chosenStimulus) {
+      draft.stimulusTitle = chosenStimulus.title;
+      if (chosenStimulus.paragraphs.length > 0) {
+        draft.stimulusText = chosenStimulus.paragraphs.join('\n\n');
+      }
+      if (!draft.stimulusTable && chosenStimulus.table) {
+        draft.stimulusTable = chosenStimulus.table;
+      }
+      chosenStimulus.attachedCount++;
+    }
+  };
+
   const flushDraft = () => {
     const finalized = finalizeDraftQuestion(currentDraft);
     if (finalized) {
+      if (!finalized.stimulusTitle && !finalized.stimulusText) {
+        attachStimulusToDraft(finalized);
+      }
       drafts.push(finalized);
     }
     currentDraft = null;
@@ -2411,7 +2719,8 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       const blk = expandedBlocks[k];
       if (blk.kind === 'paragraph') {
         const p = blk.paragraph;
-        const optM = matchOptionLine(p);
+        if (matchStimulusHeader(p.fullText)) break;
+        const optM = matchOptionLine(p, optionCount);
         if (optM) {
           optionCount++;
           if (!firstOptionLetter) {
@@ -2438,6 +2747,31 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
     const block = expandedBlocks[i];
 
     if (block.kind === 'table') {
+      if (inAnswerKeySection) {
+        const weights = tryParseRubricWeightsTable(block.table);
+        Object.assign(rubricWeightsByType, weights);
+        continue;
+      }
+
+      if (collectingStimulus && activeStimulus) {
+        const tableData = convertParsedTableToQuestionTableData(block.table);
+        if (tableData) {
+          activeStimulus.table = tableData;
+        }
+        continue;
+      }
+
+      // Check BAGIAN III per-row numbered Benar/Salah statement table (No | Pernyataan ... | Pilihan: B - S)
+      const bsRowDrafts = tryExtractBenarSalahRowQuestionsFromTable(
+        block.table,
+        currentSectionInstruction
+      );
+      if (bsRowDrafts && bsRowDrafts.length > 0) {
+        flushDraft();
+        drafts.push(...bsRowDrafts);
+        continue;
+      }
+
       const expectedNextNum =
         currentDraft?.explicitNumber !== undefined
           ? currentDraft.explicitNumber + 1
@@ -2529,20 +2863,46 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
 
     // Check if we entered a document-end "KUNCI JAWABAN" section
     if (
-      /^(?:daftar\s+)?kunci\s+jawaban(?:\s+ujian|\s+soal)?\s*[:\-]?$/i.test(
+      /^(?:(?:daftar|ringkasan)\s+)?kunci\s+jawaban(?:\s+ujian|\s+soal|\s+dan\s+pembahasan.*)?\s*[:\-]?$/i.test(
         text
       )
     ) {
       flushDraft();
+      collectingStimulus = false;
       inAnswerKeySection = true;
       continue;
     }
 
     if (inAnswerKeySection) {
-      // Parse lines like "1. B", "2. A, C", "3. Benar, Salah, Benar", or inline "1. A   2. C   3. D"
+      if (
+        /^(?:ringkasan\s+kunci\s+jawaban|bagian\s+[ivx]+|total\s+skor|bonus\s+penulisan)/i.test(
+          text
+        )
+      ) {
+        continue;
+      }
+
+      // Parse PGK format: "16. Pernyataan 1, 2, 3 BENAR"
+      const pgkKeyMatch = text.match(
+        /^(\d+)\s*[\.\)\-:]\s*(?:pernyataan|opsi|pilihan|nomor)?\s*([\d,\s]+)\s*(?:benar|ya|centang)?$/i
+      );
+      if (pgkKeyMatch) {
+        const qNum = parseInt(pgkKeyMatch[1], 10);
+        const nums = pgkKeyMatch[2].match(/\d+/g) || [];
+        const letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+        const mappedLetters = nums
+          .map((n) => letters[parseInt(n, 10) - 1])
+          .filter(Boolean);
+        if (mappedLetters.length > 0) {
+          answerKeyByNumber[qNum] = mappedLetters.join(', ');
+          continue;
+        }
+      }
+
+      // Parse inline pipe/space key pairs: "1. B | 2. B | 3. C" or "24. SALAH | 25. BENAR"
       const inlineKeyPairs = Array.from(
         text.matchAll(
-          /(\d+)\s*[\.\)\-:]\s*([A-Ea-e](?:\s*,\s*[A-Ea-e])*|Benar|Salah)/gi
+          /(\d+)\s*[\.\)\-:]\s*(Benar|Salah|[A-Ea-e](?:\s*,\s*[A-Ea-e])*)\b/gi
         )
       );
       if (inlineKeyPairs.length >= 2) {
@@ -2551,21 +2911,63 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         });
         continue;
       }
+
       const singleKeyLine = text.match(/^(\d+)\s*[\.\)\-:]\s*(.+)$/);
       if (singleKeyLine) {
         answerKeyByNumber[parseInt(singleKeyLine[1], 10)] =
           singleKeyLine[2].trim();
-        continue;
       }
+      // Always stay inside inAnswerKeySection once entered!
+      continue;
     }
 
     // Check if paragraph is a section header for a specific QuestionType
     const sectionHeaderType = matchSectionTypeHeader(text);
     if (sectionHeaderType) {
       flushDraft();
+      collectingStimulus = false;
+      activeStimulus = undefined;
       currentSectionType = sectionHeaderType;
-      inAnswerKeySection = false;
+      currentSectionInstruction = undefined;
       continue;
+    }
+
+    // Skip section-level "Petunjuk: ..." lines (do not turn them into fake questions)
+    const petunjukMatch = text.match(/^petunjuk\s*[:\-]\s*(.+)$/i);
+    if (petunjukMatch) {
+      if (!currentDraft || currentDraft.questionLines.length === 0) {
+        currentSectionInstruction = petunjukMatch[1].trim();
+        continue;
+      }
+    }
+
+    // Check STIMULUS header block
+    const stimMatch = matchStimulusHeader(text);
+    if (stimMatch) {
+      flushDraft();
+      collectingStimulus = true;
+      const stimNum = stimMatch.num;
+      activeStimulus = {
+        num: stimNum,
+        title: stimMatch.title,
+        paragraphs: [],
+        attachedCount: 0,
+      };
+      if (stimNum !== undefined) {
+        stimuliByNumber[stimNum] = activeStimulus;
+      }
+      continue;
+    }
+
+    // Collect body paragraphs of the currently open Stimulus block until a numbered question begins
+    if (collectingStimulus && activeStimulus) {
+      const maybeQ = matchNumberedQuestionLine(para);
+      const maybeOpt = matchOptionLine(para, 0);
+      if (!maybeQ && !maybeOpt) {
+        activeStimulus.paragraphs.push(text);
+        continue;
+      }
+      collectingStimulus = false;
     }
 
     // Ignore standalone table number headers like "1" or "1." if followed immediately by a numbered question
@@ -2630,17 +3032,21 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       continue;
     }
 
-    // 2. Check if line is an Option (A. / B. / C. / D. / E. or auto-lettered option)
-    const optMatch = matchOptionLine(para);
+    // 2. Check if line is an Option (A..E or checkbox "[ ]" for PG Kompleks or auto-lettered option)
+    const optMatch = matchOptionLine(para, currentDraft?.options.length ?? 0);
     if (optMatch) {
-      const { letter: optLetter, text: optText, isRed } = optMatch;
+      const { letter: optLetter, text: optText, isRed, isCheckbox } = optMatch;
 
       if (!currentDraft) {
         currentDraft = createEmptyDraft();
       }
+      if (isCheckbox) {
+        currentDraft.detectedType = 'pilihan_ganda_kompleks';
+      }
 
-      // If we see 'A' again and we already collected >= 2 options for the current question:
+      // If we see 'A' again (non-checkbox) and we already collected >= 2 options for the current question:
       if (
+        !isCheckbox &&
         optLetter === 'A' &&
         currentDraft.options.some((o) => o.id === 'A') &&
         currentDraft.options.length >= 2
@@ -2831,31 +3237,46 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
 
   flushDraft();
 
-  // Apply any keys found in a document-end KUNCI JAWABAN section
-  if (Object.keys(answerKeyByNumber).length > 0) {
-    drafts.forEach((d, idx) => {
-      const num = d.explicitNumber ?? idx + 1;
-      const rawKey = answerKeyByNumber[num];
-      if (!rawKey) return;
-      if (/^[A-Ea-e](?:\s*,\s*[A-Ea-e])*$/i.test(rawKey)) {
-        const letters = rawKey.toUpperCase().match(/[A-E]/g) || [];
-        d.explicitKeys = letters;
-        if (letters.length > 1) {
-          d.detectedType = 'pilihan_ganda_kompleks';
-        }
-      } else if (/^(?:benar|salah)/i.test(rawKey)) {
-        d.detectedType = 'benar_salah';
-        const bs = rawKey
-          .split(/[,\/]/)
-          .map((x) =>
-            /benar|^b$/i.test(x.trim()) ? 'BENAR' : 'SALAH'
-          );
-        d.explicitKeys = bs;
-      } else {
-        d.explicitTextAnswers = [rawKey];
+  // Apply any keys found in a document-end KUNCI JAWABAN section & scoring rubric weights
+  drafts.forEach((d, idx) => {
+    const effectiveType = d.detectedType;
+    if (effectiveType && rubricWeightsByType[effectiveType]) {
+      d.explicitPoints = rubricWeightsByType[effectiveType];
+    }
+
+    const num = d.explicitNumber ?? idx + 1;
+    const rawKey = answerKeyByNumber[num];
+    if (!rawKey) return;
+
+    if (/^[A-Ha-h](?:\s*,\s*[A-Ha-h])*$/i.test(rawKey)) {
+      const letters = rawKey.toUpperCase().match(/[A-H]/g) || [];
+      d.explicitKeys = letters;
+      if (letters.length > 1) {
+        d.detectedType = 'pilihan_ganda_kompleks';
       }
-    });
-  }
+    } else if (/^(?:benar|salah)/i.test(rawKey)) {
+      d.detectedType = 'benar_salah';
+      const bs = rawKey
+        .split(/[,\/]/)
+        .map((x) => (/benar|^b$/i.test(x.trim()) ? 'BENAR' : 'SALAH'));
+      d.explicitKeys = bs;
+      if (d.explicitStatements && d.explicitStatements.length > 0) {
+        d.explicitStatements.forEach((st, sIdx) => {
+          const val = bs[sIdx] ?? bs[0];
+          if (val) {
+            st.correctValue = val === 'BENAR' ? 'Benar' : 'Salah';
+          }
+        });
+      }
+    } else {
+      d.explicitTextAnswers = [rawKey];
+    }
+
+    // Re-sync rubric weight if type was updated above
+    if (d.detectedType && rubricWeightsByType[d.detectedType]) {
+      d.explicitPoints = rubricWeightsByType[d.detectedType];
+    }
+  });
 
   return drafts;
 }
@@ -2869,6 +3290,17 @@ function tryExtractMatchingPairsFromDraft(
 ): { premise: string; response: string }[] | null {
   if (draft.explicitMatchingPairs && draft.explicitMatchingPairs.length >= 2) {
     return draft.explicitMatchingPairs;
+  }
+
+  // Never misclassify explicit PG / PGK / Benar-Salah / Isian questions (e.g. chemistry equations with "->") as Menjodohkan
+  if (draft.detectedType && draft.detectedType !== 'menjodohkan') {
+    return null;
+  }
+  if (
+    draft.options.some((o) => o.isRed) ||
+    draft.explicitKeys.length > 0
+  ) {
+    return null;
   }
 
   const pairRegex = /^(.+?)\s*(?:->|=>|<->|↔|—|--|=)\s*(.+)$/;
@@ -2999,6 +3431,7 @@ function buildQuestionsFromBlocks(
       draft.questionLines.join(' ').trim() || `Pertanyaan Soal No. ${qNum}`;
     const stemDetectedType =
       draft.detectedType || detectQuestionTypeFromText(rawQuestionText);
+    const questionPoints = draft.explicitPoints || 10;
 
     // 1. Check Menjodohkan (Matching)
     const matchingPairs = tryExtractMatchingPairsFromDraft(draft);
@@ -3026,6 +3459,8 @@ function buildQuestionsFromBlocks(
         number: qNum,
         type: 'menjodohkan',
         category: defaultCategory,
+        stimulusTitle: draft.stimulusTitle,
+        stimulusText: draft.stimulusText,
         questionText: stemOnly,
         stimulusTable: draft.stimulusTable,
         instructionText:
@@ -3033,7 +3468,7 @@ function buildQuestionsFromBlocks(
         premises,
         responses,
         correctPairs,
-        points: 10,
+        points: questionPoints,
         explanation: `Pasangan jawaban yang benar telah diatur sesuai dokumen soal.`,
       });
       return;
@@ -3047,13 +3482,15 @@ function buildQuestionsFromBlocks(
         number: qNum,
         type: 'benar_salah',
         category: defaultCategory,
+        stimulusTitle: draft.stimulusTitle,
+        stimulusText: draft.stimulusText,
         questionText: rawQuestionText,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Tentukan Benar atau Salah untuk setiap pernyataan!',
         statements: bsStatements,
         trueLabel: 'Benar',
         falseLabel: 'Salah',
-        points: 10,
+        points: questionPoints,
         explanation: `Kunci Benar/Salah: ${bsStatements
           .map((s, sIdx) => `(${sIdx + 1}) ${s.correctValue}`)
           .join(', ')}.`,
@@ -3078,35 +3515,36 @@ function buildQuestionsFromBlocks(
         number: qNum,
         type: 'isian_singkat',
         category: defaultCategory,
+        stimulusTitle: draft.stimulusTitle,
+        stimulusText: draft.stimulusText,
         questionText: rawQuestionText,
         stimulusTable: draft.stimulusTable,
         instructionText:
           'Ketiklah jawaban singkat atau uraian dengan tepat pada kolom yang tersedia!',
         correctShortAnswers: shortAnswers,
         placeholder: 'Ketik jawaban Anda di sini...',
-        points: 10,
+        points: questionPoints,
         explanation: `Kunci jawaban: ${shortAnswers.join(' / ')}.`,
       });
       return;
     }
 
     // 4. Pilihan Ganda or Pilihan Ganda Kompleks
+    const letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
     const normalizedOptions: OptionItem[] = draft.options
-      .slice(0, 5)
+      .slice(0, 8)
       .map((o, oIdx) => ({
-        id: ['A', 'B', 'C', 'D', 'E'][oIdx] || o.id,
+        id: letters[oIdx] || o.id,
         text: o.text,
       }));
 
     const redOptionIds = draft.options
-      .slice(0, 5)
-      .map((o, oIdx) =>
-        o.isRed ? ['A', 'B', 'C', 'D', 'E'][oIdx] || o.id : null
-      )
+      .slice(0, 8)
+      .map((o, oIdx) => (o.isRed ? letters[oIdx] || o.id : null))
       .filter((id): id is string => Boolean(id));
 
     const validExplicitOptionKeys = draft.explicitKeys.filter((k) =>
-      ['A', 'B', 'C', 'D', 'E'].includes(k)
+      letters.includes(k)
     );
 
     const effectiveCorrectIds =
@@ -3126,12 +3564,14 @@ function buildQuestionsFromBlocks(
         number: qNum,
         type: 'pilihan_ganda_kompleks',
         category: defaultCategory,
+        stimulusTitle: draft.stimulusTitle,
+        stimulusText: draft.stimulusText,
         questionText: rawQuestionText,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Pilihlah lebih dari satu jawaban yang benar!',
         options: normalizedOptions,
         correctOptionIds: effectiveCorrectIds,
-        points: 10,
+        points: questionPoints,
         explanation: `Kunci jawaban yang benar (teks warna merah): ${effectiveCorrectIds.join(', ')}.`,
       });
     } else {
@@ -3141,12 +3581,14 @@ function buildQuestionsFromBlocks(
         number: qNum,
         type: 'pilihan_ganda',
         category: defaultCategory,
+        stimulusTitle: draft.stimulusTitle,
+        stimulusText: draft.stimulusText,
         questionText: rawQuestionText,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Pilih satu jawaban yang paling tepat!',
         options: normalizedOptions,
         correctOptionId: singleKey,
-        points: 10,
+        points: questionPoints,
         explanation: `Kunci jawaban yang benar (teks warna merah) adalah opsi ${singleKey}.`,
       });
     }
@@ -3300,8 +3742,685 @@ function parseRtfBlocks(rawRtf: string): DocumentBlock[] {
   return blocks;
 }
 
+function multiplyPdfMatrices(m1: number[], m2: number[]): number[] {
+  return [
+    m1[0] * m2[0] + m1[2] * m2[1],
+    m1[1] * m2[0] + m1[3] * m2[1],
+    m1[0] * m2[2] + m1[2] * m2[3],
+    m1[1] * m2[2] + m1[3] * m2[3],
+    m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+    m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+  ];
+}
+
+function normalizePdfColorArg(args: unknown[]): string {
+  if (!args || args.length === 0) return '#000000';
+  if (typeof args[0] === 'string') return args[0];
+  if (args.length >= 3) {
+    const scale =
+      Math.max(Number(args[0]), Number(args[1]), Number(args[2])) <= 1
+        ? 255
+        : 1;
+    const r = Math.round(Number(args[0]) * scale);
+    const g = Math.round(Number(args[1]) * scale);
+    const b = Math.round(Number(args[2]) * scale);
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  return '#000000';
+}
+
+function isPdfInlineOptionRow(
+  spans: { x: number; endX: number; text: string }[]
+): boolean {
+  if (spans.length !== 2) return false;
+  const optStart = /^(?:\(\s*[A-Ea-e]\s*\)|[A-Ea-e]\s*[\.\)\-:])\s+\S/;
+  return optStart.test(spans[0].text.trim()) && optStart.test(spans[1].text.trim());
+}
+
 /**
- * Main entry point to parse any uploaded question file (.docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, .json, .html)
+ * Parses a .pdf question file into DocumentBlocks using pdfjs-dist, preserving:
+ * - Red text color metadata from PDF graphics operator lists (for PG/PGK/B-S keys)
+ * - Superscripts and subscripts converted cleanly to Unicode (H₂O, 10⁻³¹, S²⁻)
+ * - Multi-column tables reconstructed via X-interval projection & cross-page merging
+ * - Multi-line wrapped paragraphs and checkbox/option lines
+ */
+export async function parsePdfDocumentBlocks(
+  bytes: Uint8Array
+): Promise<DocumentBlock[]> {
+  await ensurePdfWorkerConfigured();
+
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(bytes),
+    verbosity: 0,
+  });
+  const pdfDoc = await loadingTask.promise;
+
+  interface PdfRawItem {
+    str: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    isRed: boolean;
+  }
+
+  interface PdfVisualSpan {
+    x: number;
+    endX: number;
+    text: string;
+    hasRed: boolean;
+    segments: TextSegment[];
+  }
+
+  interface PdfVisualRow {
+    baseY: number;
+    minX: number;
+    maxX: number;
+    spans: PdfVisualSpan[];
+    hasRed: boolean;
+    fullText: string;
+  }
+
+  const allBlocks: DocumentBlock[] = [];
+
+  for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+    const page = await pdfDoc.getPage(pageNum);
+
+    // 1. Collect red-colored text draw coordinates from page operator list
+    const redDraws: { x: number; y: number; text: string }[] = [];
+    try {
+      const opList = await page.getOperatorList();
+      const { OPS } = pdfjsLib;
+      let ctm = [1, 0, 0, 1, 0, 0];
+      let tm = [1, 0, 0, 1, 0, 0];
+      let tlm = [1, 0, 0, 1, 0, 0];
+      let leading = 0;
+      let fillColor = '#000000';
+      const stack: { ctm: number[]; fillColor: string }[] = [];
+
+      for (let i = 0; i < opList.fnArray.length; i++) {
+        const fn = opList.fnArray[i];
+        const args = opList.argsArray[i] || [];
+
+        if (fn === OPS.save) {
+          stack.push({ ctm: [...ctm], fillColor });
+        } else if (fn === OPS.restore) {
+          const prev = stack.pop();
+          if (prev) {
+            ctm = prev.ctm;
+            fillColor = prev.fillColor;
+          }
+        } else if (fn === OPS.transform) {
+          ctm = multiplyPdfMatrices(ctm, args as number[]);
+        } else if (fn === OPS.setFillRGBColor) {
+          fillColor = normalizePdfColorArg(args);
+        } else if (fn === OPS.setFillGray) {
+          fillColor = '#000000';
+        } else if (fn === OPS.setFillCMYKColor && args.length >= 4) {
+          const c = Number(args[0]);
+          const m = Number(args[1]);
+          const y = Number(args[2]);
+          const k = Number(args[3]);
+          const r = Math.round(255 * (1 - c) * (1 - k));
+          const g = Math.round(255 * (1 - m) * (1 - k));
+          const b = Math.round(255 * (1 - y) * (1 - k));
+          fillColor = `rgb(${r}, ${g}, ${b})`;
+        } else if (fn === OPS.beginText) {
+          tm = [1, 0, 0, 1, 0, 0];
+          tlm = [1, 0, 0, 1, 0, 0];
+        } else if (fn === OPS.setTextMatrix && args[0]) {
+          const m = args[0] as Record<number, number>;
+          const arr = Array.isArray(m)
+            ? m
+            : [m[0], m[1], m[2], m[3], m[4], m[5]];
+          tm = [...arr];
+          tlm = [...arr];
+        } else if (fn === OPS.moveText) {
+          tlm = multiplyPdfMatrices(tlm, [
+            1,
+            0,
+            0,
+            1,
+            Number(args[0]) || 0,
+            Number(args[1]) || 0,
+          ]);
+          tm = [...tlm];
+        } else if (fn === OPS.setLeading) {
+          leading = Number(args[0]) || 0;
+        } else if (fn === OPS.setLeadingMoveText) {
+          leading = -(Number(args[1]) || 0);
+          tlm = multiplyPdfMatrices(tlm, [
+            1,
+            0,
+            0,
+            1,
+            Number(args[0]) || 0,
+            Number(args[1]) || 0,
+          ]);
+          tm = [...tlm];
+        } else if (fn === OPS.nextLine) {
+          tlm = multiplyPdfMatrices(tlm, [1, 0, 0, 1, 0, -leading]);
+          tm = [...tlm];
+        } else if (
+          fn === OPS.showText ||
+          fn === OPS.showSpacedText ||
+          fn === OPS.nextLineShowText ||
+          fn === OPS.nextLineSetSpacingShowText
+        ) {
+          if (
+            fn === OPS.nextLineShowText ||
+            fn === OPS.nextLineSetSpacingShowText
+          ) {
+            tlm = multiplyPdfMatrices(tlm, [1, 0, 0, 1, 0, -leading]);
+            tm = [...tlm];
+          }
+          const glyphs = Array.isArray(args[0]) ? args[0] : [];
+          const runStr = glyphs
+            .map((g: unknown) =>
+              g && typeof g === 'object' && 'unicode' in g
+                ? String((g as { unicode: string }).unicode)
+                : ''
+            )
+            .join('')
+            .trim();
+          if (runStr && isRedColorValue(fillColor)) {
+            const tr = multiplyPdfMatrices(ctm, tm);
+            redDraws.push({ x: tr[4], y: tr[5], text: runStr });
+          }
+        }
+      }
+    } catch {
+      // If operator list inspection fails on a malformed PDF stream, proceed with text extraction
+    }
+
+    // 2. Extract positioned text items
+    const tc = await page.getTextContent();
+    const normalItems: PdfRawItem[] = [];
+    const scriptItems: PdfRawItem[] = [];
+
+    for (const raw of tc.items) {
+      if (!('str' in raw)) continue;
+      const str = raw.str;
+      if (!str || str.length === 0) continue;
+      const x = raw.transform[4];
+      const y = raw.transform[5];
+      const w = Math.max(0, raw.width || 0);
+      const h =
+        raw.height && raw.height > 0
+          ? raw.height
+          : Math.hypot(raw.transform[2], raw.transform[3]);
+
+      const isRed =
+        str.trim().length > 0 &&
+        redDraws.some(
+          (rd) => Math.abs(rd.x - x) <= 6 && Math.abs(rd.y - y) <= 4.5
+        );
+
+      const itemObj: PdfRawItem = { str, x, y, w, h, isRed };
+      if (
+        h > 0 &&
+        h < 6.5 &&
+        str.trim().length > 0 &&
+        str.trim().length <= 6 &&
+        /^[0-9+\-ni().,]+$/i.test(str.trim())
+      ) {
+        scriptItems.push(itemObj);
+      } else {
+        normalItems.push(itemObj);
+      }
+    }
+
+    // 3. Group non-whitespace normal items into visual baseline rows
+    interface RawRowBucket {
+      baseY: number;
+      items: (PdfRawItem & { scriptKind?: 'sup' | 'sub' })[];
+    }
+    const rowBuckets: RawRowBucket[] = [];
+    const whitespaceItems: PdfRawItem[] = [];
+
+    for (const it of normalItems) {
+      if (!it.str.trim()) {
+        if (it.w > 0) whitespaceItems.push(it);
+        continue;
+      }
+      const found = rowBuckets.find((r) => Math.abs(r.baseY - it.y) <= 2.4);
+      if (found) {
+        found.items.push(it);
+      } else {
+        rowBuckets.push({ baseY: it.y, items: [it] });
+      }
+    }
+
+    // Attach pure-whitespace items ONLY to existing baseline rows (never create empty buckets at script Y!)
+    for (const ws of whitespaceItems) {
+      let bestRow: RawRowBucket | undefined;
+      let bestDist = 4.5;
+      for (const r of rowBuckets) {
+        const d = Math.abs(r.baseY - ws.y);
+        if (d < bestDist) {
+          bestDist = d;
+          bestRow = r;
+        }
+      }
+      if (bestRow) {
+        bestRow.items.push(ws);
+      }
+    }
+
+    // Attach small sub/superscript items cleanly to closest baseline row
+    for (const sc of scriptItems) {
+      let bestRow: RawRowBucket | undefined;
+      let bestDist = 8.0;
+      for (const r of rowBuckets) {
+        const d = Math.abs(r.baseY - sc.y);
+        if (d < bestDist) {
+          bestDist = d;
+          bestRow = r;
+        }
+      }
+      if (bestRow) {
+        const scriptKind = sc.y >= bestRow.baseY + 0.8 ? 'sup' : 'sub';
+        bestRow.items.push({ ...sc, scriptKind });
+      } else {
+        rowBuckets.push({ baseY: sc.y, items: [sc] });
+      }
+    }
+
+    rowBuckets.sort((a, b) => b.baseY - a.baseY);
+
+    // 4. Build horizontal column spans per row (splitting on gap >= 8pt or wide space item)
+    const visualRows: PdfVisualRow[] = [];
+    for (const rb of rowBuckets) {
+      rb.items.sort((a, b) => a.x - b.x);
+
+      const spans: PdfVisualSpan[] = [];
+      let curSegs: TextSegment[] = [];
+      let curStartX = 0;
+      let curEndX = 0;
+      let hasCurrent = false;
+      let pendingSpace = false;
+
+      const pushSeg = (txt: string, red: boolean) => {
+        if (!txt) return;
+        const last = curSegs[curSegs.length - 1];
+        if (last && last.isRed === red) {
+          last.text += txt;
+        } else {
+          curSegs.push({ text: txt, isRed: red });
+        }
+      };
+
+      const finalizeSpan = () => {
+        if (!hasCurrent) return;
+        const txt = curSegs.map((s) => s.text).join('').trim();
+        if (txt) {
+          spans.push({
+            x: curStartX,
+            endX: Math.max(curEndX, curStartX + 4),
+            text: txt,
+            hasRed: curSegs.some((s) => s.isRed && s.text.trim().length > 0),
+            segments: curSegs,
+          });
+        }
+        curSegs = [];
+        hasCurrent = false;
+        pendingSpace = false;
+      };
+
+      for (const it of rb.items) {
+        const isWhitespace = it.str.trim().length === 0;
+        if (isWhitespace) {
+          if (it.w >= 10) {
+            finalizeSpan();
+          } else if (hasCurrent) {
+            pendingSpace = true;
+          }
+          continue;
+        }
+
+        const displayText = it.scriptKind
+          ? convertToUnicodeScript(it.str.trim(), it.scriptKind)
+          : it.str;
+
+        if (!hasCurrent) {
+          curStartX = it.x;
+          curEndX = it.x + it.w;
+          hasCurrent = true;
+          pushSeg(displayText, it.isRed);
+        } else {
+          const gap = it.x - curEndX;
+          if (gap >= 8.0) {
+            finalizeSpan();
+            curStartX = it.x;
+            curEndX = it.x + it.w;
+            hasCurrent = true;
+            pushSeg(displayText, it.isRed);
+          } else {
+            const needSpace =
+              !it.scriptKind &&
+              (pendingSpace || gap >= 1.8) &&
+              !/\s$/.test(curSegs[curSegs.length - 1]?.text || '') &&
+              !/^\s/.test(displayText);
+            if (needSpace) {
+              pushSeg(' ', it.isRed);
+            }
+            pushSeg(displayText, it.isRed);
+            curEndX = Math.max(curEndX, it.x + it.w);
+          }
+        }
+        pendingSpace = false;
+      }
+      finalizeSpan();
+
+      if (spans.length === 0) continue;
+      const fullText = spans.map((s) => s.text).join(' ').trim();
+      // Skip bare page number footers like "1" or "Halaman 1 dari 11" at bottom margin
+      if (
+        rb.baseY < 45 &&
+        /^(?:-\s*\d+\s*-|\d+|(?:hal(?:aman)?|page)\s+\d+(?:\s*(?:dari|\/|of)\s*\d+)?)$/i.test(
+          fullText
+        )
+      ) {
+        continue;
+      }
+
+      visualRows.push({
+        baseY: rb.baseY,
+        minX: spans[0].x,
+        maxX: spans[spans.length - 1].endX,
+        spans,
+        hasRed: spans.some((s) => s.hasRed),
+        fullText,
+      });
+    }
+
+    // 5. Partition visualRows into Table Regions vs Paragraph Regions
+    const isTableBreakHeading = (txt: string) =>
+      Boolean(matchStimulusHeader(txt)) ||
+      Boolean(matchSectionTypeHeader(txt)) ||
+      /^petunjuk\s*[:\-]/i.test(txt) ||
+      /^(?:(?:daftar|ringkasan)\s+)?kunci\s+jawaban/i.test(txt) ||
+      CHECKBOX_OPTION_REGEX.test(txt);
+
+    const rowIsMultiCol = (r: PdfVisualRow) =>
+      r.spans.length >= 2 &&
+      !isPdfInlineOptionRow(r.spans) &&
+      !isTableBreakHeading(r.fullText);
+
+    const isRowTableContinuation = (
+      prevTableRow: PdfVisualRow,
+      cand: PdfVisualRow
+    ) => {
+      if (cand.spans.length >= 2) return rowIsMultiCol(cand);
+      if (isTableBreakHeading(cand.fullText)) return false;
+      if (NUMBERED_QUESTION_REGEX.test(cand.fullText)) return false;
+      const dy = prevTableRow.baseY - cand.baseY;
+      return dy <= 17.5;
+    };
+
+    const emitParagraphRun = (paraRows: PdfVisualRow[]) => {
+      let curLines: PdfVisualRow[] = [];
+
+      const flushPara = () => {
+        if (curLines.length === 0) return;
+        const segments: TextSegment[] = [];
+        curLines.forEach((lr, idx) => {
+          lr.spans.forEach((sp, sIdx) => {
+            if (idx > 0 || sIdx > 0) {
+              segments.push({ text: ' ', isRed: false });
+            }
+            sp.segments.forEach((seg) => segments.push(seg));
+          });
+        });
+        const fullText = segments
+          .map((s) => s.text)
+          .join('')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (fullText) {
+          allBlocks.push({
+            kind: 'paragraph',
+            paragraph: {
+              fullText,
+              hasRed: segments.some((s) => s.isRed && s.text.trim().length > 0),
+              segments,
+            },
+          });
+        }
+        curLines = [];
+      };
+
+      for (const r of paraRows) {
+        if (curLines.length === 0) {
+          curLines.push(r);
+          continue;
+        }
+        const prev = curLines[curLines.length - 1];
+        const prevTextJoined = curLines.map((l) => l.fullText).join(' ').trim();
+        const dy = prev.baseY - r.baseY;
+        const rNumMatch = r.fullText.match(NUMBERED_QUESTION_REGEX);
+        const rNumVal = rNumMatch ? parseInt(rNumMatch[1], 10) : 0;
+        const startsWithStruct =
+          Boolean(matchStimulusHeader(r.fullText)) ||
+          Boolean(matchSectionTypeHeader(r.fullText)) ||
+          /^petunjuk\s*[:\-]/i.test(r.fullText) ||
+          /^(?:(?:daftar|ringkasan)\s+)?kunci\s+jawaban/i.test(r.fullText) ||
+          /^(?:ringkasan\s+kunci|bagian\s+[ivx]+\s*\(|total\s+skor)/i.test(
+            r.fullText
+          ) ||
+          CHECKBOX_OPTION_REGEX.test(r.fullText) ||
+          /^(?:\([A-Ea-e]\)|[A-Ea-e][\.\)\-:])\s+/.test(r.fullText) ||
+          (rNumVal >= 1 &&
+            rNumVal <= 200 &&
+            !/\|\s*\d+\s*\.$/.test(prevTextJoined));
+
+        if (dy > 16.5 || startsWithStruct) {
+          flushPara();
+        }
+        curLines.push(r);
+      }
+      flushPara();
+    };
+
+    const emitTableRun = (tableRows: PdfVisualRow[]) => {
+      // Cluster columns via X-interval projection across all spans in tableRows
+      const intervals: { start: number; end: number }[] = [];
+      for (const r of tableRows) {
+        for (const sp of r.spans) {
+          intervals.push({ start: sp.x, end: sp.endX });
+        }
+      }
+      intervals.sort((a, b) => a.start - b.start);
+      const colIntervals: { start: number; end: number }[] = [];
+      for (const iv of intervals) {
+        const last = colIntervals[colIntervals.length - 1];
+        if (!last || iv.start > last.end + 4) {
+          colIntervals.push({ ...iv });
+        } else {
+          last.end = Math.max(last.end, iv.end);
+        }
+      }
+
+      if (colIntervals.length < 2) {
+        emitParagraphRun(tableRows);
+        return;
+      }
+
+      const mapSpanToCol = (sp: PdfVisualSpan): number => {
+        let bestCol = 0;
+        let bestScore = -Infinity;
+        const spMid = (sp.x + sp.endX) / 2;
+        colIntervals.forEach((ci, cIdx) => {
+          const overlap =
+            Math.min(sp.endX, ci.end) - Math.max(sp.x, ci.start);
+          const ciMid = (ci.start + ci.end) / 2;
+          const score =
+            overlap > 0 ? 1000 + overlap : -Math.abs(spMid - ciMid);
+          if (score > bestScore) {
+            bestScore = score;
+            bestCol = cIdx;
+          }
+        });
+        return bestCol;
+      };
+
+      // Merge wrapped visual lines into logical table rows
+      interface LogicalCellAccum {
+        segments: TextSegment[];
+      }
+      const logicalRows: {
+        cells: LogicalCellAccum[];
+        lastY: number;
+        populatedCount: number;
+        hasCol0: boolean;
+      }[] = [];
+
+      for (const r of tableRows) {
+        const assignedCols = new Set<number>();
+        const colSpans: { col: number; sp: PdfVisualSpan }[] = r.spans.map(
+          (sp) => {
+            const c = mapSpanToCol(sp);
+            assignedCols.add(c);
+            return { col: c, sp };
+          }
+        );
+
+        const prevRow = logicalRows[logicalRows.length - 1];
+        const dy = prevRow ? prevRow.lastY - r.baseY : 999;
+        const rHasCol0 = assignedCols.has(0);
+        const isPartialWrapWithPrev =
+          prevRow &&
+          dy <= 15.0 &&
+          prevRow.populatedCount >= 3 &&
+          assignedCols.size < prevRow.populatedCount;
+        const rIsNewMultiColRecord =
+          prevRow &&
+          rHasCol0 &&
+          assignedCols.size >= 2 &&
+          prevRow.populatedCount >= 2 &&
+          !isPartialWrapWithPrev;
+
+        const canMergeIntoPrev =
+          prevRow && dy <= 17.5 && !rIsNewMultiColRecord;
+
+        if (canMergeIntoPrev) {
+          for (const { col, sp } of colSpans) {
+            const cell = prevRow.cells[col];
+            if (cell.segments.length > 0) {
+              cell.segments.push({ text: ' ', isRed: false });
+            }
+            sp.segments.forEach((s) => cell.segments.push(s));
+          }
+          prevRow.lastY = r.baseY;
+          prevRow.populatedCount = prevRow.cells.filter(
+            (c) => c.segments.length > 0
+          ).length;
+        } else {
+          const cells: LogicalCellAccum[] = colIntervals.map(() => ({
+            segments: [],
+          }));
+          for (const { col, sp } of colSpans) {
+            const cell = cells[col];
+            if (cell.segments.length > 0) {
+              cell.segments.push({ text: ' ', isRed: false });
+            }
+            sp.segments.forEach((s) => cell.segments.push(s));
+          }
+          logicalRows.push({
+            cells,
+            lastY: r.baseY,
+            populatedCount: assignedCols.size,
+            hasCol0: rHasCol0,
+          });
+        }
+      }
+
+      const parsedRows: ParsedTableCell[][] = logicalRows.map((lr) =>
+        lr.cells.map((cell) => {
+          const fullText = cell.segments
+            .map((s) => s.text)
+            .join('')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const hasRed = cell.segments.some(
+            (s) => s.isRed && s.text.trim().length > 0
+          );
+          const para: ParsedParagraph = {
+            fullText,
+            hasRed,
+            segments: cell.segments,
+          };
+          return {
+            fullText,
+            hasRed,
+            paragraphs: fullText ? [para] : [],
+            nestedTables: [],
+          };
+        })
+      );
+
+      if (parsedRows.length > 0) {
+        allBlocks.push({ kind: 'table', table: { rows: parsedRows } });
+      }
+    };
+
+    let idx = 0;
+    const pendingParaRows: PdfVisualRow[] = [];
+    const flushPendingParas = () => {
+      if (pendingParaRows.length > 0) {
+        emitParagraphRun(pendingParaRows);
+        pendingParaRows.length = 0;
+      }
+    };
+
+    while (idx < visualRows.length) {
+      const r = visualRows[idx];
+      if (rowIsMultiCol(r)) {
+        const tblRows: PdfVisualRow[] = [r];
+        let j = idx + 1;
+        while (
+          j < visualRows.length &&
+          isRowTableContinuation(tblRows[tblRows.length - 1], visualRows[j])
+        ) {
+          tblRows.push(visualRows[j]);
+          j++;
+        }
+        const multiColCount = tblRows.filter((tr) => rowIsMultiCol(tr)).length;
+        if (multiColCount >= 2 || (tblRows.length === 1 && idx === visualRows.length - 1)) {
+          flushPendingParas();
+          emitTableRun(tblRows);
+          idx = j;
+          continue;
+        }
+      }
+      pendingParaRows.push(r);
+      idx++;
+    }
+    flushPendingParas();
+  }
+
+  // 6. Merge tables split directly across a page boundary when column counts match
+  const mergedBlocks: DocumentBlock[] = [];
+  for (const blk of allBlocks) {
+    const prev = mergedBlocks[mergedBlocks.length - 1];
+    if (
+      blk.kind === 'table' &&
+      prev?.kind === 'table' &&
+      prev.table.rows.length >= 1 &&
+      blk.table.rows.length >= 1 &&
+      prev.table.rows[0].length === blk.table.rows[0].length
+    ) {
+      prev.table.rows.push(...blk.table.rows);
+      continue;
+    }
+    mergedBlocks.push(blk);
+  }
+
+  return mergedBlocks;
+}
+
+/**
+ * Main entry point to parse any uploaded question file (.docx, .doc, .pdf, .xlsx, .xls, .csv, .txt, .rtf, .json, .html)
  * into CBT Question items, automatically recognizing each question's type according to the file content.
  */
 export async function parseWordQuestions(
@@ -3335,6 +4454,8 @@ export async function parseWordQuestions(
         number: startingNumber + idx,
         type: item.type || 'pilihan_ganda',
         category: item.category || defaultCategory,
+        stimulusTitle: item.stimulusTitle,
+        stimulusText: item.stimulusText,
         questionText: item.questionText || `Pertanyaan No. ${startingNumber + idx}`,
         instructionText: item.instructionText || 'Pilih jawaban yang tepat!',
         options: item.options,
@@ -3364,6 +4485,15 @@ export async function parseWordQuestions(
     }
   }
 
+  const isPdfContainer =
+    fileNameLower.endsWith('.pdf') ||
+    (bytes.length >= 5 &&
+      bytes[0] === 0x25 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x44 &&
+      bytes[3] === 0x46 &&
+      bytes[4] === 0x2d);
+
   const isZipContainer =
     bytes.length > 4 &&
     bytes[0] === 0x50 &&
@@ -3378,7 +4508,9 @@ export async function parseWordQuestions(
 
   let blocks: DocumentBlock[] = [];
 
-  if (isZipContainer && !isSpreadsheetExt) {
+  if (isPdfContainer) {
+    blocks = await parsePdfDocumentBlocks(bytes);
+  } else if (isZipContainer && !isSpreadsheetExt) {
     const zipFiles = await extractZipFiles(buffer);
     const documentXml = zipFiles['word/document.xml'];
     if (documentXml) {

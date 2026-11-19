@@ -1733,7 +1733,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
       );
     } catch {
       showNotice(
-        'Gagal membaca file soal. Pastikan file berformat .docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, atau .json yang valid.'
+        'Gagal membaca file soal. Pastikan file berformat .docx, .doc, .pdf, .xlsx, .xls, .csv, .txt, .rtf, atau .json yang valid.'
       );
     } finally {
       if (wordQuestionInputRef.current) {
@@ -2904,7 +2904,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                     <input
                       ref={wordQuestionInputRef}
                       type="file"
-                      accept=".docx,.doc,.xlsx,.xls,.csv,.txt,.rtf,.json,.html,.htm"
+                      accept=".pdf,.docx,.doc,.xlsx,.xls,.csv,.txt,.rtf,.json,.html,.htm"
                       onChange={handleUploadWordQuestions}
                       className="hidden"
                     />
@@ -2912,10 +2912,10 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       type="button"
                       onClick={triggerUploadWordFile}
                       className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-2xs transition-colors"
-                      title="Upload file soal (.docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, .json) — otomatis mengenali semua jenis/tipe soal"
+                      title="Upload file soal (.pdf, .docx, .doc, .xlsx, .xls, .csv, .txt, .rtf, .json) — otomatis mengenali semua jenis/tipe soal"
                     >
                       <Upload className="w-3.5 h-3.5" />
-                      Upload Word / File Soal (Otomatis Kenali Tipe Soal)
+                      Upload Word / PDF / File Soal (Otomatis Kenali Tipe Soal)
                     </button>
                     <button
                       type="button"
@@ -2989,11 +2989,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                   <div className="flex items-center gap-2">
                     <FileText className="w-4 h-4 text-rose-600 shrink-0" />
                     <span>
-                      <strong>Format Upload Word (.docx / .doc) & Tabel:</strong> Beri{' '}
+                      <strong>Format Upload Word (.docx / .doc), PDF (.pdf) & Tabel:</strong> Beri{' '}
                       <span className="font-bold text-rose-600 underline">
                         warna merah
                       </span>{' '}
-                      pada tulisan opsi jawaban yang benar di dalam file Word (mendukung format paragraf maupun tabel). Jika sudah Upload Word, kolom Pertanyaan Soal dan Jawaban di bawah <strong>tidak harus diisi</strong>.
+                      pada tulisan opsi jawaban yang benar atau sertakan ringkasan kunci jawaban di dalam file Word/PDF (mendukung Stimulus/Wacana, PG Kompleks, Benar/Salah, serta tabel). Jika sudah Upload File Soal, kolom Pertanyaan Soal dan Jawaban di bawah <strong>tidak harus diisi</strong>.
                     </span>
                   </div>
                   {lastUploadedWordFile && (
