@@ -3445,6 +3445,300 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     showNotice(`Data Proktor ${updatedName} berhasil diperbarui dan disimpan.`);
   };
 
+  const scheduleExcelInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const handleDownloadScheduleTemplateExcel = () => {
+    const sampleData = [
+      ['Hari dan Tanggal', 'Kelas', 'Mapel', 'Waktu Mulai', 'Durasi'],
+      ['Senin, 07 Desember 2026', 'X', 'Matematika Wajib', '07:30 WIB', '90 Menit'],
+      ['Senin, 07 Desember 2026', 'X', 'Bahasa Indonesia', '09:30 WIB', '90 Menit'],
+      ['Senin, 07 Desember 2026', 'XI IPA', 'Kimia', '07:30 WIB', '90 Menit'],
+      ['Selasa, 08 Desember 2026', 'XI IPS', 'Ekonomi', '07:30 WIB', '90 Menit'],
+      ['Selasa, 08 Desember 2026', 'XII IPA', 'Fisika', '07:30 WIB', '90 Menit'],
+    ];
+
+    const worksheet = XLSX.utils.aoa_to_sheet(sampleData);
+    worksheet['!cols'] = [
+      { wch: 28 },
+      { wch: 14 },
+      { wch: 28 },
+      { wch: 16 },
+      { wch: 14 },
+    ];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Jadwal Ujian');
+    XLSX.writeFile(workbook, 'Format_Upload_Jadwal_SAS.xlsx');
+    showNotice(
+      'Template Excel jadwal berhasil diunduh (Format: Hari dan Tanggal, Kelas, Mapel, Waktu Mulai, Durasi).'
+    );
+  };
+
+  const handleUploadScheduleExcel = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: 'array' });
+
+      const cleanCell = (val: unknown) =>
+        String(val ?? '')
+          .replace(/\r?\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      const normalizeHeader = (val: unknown) =>
+        cleanCell(val)
+          .toLowerCase()
+          .replace(/[^a-z0-9\s/]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      const normalizeKelas = (raw: string) => {
+        const cleaned = raw
+          .replace(/^(kelas|kls)\s*[:.-]?\s*/i, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toUpperCase();
+        return cleaned;
+      };
+
+      const normalizeDurasi = (raw: string) => {
+        const cleaned = raw.trim();
+        if (!cleaned) return '90 Menit';
+        if (/^\d+$/.test(cleaned)) return `${cleaned} Menit`;
+        return cleaned;
+      };
+
+      const makeScheduleKey = (item: {
+        hariTanggal: string;
+        kelas: string;
+        mapel: string;
+        waktuMulai: string;
+      }) =>
+        `${item.hariTanggal.toLowerCase()}|${item.kelas.toLowerCase()}|${item.mapel.toLowerCase()}|${item.waktuMulai.toLowerCase()}`;
+
+      const existingKeys = new Set(schedules.map((s) => makeScheduleKey(s)));
+      const importedItems: AdminScheduleItem[] = [];
+      let skippedDuplicates = 0;
+      const nowTs = Date.now();
+
+      for (const sheetName of workbook.SheetNames) {
+        const worksheet = workbook.Sheets[sheetName];
+        if (!worksheet) continue;
+
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
+          header: 1,
+          defval: '',
+          raw: false,
+        });
+        if (!rows.length) continue;
+
+        let headerRowIdx = -1;
+        let hariTanggalCol = -1;
+        let hariOnlyCol = -1;
+        let tanggalOnlyCol = -1;
+        let kelasCol = -1;
+        let mapelCol = -1;
+        let waktuCol = -1;
+        let durasiCol = -1;
+
+        const scanLimit = Math.min(rows.length, 15);
+        for (let r = 0; r < scanLimit; r++) {
+          const row = Array.isArray(rows[r]) ? rows[r] : [];
+          let foundHariTgl = -1;
+          let foundHari = -1;
+          let foundTgl = -1;
+          let foundKelas = -1;
+          let foundMapel = -1;
+          let foundWaktu = -1;
+          let foundDurasi = -1;
+
+          row.forEach((cell, idx) => {
+            const h = normalizeHeader(cell);
+            if (!h) return;
+
+            if (
+              foundHariTgl === -1 &&
+              ((h.includes('hari') && (h.includes('tanggal') || h.includes('tgl'))) ||
+                h === 'hari dan tanggal' ||
+                h === 'hari/tanggal')
+            ) {
+              foundHariTgl = idx;
+            } else if (foundHari === -1 && (h === 'hari' || h.startsWith('hari '))) {
+              foundHari = idx;
+            } else if (
+              foundTgl === -1 &&
+              (h === 'tanggal' || h === 'tgl' || h.startsWith('tanggal ') || h.startsWith('tgl '))
+            ) {
+              foundTgl = idx;
+            } else if (
+              foundKelas === -1 &&
+              (h.includes('kelas') || h === 'kls' || h.includes('rombel') || h.includes('tingkat'))
+            ) {
+              foundKelas = idx;
+            } else if (
+              foundMapel === -1 &&
+              (h.includes('mapel') || h.includes('mata pelajaran') || h.includes('pelajaran'))
+            ) {
+              foundMapel = idx;
+            } else if (
+              foundWaktu === -1 &&
+              (h.includes('waktu') || h.includes('mulai') || h.includes('jam') || h.includes('pukul'))
+            ) {
+              foundWaktu = idx;
+            } else if (
+              foundDurasi === -1 &&
+              (h.includes('durasi') || h.includes('alokasi') || h.includes('lama') || h.includes('menit'))
+            ) {
+              foundDurasi = idx;
+            }
+          });
+
+          const matchedCount = [
+            foundHariTgl !== -1 || foundHari !== -1 || foundTgl !== -1,
+            foundKelas !== -1,
+            foundMapel !== -1,
+            foundWaktu !== -1,
+            foundDurasi !== -1,
+          ].filter(Boolean).length;
+
+          if (matchedCount >= 2 && foundMapel !== -1) {
+            headerRowIdx = r;
+            hariTanggalCol = foundHariTgl;
+            hariOnlyCol = foundHari;
+            tanggalOnlyCol = foundTgl;
+            kelasCol = foundKelas;
+            mapelCol = foundMapel;
+            waktuCol = foundWaktu;
+            durasiCol = foundDurasi;
+            break;
+          }
+        }
+
+        const startRow = headerRowIdx !== -1 ? headerRowIdx + 1 : 0;
+        let lastHariTanggal = '';
+        let lastKelas = '';
+
+        for (let r = startRow; r < rows.length; r++) {
+          const row = Array.isArray(rows[r]) ? rows[r] : [];
+          if (!row.some((c) => cleanCell(c) !== '')) continue;
+
+          let rawHariTanggal = '';
+          let rawKelas = '';
+          let rawMapel = '';
+          let rawWaktu = '';
+          let rawDurasi = '';
+
+          if (headerRowIdx !== -1) {
+            if (hariTanggalCol !== -1) {
+              rawHariTanggal = cleanCell(row[hariTanggalCol]);
+            } else {
+              const hPart = hariOnlyCol !== -1 ? cleanCell(row[hariOnlyCol]) : '';
+              const tPart = tanggalOnlyCol !== -1 ? cleanCell(row[tanggalOnlyCol]) : '';
+              if (hPart && tPart) {
+                rawHariTanggal = `${hPart}, ${tPart}`;
+              } else {
+                rawHariTanggal = hPart || tPart;
+              }
+            }
+            rawKelas = kelasCol !== -1 ? cleanCell(row[kelasCol]) : '';
+            rawMapel = mapelCol !== -1 ? cleanCell(row[mapelCol]) : '';
+            rawWaktu = waktuCol !== -1 ? cleanCell(row[waktuCol]) : '';
+            rawDurasi = durasiCol !== -1 ? cleanCell(row[durasiCol]) : '';
+          } else {
+            const c0 = cleanCell(row[0]);
+            const offset = /^\d+[.)]?$/.test(c0) && row.length >= 6 ? 1 : 0;
+            rawHariTanggal = cleanCell(row[offset]);
+            rawKelas = cleanCell(row[offset + 1]);
+            rawMapel = cleanCell(row[offset + 2]);
+            rawWaktu = cleanCell(row[offset + 3]);
+            rawDurasi = cleanCell(row[offset + 4]);
+          }
+
+          const mapelLower = normalizeHeader(rawMapel);
+          if (
+            !rawMapel ||
+            mapelLower === 'mapel' ||
+            mapelLower === 'mata pelajaran' ||
+            mapelLower === 'pelajaran'
+          ) {
+            continue;
+          }
+
+          if (rawHariTanggal) {
+            lastHariTanggal = rawHariTanggal;
+          }
+          const resolvedHariTanggal = rawHariTanggal || lastHariTanggal;
+          if (!resolvedHariTanggal) continue;
+
+          const normalizedKelas = normalizeKelas(rawKelas);
+          if (normalizedKelas) {
+            lastKelas = normalizedKelas;
+          }
+          const resolvedKelas = normalizedKelas || lastKelas || KELAS_OPTIONS[0] || 'X';
+          const resolvedWaktu = rawWaktu || '07:30 WIB';
+          const resolvedDurasi = normalizeDurasi(rawDurasi);
+
+          const key = makeScheduleKey({
+            hariTanggal: resolvedHariTanggal,
+            kelas: resolvedKelas,
+            mapel: rawMapel,
+            waktuMulai: resolvedWaktu,
+          });
+
+          if (existingKeys.has(key)) {
+            skippedDuplicates += 1;
+            continue;
+          }
+          existingKeys.add(key);
+
+          importedItems.push({
+            id: `sch_xls_${nowTs}_${importedItems.length}`,
+            hariTanggal: resolvedHariTanggal,
+            kelas: resolvedKelas,
+            mapel: rawMapel,
+            waktuMulai: resolvedWaktu,
+            durasi: resolvedDurasi,
+            isActive: false,
+            updatedAt: nowTs,
+          });
+        }
+      }
+
+      if (importedItems.length === 0) {
+        if (skippedDuplicates > 0) {
+          showNotice(
+            `Semua ${skippedDuplicates} jadwal pada file "${file.name}" sudah ada di daftar jadwal.`
+          );
+        } else {
+          showNotice(
+            `Tidak ditemukan baris jadwal valid pada file "${file.name}". Pastikan kolom berisi: Hari dan Tanggal, Kelas, Mapel, Waktu Mulai, Durasi.`
+          );
+        }
+        return;
+      }
+
+      onUpdateSchedules([...schedules, ...importedItems]);
+      const dupText =
+        skippedDuplicates > 0
+          ? ` (${skippedDuplicates} duplikat dilewati)`
+          : '';
+      showNotice(
+        `Berhasil mengunggah ${importedItems.length} jadwal ujian dari "${file.name}"${dupText}. Klik "Aktifkan Mapel" untuk menampilkan token di Proktor & Siswa.`
+      );
+    } catch (err) {
+      console.error('Upload jadwal Excel error:', err);
+      showNotice(
+        'Gagal membaca file Excel jadwal. Pastikan format file .xlsx, .xls, atau .csv valid.'
+      );
+    } finally {
+      e.target.value = '';
+    }
+  };
+
   const handleAddSchedule = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newHariTanggal.trim() || !newJadwalMapel.trim()) return;
@@ -5281,18 +5575,46 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 onSubmit={handleAddSchedule}
                 className="bg-white p-5 rounded-xl border border-slate-200/80 shadow-2xs space-y-4"
               >
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
                     <h3 className="text-sm font-bold text-slate-800">
                       Tambah Jadwal Ujian Sumatif Akhir Semester
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Lengkapi Hari dan Tanggal, Kelas, Mata Pelajaran (Mapel), Waktu Mulai, serta Durasi ujian.
+                      Input manual atau upload file Excel dengan kolom:{' '}
+                      <strong>Hari dan Tanggal, Kelas, Mapel, Waktu Mulai, Durasi</strong>.
                     </p>
                   </div>
-                  <span className="text-xs text-slate-500">
-                    Total Jadwal: <strong>{schedules.length}</strong>
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      ref={scheduleExcelInputRef}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      onChange={handleUploadScheduleExcel}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleDownloadScheduleTemplateExcel}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-semibold transition-colors cursor-pointer"
+                      title="Unduh template Excel jadwal (Hari dan Tanggal, Kelas, Mapel, Waktu Mulai, Durasi)"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      <span>Format Excel</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => scheduleExcelInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+                      title="Upload jadwal ujian dari file Excel (.xlsx, .xls, .csv)"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Upload Jadwal</span>
+                    </button>
+                    <span className="text-xs text-slate-500 ml-1">
+                      Total Jadwal: <strong>{schedules.length}</strong>
+                    </span>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 items-end">
