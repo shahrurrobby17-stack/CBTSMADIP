@@ -9,11 +9,15 @@ import {
 import {
   ProctorParticipantRow,
   doesKelasMatch,
+  isParticipantStatusActive,
   normalizeKelasCode,
   resolveParticipantRuang,
 } from './ProctorDashboardView';
 import { getPkgClass } from './AdminViews';
-import { fetchVercelStorage } from '../utils/vercelStorage';
+import {
+  fetchVercelStorage,
+  verifyExamEntryWithServer,
+} from '../utils/vercelStorage';
 
 export function cleanMapelTitle(raw?: string): string {
   return String(raw || '')
@@ -268,11 +272,29 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   const [error, setError] = useState('');
   const [isVerifyingToken, setIsVerifyingToken] = useState(false);
 
+  const isStudentDeactivated = Boolean(
+    matchedParticipant && !isParticipantStatusActive(matchedParticipant.status)
+  );
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanInput = enteredToken.replace(/\s+/g, '').toUpperCase();
     if (!cleanInput) {
       setError('Silakan masukkan Token ujian terlebih dahulu.');
+      return;
+    }
+
+    if (isStudentDeactivated) {
+      setError(
+        'Akses Ditolak: Status peserta Anda sedang Non Active pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator untuk mengaktifkan status peserta.'
+      );
+      return;
+    }
+
+    if (allActiveSchedulesCompleted || isScheduleCompleted(selectedSchedule)) {
+      setError(
+        'Anda sudah menyelesaikan mata pelajaran ini. Hubungi Proktor/Administrator jika membutuhkan Reset Login atau pilih jadwal ujian lain yang belum dikerjakan.'
+      );
       return;
     }
 
@@ -289,81 +311,109 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
     }
 
     let isTokenValid =
-      cleanInput === cleanActiveProp ||
+      (cleanActiveProp.length > 0 && cleanInput === cleanActiveProp) ||
       (storedLocalToken.length > 0 && cleanInput === storedLocalToken);
 
     let remoteActiveSchedule: AdminScheduleItem | undefined = selectedSchedule;
     let resolvedPkg: ExamPackage | undefined = activePackage;
-    const localHasQuestions =
-      Array.isArray(activePackage?.questions) &&
-      activePackage.questions.length > 0;
+    const cleanStudentUser = (
+      matchedParticipant?.username ||
+      initialProfile.username ||
+      ''
+    )
+      .trim()
+      .toUpperCase();
 
-    if (allActiveSchedulesCompleted || isScheduleCompleted(selectedSchedule)) {
-      setError(
-        'Anda sudah menyelesaikan mata pelajaran ini. Hubungi Proktor/Administrator jika membutuhkan Reset Login atau pilih jadwal ujian lain yang belum dikerjakan.'
-      );
-      return;
-    }
+    // Always verify live server status (catches Non Active deactivation in Kelompok Tes) + server token + latest questions
+    setIsVerifyingToken(true);
+    try {
+      const verifyRes = await verifyExamEntryWithServer({
+        username: cleanStudentUser,
+        enteredToken: cleanInput,
+        selectedScheduleId: selectedSchedule?.id,
+      });
 
-    // If token doesn't match local state yet OR local package has 0 questions, check live server storage immediately (bypass cooldown cache)
-    if (!isTokenValid || !remoteActiveSchedule || !localHasQuestions) {
-      setIsVerifyingToken(true);
-      try {
-        const res = await fetchVercelStorage({ force: true });
-        if (res.ok && res.data) {
-          onSyncRemoteData?.({
-            packages: res.data.packages,
-            schedules: res.data.schedules,
-            activeToken: res.data.activeToken,
-            tokenUpdatedAt: res.data.tokenUpdatedAt,
-          });
+      if (verifyRes.ok) {
+        isTokenValid = true;
+        if (verifyRes.schedule) {
+          remoteActiveSchedule = verifyRes.schedule;
+        }
+      } else if (
+        !verifyRes.networkError &&
+        verifyRes.reason &&
+        verifyRes.reason !== 'unauthorized'
+      ) {
+        setError(
+          verifyRes.error ||
+            'Verifikasi ujian ditolak oleh server. Pastikan status peserta Active dan token sesuai.'
+        );
+        return;
+      }
 
-          const serverToken = String(res.data.activeToken || '')
-            .replace(/\s+/g, '')
-            .toUpperCase();
-          if (serverToken && cleanInput === serverToken) {
-            isTokenValid = true;
-            try {
-              localStorage.setItem('pusmendik_cbt_token_v1', serverToken);
-            } catch {
-              // ignore
-            }
-          }
-          if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
-            const remoteActiveList = res.data.schedules.filter(
-              (s) => s.isActive
+      // Refresh latest schedules & packages from server so newly uploaded Bank Soal is picked up immediately
+      const res = await fetchVercelStorage({ force: true });
+      if (res.ok && res.data) {
+        onSyncRemoteData?.({
+          packages: res.data.packages,
+          schedules: res.data.schedules,
+          activeToken: res.data.activeToken,
+          tokenUpdatedAt: res.data.tokenUpdatedAt,
+        });
+
+        // Double-check live participant status from server list
+        if (Array.isArray(res.data.participants) && cleanStudentUser) {
+          const liveRow = res.data.participants.find(
+            (p) => p?.username?.trim().toUpperCase() === cleanStudentUser
+          );
+          if (liveRow && !isParticipantStatusActive(liveRow.status)) {
+            setError(
+              'Akses Ditolak: Status peserta Anda telah dinonaktifkan (Non Active) pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator.'
             );
-            const exactRemote = remoteActiveList.filter((s) =>
-              doesKelasMatch(studentKelas, s.kelas)
-            );
-            const matchingSelected = selectedSchedule
-              ? exactRemote.find((s) => s.id === selectedSchedule.id)
-              : undefined;
-            const firstUncompletedRemote = exactRemote.find(
-              (s) => !isScheduleCompleted(s)
-            );
-            remoteActiveSchedule =
-              matchingSelected ||
-              firstUncompletedRemote ||
-              exactRemote[0] ||
-              undefined;
-          }
-          if (
-            remoteActiveSchedule &&
-            Array.isArray(res.data.packages) &&
-            res.data.packages.length > 0
-          ) {
-            resolvedPkg = resolvePackageForSchedule(
-              remoteActiveSchedule,
-              res.data.packages
-            );
+            return;
           }
         }
-      } catch {
-        // ignore network error
-      } finally {
-        setIsVerifyingToken(false);
+
+        const serverToken = String(res.data.activeToken || '')
+          .replace(/\s+/g, '')
+          .toUpperCase();
+        if (serverToken && cleanInput === serverToken) {
+          isTokenValid = true;
+        }
+
+        if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
+          const remoteActiveList = res.data.schedules.filter((s) => s.isActive);
+          const exactRemote = remoteActiveList.filter((s) =>
+            doesKelasMatch(studentKelas, s.kelas)
+          );
+          const matchingSelected = (remoteActiveSchedule || selectedSchedule)
+            ? exactRemote.find(
+                (s) => s.id === (remoteActiveSchedule || selectedSchedule)?.id
+              )
+            : undefined;
+          const firstUncompletedRemote = exactRemote.find(
+            (s) => !isScheduleCompleted(s)
+          );
+          remoteActiveSchedule =
+            matchingSelected ||
+            firstUncompletedRemote ||
+            exactRemote[0] ||
+            undefined;
+        }
+        if (
+          remoteActiveSchedule &&
+          Array.isArray(res.data.packages) &&
+          res.data.packages.length > 0
+        ) {
+          resolvedPkg = resolvePackageForSchedule(
+            remoteActiveSchedule,
+            res.data.packages
+          );
+        }
       }
+    } catch {
+      // ignore network error and rely on local state
+    } finally {
+      setIsVerifyingToken(false);
     }
 
     if (!remoteActiveSchedule) {
@@ -528,6 +578,12 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             </div>
           </div>
 
+          {isStudentDeactivated && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs font-medium text-rose-800">
+              Status peserta Anda saat ini <strong>Non Active</strong> pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator untuk mengaktifkan status peserta.
+            </div>
+          )}
+
           {!hasActiveSchedule && (
             <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs font-medium text-amber-800">
               Belum ada jadwal mata pelajaran yang aktif untuk <strong>Kelas {studentKelas}</strong> saat ini. Silakan tunggu hingga Administrator/Proktor mengaktifkan jadwal ujian kelas Anda.
@@ -543,7 +599,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
           <div className="pt-4">
             <button
               type="submit"
-              disabled={isVerifyingToken || allActiveSchedulesCompleted}
+              disabled={isVerifyingToken || allActiveSchedulesCompleted || isStudentDeactivated}
               className="w-full py-2.5 px-6 rounded-full text-sm font-semibold transition-all bg-[#0066ff] hover:bg-[#0052cc] text-white shadow-[0_6px_16px_rgba(0,102,255,0.28)] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {isVerifyingToken ? 'Memverifikasi Token...' : 'Submit'}

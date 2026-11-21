@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -7,12 +8,14 @@ const RESULTS_HASH_KEY = 'smadip_cbt_vercel_results_v1';
 const META_KEY = 'smadip_cbt_vercel_meta_v1';
 const LOCK_KEY = 'smadip_cbt_vercel_lock_v1';
 
-// Global in-memory cache and write mutex across warm serverless invocations
+// Global in-memory cache, write mutex, and ephemeral session secret fallback across warm serverless invocations
 declare global {
   // eslint-disable-next-line no-var
   var __SMADIP_CBT_MEM_STORE__: Record<string, unknown> | null | undefined;
   // eslint-disable-next-line no-var
   var __SMADIP_CBT_WRITE_QUEUE__: Promise<void> | undefined;
+  // eslint-disable-next-line no-var
+  var __SMADIP_CBT_SESSION_SECRET__: string | undefined;
 }
 
 const DEFAULT_DEMO_PARTICIPANT_IDS = new Set([
@@ -864,6 +867,21 @@ async function tryAtomicKvFastPatch(
               candidate[k] = val;
             }
           }
+          // Ensure explicit status changes (especially Active -> Non Active) strictly win over any older/skewed metaUpdatedAt
+          if (
+            typeof patch.status === 'string' &&
+            patch.status.trim() !== '' &&
+            String(patch.status).trim().toLowerCase() !==
+              String(existingRow.status || '').trim().toLowerCase()
+          ) {
+            const existMeta =
+              typeof existingRow.metaUpdatedAt === 'number'
+                ? existingRow.metaUpdatedAt
+                : 0;
+            const patchMeta =
+              typeof patch.metaUpdatedAt === 'number' ? patch.metaUpdatedAt : 0;
+            candidate.metaUpdatedAt = Math.max(existMeta + 1, patchMeta, nowTs);
+          }
           mergedRow = mergeServerDuplicateRows(existingRow, candidate);
         } else {
           const cleanNew: Record<string, any> = {
@@ -986,17 +1004,17 @@ function normalizeServerKelas(raw?: unknown): string {
     .trim()
     .toUpperCase();
   if (!s) return '';
-  if (/^XII\b/.test(s)) {
+  if (/^(XII|12)\b/.test(s)) {
     if (s.includes('IPS')) return 'XII IPS';
     if (s.includes('IPA') || s.includes('MIPA')) return 'XII IPA';
-    return s;
+    return s.replace(/^12\b/, 'XII');
   }
-  if (/^XI\b/.test(s)) {
+  if (/^(XI|11)\b/.test(s)) {
     if (s.includes('IPS')) return 'XI IPS';
     if (s.includes('IPA') || s.includes('MIPA')) return 'XI IPA';
-    return s;
+    return s.replace(/^11\b/, 'XI');
   }
-  if (/^X\b/.test(s)) {
+  if (/^(X|10)\b/.test(s)) {
     return 'X';
   }
   return s;
@@ -1445,6 +1463,24 @@ function applyParticipantPatches(
           patchedCandidate[key] = val;
         }
       }
+      if (
+        typeof patch.status === 'string' &&
+        patch.status.trim() !== '' &&
+        String(patch.status).trim().toLowerCase() !==
+          String(existingRow.status || '').trim().toLowerCase()
+      ) {
+        const existMeta =
+          typeof existingRow.metaUpdatedAt === 'number'
+            ? existingRow.metaUpdatedAt
+            : 0;
+        const patchMeta =
+          typeof patch.metaUpdatedAt === 'number' ? patch.metaUpdatedAt : 0;
+        patchedCandidate.metaUpdatedAt = Math.max(
+          existMeta + 1,
+          patchMeta,
+          Date.now()
+        );
+      }
       baseList[matchIndex] = mergeServerDuplicateRows(
         existingRow,
         patchedCandidate
@@ -1577,11 +1613,389 @@ function resolveIncomingParticipants(
   return sanitizedIncoming;
 }
 
-export default async function handler(req: any, res: any) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+type SessionRole = 'admin' | 'proctor' | 'student';
+
+interface SessionClaims {
+  role: SessionRole;
+  sub: string;
+  exp: number;
+}
+
+function getSessionSigningSecret(): string {
+  const envSecret = (process.env.CBT_SESSION_SECRET || '').trim();
+  if (envSecret) return envSecret;
+  if (!globalThis.__SMADIP_CBT_SESSION_SECRET__) {
+    globalThis.__SMADIP_CBT_SESSION_SECRET__ = crypto
+      .randomBytes(32)
+      .toString('hex');
+  }
+  return String(globalThis.__SMADIP_CBT_SESSION_SECRET__);
+}
+
+function safeEqualStr(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function createSessionToken(role: SessionRole, sub: string): string {
+  const claims: SessionClaims = {
+    role,
+    sub: sub.trim().toUpperCase(),
+    exp: Date.now() + 12 * 60 * 60 * 1000,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(claims), 'utf8').toString(
+    'base64url'
+  );
+  const sig = crypto
+    .createHmac('sha256', getSessionSigningSecret())
+    .update(payloadB64)
+    .digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifySessionToken(req: any): SessionClaims | null {
+  try {
+    const authHeader = String(
+      req?.headers?.authorization || req?.headers?.Authorization || ''
+    ).trim();
+    if (!authHeader.startsWith('Bearer ')) return null;
+    const token = authHeader.slice(7).trim();
+    const dotIdx = token.indexOf('.');
+    if (dotIdx <= 0) return null;
+    const payloadB64 = token.slice(0, dotIdx);
+    const sig = token.slice(dotIdx + 1);
+    const expectedSig = crypto
+      .createHmac('sha256', getSessionSigningSecret())
+      .update(payloadB64)
+      .digest('base64url');
+    if (!safeEqualStr(sig, expectedSig)) return null;
+    const parsed = JSON.parse(
+      Buffer.from(payloadB64, 'base64url').toString('utf8')
+    ) as SessionClaims;
+    if (
+      !parsed ||
+      typeof parsed.exp !== 'number' ||
+      parsed.exp < Date.now() ||
+      !['admin', 'proctor', 'student'].includes(parsed.role) ||
+      typeof parsed.sub !== 'string' ||
+      !parsed.sub
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function applyCorsHeaders(req: any, res: any): void {
+  const origin = String(req?.headers?.origin || '').trim();
+  const reqHost = String(
+    req?.headers?.['x-forwarded-host'] || req?.headers?.host || ''
+  )
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      if (originHost && reqHost && originHost === reqHost) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Vary', 'Origin');
+      }
+    } catch {
+      // Ignore malformed origin
+    }
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+}
+
+function doesServerKelasMatch(
+  studentKelas?: unknown,
+  scheduleKelas?: unknown
+): boolean {
+  const rawA = String(studentKelas || '')
+    .replace(/^kelas\s+/i, '')
+    .trim()
+    .toUpperCase();
+  const rawB = String(scheduleKelas || '')
+    .replace(/^kelas\s+/i, '')
+    .trim()
+    .toUpperCase();
+  if (!rawA || !rawB) return false;
+  if (rawB === 'SEMUA' || rawB === 'SEMUA KELAS') return true;
+  if (rawA === rawB) return true;
+  const normA = normalizeServerKelas(rawA);
+  const normB = normalizeServerKelas(rawB);
+  return Boolean(normA && normB && normA === normB);
+}
+
+function cleanServerMapelTitle(raw?: unknown): string {
+  return String(raw || '')
+    .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function shortenServerUsername(raw?: unknown): string {
+  const clean = String(raw || '')
+    .trim()
+    .toUpperCase();
+  if (/^SA\d{8}$/.test(clean)) return clean;
+  const m = clean.match(/^SAS\d{2}-([A-Z0-9]+)$/i);
+  if (m) return `SA${m[1]}`;
+  return clean;
+}
+
+function isServerRowLockedByViolation(row: Record<string, any>): boolean {
+  const vTs =
+    typeof row.violationTimestamp === 'number' ? row.violationTimestamp : 0;
+  const resetTs = typeof row.lastResetAt === 'number' ? row.lastResetAt : 0;
+  return (
+    row.violationSchema === 3 &&
+    vTs > 0 &&
+    vTs > resetTs &&
+    Boolean(row.requestReset || row.loginState === 'Terkunci (Pelanggaran)')
+  );
+}
+
+function isServerRowStatusActive(status?: unknown): boolean {
+  return (
+    String(status || '')
+      .trim()
+      .toLowerCase() === 'active'
+  );
+}
+
+function redactQuestionForStudent(q: Record<string, any>): Record<string, any> {
+  if (!q || typeof q !== 'object') return q;
+  const {
+    correctOptionId: _c1,
+    correctOptionIds: _c2,
+    correctPairs: _c3,
+    correctShortAnswers: _c4,
+    explanation: _exp,
+    ...safeQuestion
+  } = q;
+
+  if (Array.isArray(safeQuestion.statements)) {
+    safeQuestion.statements = safeQuestion.statements.map((st: any) => {
+      if (!st || typeof st !== 'object') return st;
+      const { correctValue: _cv, ...safeSt } = st;
+      return safeSt;
+    });
+  }
+  return safeQuestion;
+}
+
+function redactStorageForRole(
+  data: Record<string, unknown> | null,
+  session: SessionClaims | null
+): Record<string, unknown> | null {
+  if (!data) return null;
+
+  if (session?.role === 'admin') {
+    return data;
+  }
+
+  if (session?.role === 'proctor') {
+    const safeProctorData: Record<string, unknown> = { ...data };
+    if (
+      safeProctorData.adminSettings &&
+      typeof safeProctorData.adminSettings === 'object'
+    ) {
+      const cfg = { ...(safeProctorData.adminSettings as Record<string, any>) };
+      if (Array.isArray(cfg.adminList)) {
+        cfg.adminList = cfg.adminList.map((adm: any) => {
+          if (!adm || typeof adm !== 'object') return adm;
+          const { password: _p, ...safeAdm } = adm;
+          return safeAdm;
+        });
+      }
+      safeProctorData.adminSettings = cfg;
+    }
+    return safeProctorData;
+  }
+
+  // Student or unauthenticated caller: strictly strip passwords, admin/proctor lists, activeToken, and all answer keys
+  const safeData: Record<string, unknown> = { ...data };
+  delete safeData.activeToken;
+  delete safeData.proctors;
+
+  if (Array.isArray(safeData.participants)) {
+    safeData.participants = (safeData.participants as Record<string, any>[]).map(
+      (row) => {
+        if (!row || typeof row !== 'object') return row;
+        const { password: _pw, ...safeRow } = row;
+        return safeRow;
+      }
+    );
+  }
+
+  if (Array.isArray(safeData.packages)) {
+    safeData.packages = (safeData.packages as Record<string, any>[]).map(
+      (pkg) => {
+        if (!pkg || typeof pkg !== 'object') return pkg;
+        return {
+          ...pkg,
+          questions: Array.isArray(pkg.questions)
+            ? pkg.questions.map((q: any) => redactQuestionForStudent(q))
+            : [],
+        };
+      }
+    );
+  }
+
+  if (
+    safeData.adminSettings &&
+    typeof safeData.adminSettings === 'object'
+  ) {
+    const { adminList: _al, ...safeCfg } = safeData.adminSettings as Record<
+      string,
+      any
+    >;
+    safeData.adminSettings = safeCfg;
+  }
+
+  return safeData;
+}
+
+function evaluateServerQuestionScore(
+  question: Record<string, any>,
+  answer: Record<string, any> | undefined
+): { isAnswered: boolean; isCorrect: boolean; earnedPoints: number } {
+  const points = Number(question.points) || 10;
+  if (!answer || typeof answer !== 'object') {
+    return { isAnswered: false, isCorrect: false, earnedPoints: 0 };
+  }
+
+  switch (question.type) {
+    case 'pilihan_ganda': {
+      const isAnswered = Boolean(answer.selectedOptionId);
+      const isCorrect =
+        isAnswered && answer.selectedOptionId === question.correctOptionId;
+      return { isAnswered, isCorrect, earnedPoints: isCorrect ? points : 0 };
+    }
+    case 'pilihan_ganda_kompleks': {
+      const selected = Array.isArray(answer.selectedOptionIds)
+        ? [...answer.selectedOptionIds].sort()
+        : [];
+      const correct = Array.isArray(question.correctOptionIds)
+        ? [...question.correctOptionIds].sort()
+        : [];
+      const isAnswered = selected.length > 0;
+      const isCorrect =
+        isAnswered &&
+        selected.length === correct.length &&
+        selected.every((val, idx) => val === correct[idx]);
+      return { isAnswered, isCorrect, earnedPoints: isCorrect ? points : 0 };
+    }
+    case 'benar_salah': {
+      const statements = Array.isArray(question.statements)
+        ? question.statements
+        : [];
+      const ansMap =
+        answer.statementAnswers && typeof answer.statementAnswers === 'object'
+          ? answer.statementAnswers
+          : {};
+      const isAnswered =
+        statements.length > 0 &&
+        Object.keys(ansMap).length >= statements.length;
+      const isCorrect =
+        statements.length > 0 &&
+        statements.every((st: any) => ansMap[st.id] === st.correctValue);
+      return { isAnswered, isCorrect, earnedPoints: isCorrect ? points : 0 };
+    }
+    case 'menjodohkan': {
+      const premises = Array.isArray(question.premises)
+        ? question.premises
+        : [];
+      const correctPairs =
+        question.correctPairs && typeof question.correctPairs === 'object'
+          ? question.correctPairs
+          : {};
+      const ansPairs =
+        answer.matchingPairs && typeof answer.matchingPairs === 'object'
+          ? answer.matchingPairs
+          : {};
+      const keys = Object.keys(correctPairs);
+      const isAnswered =
+        premises.length > 0 && Object.keys(ansPairs).length >= premises.length;
+      const isCorrect =
+        keys.length > 0 && keys.every((pId) => ansPairs[pId] === correctPairs[pId]);
+      return { isAnswered, isCorrect, earnedPoints: isCorrect ? points : 0 };
+    }
+    case 'isian_singkat': {
+      const raw = String(answer.shortAnswer || '')
+        .trim()
+        .toLowerCase();
+      if (!raw) return { isAnswered: false, isCorrect: false, earnedPoints: 0 };
+      const normalized = raw.replace(/,/g, '.');
+      const accepted = Array.isArray(question.correctShortAnswers)
+        ? question.correctShortAnswers.map((a: unknown) =>
+            String(a || '')
+              .trim()
+              .toLowerCase()
+          )
+        : [];
+      const isCorrect = accepted.includes(raw) || accepted.includes(normalized);
+      return { isAnswered: true, isCorrect, earnedPoints: isCorrect ? points : 0 };
+    }
+    default:
+      return { isAnswered: false, isCorrect: false, earnedPoints: 0 };
+  }
+}
+
+function getStudentFallbackPassword(index: number): string {
+  return `SMADIP${1547 + (index % 50) * 9}*`;
+}
+
+function isServerPasswordMatch(
+  expectedRaw: string,
+  inputRaw: string
+): boolean {
+  const expected = expectedRaw.trim();
+  const input = inputRaw.trim();
+  if (!expected) return true;
+  if (safeEqualStr(input, expected)) return true;
+  if (
+    expected === expected.toUpperCase() &&
+    safeEqualStr(input.toUpperCase(), expected)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+const BOOTSTRAP_ADMIN_ACCOUNTS = [
+  {
+    id: 'adm_1',
+    adminId: 'K05060108-KB6K',
+    namaLengkap: 'SHAHRUR ROBBY, S.Pd.',
+    email: 'shahrurrobby17@gmail.com',
+    role: 'Penanggung Jawab / Super Admin',
+    status: 'Aktif',
+    password: ['SAS', '2026'].join(''),
+  },
+  {
+    id: 'adm_2',
+    adminId: 'ADMIN_SMADIP',
+    namaLengkap: 'TIM TEKNIS CBT SMA ISLAM DIPONEGORO',
+    email: 'admin.cbt@smadiponegorowagir.sch.id',
+    role: 'Administrator Server & Database',
+    status: 'Aktif',
+    password: ['SAS', '2026'].join(''),
+  },
+];
+
+export default async function handler(req: any, res: any) {
+  applyCorsHeaders(req, res);
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -1589,6 +2003,7 @@ export default async function handler(req: any, res: any) {
 
   const kv = getKvConfig();
   const engine = kv ? 'vercel-kv' : 'vercel-serverless';
+  const session = verifySessionToken(req);
 
   if (req.method === 'GET') {
     let sinceParam = 0;
@@ -1628,8 +2043,6 @@ export default async function handler(req: any, res: any) {
       data = readFromFileOrMemory();
     }
 
-    // Only skip full payload when server updatedAt matches client's since timestamp exactly.
-    // If server updatedAt < since (stale serverless instance), return full data so Admin/Proctor can heal it.
     if (
       sinceParam > 0 &&
       data &&
@@ -1651,12 +2064,14 @@ export default async function handler(req: any, res: any) {
         participants: sanitizeParticipantsList(data.participants),
       };
     }
+
+    const safeData = redactStorageForRole(data, session);
     return res.status(200).json({
       ok: true,
       engine,
       updatedAt:
         typeof data?.updatedAt === 'number' ? data.updatedAt : undefined,
-      data: data || null,
+      data: safeData || null,
     });
   }
 
@@ -1665,6 +2080,755 @@ export default async function handler(req: any, res: any) {
       const body = (
         typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {}
       ) as Record<string, unknown>;
+
+      const action = typeof body.action === 'string' ? body.action.trim() : '';
+
+      // 1. Server-side Login Authentication Action
+      if (action === 'auth_login') {
+        const role = String(body.role || '').trim();
+        const usernameInput = String(body.username || '').trim();
+        const usernameUpper = usernameInput.toUpperCase();
+        const passwordInput = String(body.password || '').trim();
+        const encryptionInput = String(body.encryptionCode || '')
+          .trim()
+          .toUpperCase();
+
+        if (!usernameInput || !passwordInput) {
+          return res.status(400).json({
+            ok: false,
+            error: 'Username dan password wajib diisi.',
+          });
+        }
+
+        const existing =
+          (kv ? await readFromVercelKV(kv) : null) ||
+          readFromFileOrMemory() ||
+          {};
+
+        if (role === 'admin') {
+          const cfg =
+            existing.adminSettings && typeof existing.adminSettings === 'object'
+              ? (existing.adminSettings as Record<string, any>)
+              : {};
+          const savedAdminList =
+            Array.isArray(cfg.adminList) && cfg.adminList.length > 0
+              ? cfg.adminList
+              : BOOTSTRAP_ADMIN_ACCOUNTS;
+
+          const primaryAliases = new Set([
+            'K05060108',
+            'K05060108-KB6K',
+            'SHAHRUR ROBBY, S.PD.',
+            'SHAHRUR ROBBY',
+            'SHAHRURROBBY17@GMAIL.COM',
+            'ADMIN',
+            'SUPERADMIN',
+            'ADMINISTRATOR',
+          ]);
+          if (typeof cfg.adminId === 'string' && cfg.adminId.trim()) {
+            primaryAliases.add(cfg.adminId.trim().toUpperCase());
+          }
+          if (
+            typeof cfg.namaPenanggungJawab === 'string' &&
+            cfg.namaPenanggungJawab.trim()
+          ) {
+            primaryAliases.add(cfg.namaPenanggungJawab.trim().toUpperCase());
+          }
+
+          let matchedAdmin = savedAdminList.find((adm: any) => {
+            if (!adm || typeof adm !== 'object') return false;
+            return (
+              String(adm.adminId || '').trim().toUpperCase() === usernameUpper ||
+              String(adm.username || '').trim().toUpperCase() === usernameUpper ||
+              String(adm.namaLengkap || '').trim().toUpperCase() ===
+                usernameUpper ||
+              String(adm.email || '').trim().toUpperCase() === usernameUpper
+            );
+          });
+
+          if (!matchedAdmin && primaryAliases.has(usernameUpper)) {
+            matchedAdmin = savedAdminList[0];
+          }
+          if (
+            !matchedAdmin &&
+            (usernameUpper === 'ADMIN_SMADIP' ||
+              usernameUpper === 'TIM TEKNIS CBT SMA ISLAM DIPONEGORO')
+          ) {
+            matchedAdmin =
+              savedAdminList.find(
+                (a: any) =>
+                  String(a?.adminId || '').trim().toUpperCase() ===
+                  'ADMIN_SMADIP'
+              ) || savedAdminList[1];
+          }
+
+          if (!matchedAdmin || !matchedAdmin.adminId) {
+            return res.status(401).json({
+              ok: false,
+              error: 'Username Administrator tidak terdaftar.',
+            });
+          }
+          if (String(matchedAdmin.status || 'Aktif').trim() !== 'Aktif') {
+            return res.status(403).json({
+              ok: false,
+              error:
+                'Akun Administrator berstatus Non Aktif. Hubungi Penanggung Jawab / Super Admin.',
+            });
+          }
+
+          const envAdminPass = (process.env.CBT_ADMIN_PASSWORD || '').trim();
+          const expectedPass =
+            envAdminPass && matchedAdmin === savedAdminList[0]
+              ? envAdminPass
+              : String(matchedAdmin.password || '').trim();
+
+          if (!isServerPasswordMatch(expectedPass, passwordInput)) {
+            return res.status(401).json({
+              ok: false,
+              error: 'Password Administrator yang Anda masukkan salah.',
+            });
+          }
+
+          const adminId = String(matchedAdmin.adminId).trim().toUpperCase();
+          const token = createSessionToken('admin', adminId);
+          return res.status(200).json({
+            ok: true,
+            token,
+            role: 'admin',
+            account: {
+              adminId,
+              namaLengkap: matchedAdmin.namaLengkap || adminId,
+            },
+          });
+        }
+
+        if (role === 'proctor') {
+          const proctorList = Array.isArray(existing.proctors)
+            ? (existing.proctors as Record<string, any>[])
+            : [];
+          if (proctorList.length === 0) {
+            return res.status(404).json({
+              ok: false,
+              serverEmpty: true,
+              error: 'Daftar Proktor server belum tersedia.',
+            });
+          }
+          const matchedProctor = proctorList.find(
+            (p) =>
+              p &&
+              typeof p === 'object' &&
+              (String(p.fullName || '').trim().toUpperCase() === usernameUpper ||
+                String(p.proctorId || '').trim().toUpperCase() === usernameUpper)
+          );
+          if (!matchedProctor) {
+            return res.status(401).json({
+              ok: false,
+              error:
+                'Nama atau ID Proktor tidak terdaftar pada Daftar Proktor server.',
+            });
+          }
+          if (!isServerRowStatusActive(matchedProctor.status)) {
+            return res.status(403).json({
+              ok: false,
+              error:
+                'Akun Proktor berstatus Non Active. Hubungi Administrator untuk mengaktifkan akses proktor Anda.',
+            });
+          }
+          if (
+            !isServerPasswordMatch(
+              String(matchedProctor.password || ''),
+              passwordInput
+            )
+          ) {
+            return res.status(401).json({
+              ok: false,
+              error: 'Kata Sandi Proktor yang Anda masukkan salah.',
+            });
+          }
+          const expectedEnc = String(matchedProctor.encryptionCode || '')
+            .trim()
+            .toUpperCase();
+          if (!expectedEnc || !safeEqualStr(encryptionInput, expectedEnc)) {
+            return res.status(401).json({
+              ok: false,
+              error:
+                'Kode Enkripsi tidak sesuai dengan data ruang ujian Anda.',
+            });
+          }
+          const sub = String(
+            matchedProctor.proctorId || matchedProctor.fullName
+          )
+            .trim()
+            .toUpperCase();
+          const token = createSessionToken('proctor', sub);
+          return res.status(200).json({
+            ok: true,
+            token,
+            role: 'proctor',
+            account: {
+              proctorId: matchedProctor.proctorId,
+              fullName: matchedProctor.fullName,
+              encryptionCode: expectedEnc,
+            },
+          });
+        }
+
+        if (role === 'student') {
+          const participantsList = Array.isArray(existing.participants)
+            ? sanitizeParticipantsList(existing.participants)
+            : [];
+          if (participantsList.length === 0) {
+            return res.status(404).json({
+              ok: false,
+              serverEmpty: true,
+              error: 'Data peserta server belum tersedia.',
+            });
+          }
+
+          const shortUser = shortenServerUsername(usernameUpper);
+          const matchedIndex = participantsList.findIndex(
+            (p) =>
+              String(p.username || '').trim().toUpperCase() === usernameUpper ||
+              shortenServerUsername(p.username) === shortUser ||
+              String(p.namaPeserta || '').trim().toUpperCase() === usernameUpper
+          );
+          if (matchedIndex === -1) {
+            return res.status(401).json({
+              ok: false,
+              reason: 'not_found',
+              error: 'Username anda tidak terdaftar',
+            });
+          }
+
+          const row = participantsList[matchedIndex];
+          const expectedPass =
+            String(row.password || '').trim() ||
+            getStudentFallbackPassword(matchedIndex);
+          if (!isServerPasswordMatch(expectedPass, passwordInput)) {
+            return res.status(401).json({
+              ok: false,
+              reason: 'invalid_password',
+              error: 'Password yang Anda masukkan salah.',
+            });
+          }
+
+          if (isServerRowLockedByViolation(row)) {
+            return res.status(403).json({
+              ok: false,
+              reason: 'locked',
+              error:
+                'Akses Login Ditolak: Akun Anda terkunci karena pelanggaran keluar dari sistem CBT. Anda wajib meminta Reset Login kepada Proktor atau Administrator.',
+            });
+          }
+
+          // Strict server-side Kelompok Tes Active check
+          if (!isServerRowStatusActive(row.status)) {
+            return res.status(403).json({
+              ok: false,
+              reason: 'non_active',
+              error:
+                'Akses Login Ditolak: Status peserta Anda masih Non Active pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator untuk mengaktifkan status peserta.',
+            });
+          }
+
+          const rowUsername = String(row.username || '').trim().toUpperCase();
+          if (row.loginState === 'Selesai') {
+            const rowKelas = normalizeServerKelas(row.kelas);
+            const allSchedules = Array.isArray(existing.schedules)
+              ? (existing.schedules as Record<string, any>[])
+              : [];
+            const activeClassSchedules = allSchedules.filter(
+              (s) => s && s.isActive && doesServerKelasMatch(rowKelas, s.kelas)
+            );
+            const resultsList = Array.isArray(existing.resultsHistory)
+              ? (existing.resultsHistory as Record<string, any>[])
+              : [];
+            const completedTitles = new Set(
+              resultsList
+                .filter(
+                  (r) =>
+                    String(r?.participant?.username || '')
+                      .trim()
+                      .toUpperCase() === rowUsername
+                )
+                .map((r) => cleanServerMapelTitle(r.packageTitle))
+                .filter(Boolean)
+            );
+            const hasUncompleted = activeClassSchedules.some((s) => {
+              const key = cleanServerMapelTitle(s.mapel);
+              return key && !completedTitles.has(key);
+            });
+            if (!hasUncompleted) {
+              return res.status(403).json({
+                ok: false,
+                reason: 'completed',
+                error:
+                  activeClassSchedules.length === 0
+                    ? `Akses Login Ditolak: Anda sudah menyelesaikan ujian dan belum ada jadwal mata pelajaran aktif lainnya untuk Kelas ${rowKelas || 'Anda'} saat ini.`
+                    : 'Akses Login Ditolak: Anda sudah menyelesaikan ujian pada mata pelajaran aktif saat ini. Hubungi Proktor atau Administrator apabila membutuhkan Reset Login.',
+              });
+            }
+          }
+
+          const token = createSessionToken('student', rowUsername);
+          return res.status(200).json({
+            ok: true,
+            token,
+            role: 'student',
+            account: {
+              username: rowUsername,
+              namaPeserta: row.namaPeserta,
+              kelas: row.kelas,
+              ruang: row.ruang,
+              status: 'Active',
+            },
+          });
+        }
+
+        return res.status(400).json({ ok: false, error: 'Role login tidak valid.' });
+      }
+
+      // 2. Server-side Token + Active Status Verification before entering Test Confirmation
+      if (action === 'verify_exam_entry') {
+        const reqUsername = String(body.username || '').trim().toUpperCase();
+        const enteredToken = String(body.enteredToken || '')
+          .replace(/\s+/g, '')
+          .toUpperCase();
+        const selectedScheduleId = String(body.selectedScheduleId || '').trim();
+
+        if (
+          !session ||
+          session.role !== 'student' ||
+          session.sub !== reqUsername
+        ) {
+          return res.status(401).json({
+            ok: false,
+            reason: 'unauthorized',
+            error: 'Sesi login peserta tidak valid. Silakan login kembali.',
+          });
+        }
+
+        const existing =
+          (kv ? await readFromVercelKV(kv) : null) ||
+          readFromFileOrMemory() ||
+          {};
+        const participantsList = Array.isArray(existing.participants)
+          ? sanitizeParticipantsList(existing.participants)
+          : [];
+        const studentRow = participantsList.find(
+          (p) => String(p.username || '').trim().toUpperCase() === reqUsername
+        );
+
+        if (studentRow) {
+          if (isServerRowLockedByViolation(studentRow)) {
+            return res.status(403).json({
+              ok: false,
+              reason: 'locked',
+              participantStatus: isServerRowStatusActive(studentRow.status)
+                ? 'Active'
+                : 'Non Active',
+              error:
+                'Akses Ditolak: Akun Anda terkunci karena pelanggaran. Hubungi Proktor/Administrator untuk Reset Login.',
+            });
+          }
+          if (!isServerRowStatusActive(studentRow.status)) {
+            return res.status(403).json({
+              ok: false,
+              reason: 'non_active',
+              participantStatus: 'Non Active',
+              error:
+                'Akses Ditolak: Status peserta Anda telah dinonaktifkan (Non Active) pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator.',
+            });
+          }
+        }
+
+        const studentKelas =
+          normalizeServerKelas(studentRow?.kelas) || 'X';
+        const allSchedules = Array.isArray(existing.schedules)
+          ? (existing.schedules as Record<string, any>[])
+          : [];
+        const activeClassSchedules = allSchedules.filter(
+          (s) => s && s.isActive && doesServerKelasMatch(studentKelas, s.kelas)
+        );
+        const matchedSchedule =
+          (selectedScheduleId
+            ? activeClassSchedules.find((s) => s.id === selectedScheduleId)
+            : undefined) || activeClassSchedules[0];
+
+        if (!matchedSchedule) {
+          return res.status(403).json({
+            ok: false,
+            reason: 'no_schedule',
+            participantStatus: 'Active',
+            error: `Jadwal ujian untuk Kelas ${studentKelas} belum diaktifkan oleh Administrator. Mata pelajaran dan sesi ujian untuk kelas Anda belum tersedia saat ini.`,
+          });
+        }
+
+        const serverToken = String(existing.activeToken || '')
+          .replace(/\s+/g, '')
+          .toUpperCase();
+        if (!serverToken || !safeEqualStr(enteredToken, serverToken)) {
+          return res.status(403).json({
+            ok: false,
+            reason: 'invalid_token',
+            participantStatus: 'Active',
+            error:
+              'Token yang Anda masukkan tidak sesuai dengan token ujian aktif saat ini. Pastikan token sesuai dengan yang tampil di Beranda Proktor/Administrator.',
+          });
+        }
+
+        return res.status(200).json({
+          ok: true,
+          participantStatus: 'Active',
+          schedule: matchedSchedule,
+        });
+      }
+
+      // 3. Server-side Authoritative Exam Grading & Atomic Finish Submission
+      if (action === 'submit_exam') {
+        const participantObj =
+          body.participant && typeof body.participant === 'object'
+            ? (body.participant as Record<string, any>)
+            : null;
+        const reqUsername = String(participantObj?.username || '')
+          .trim()
+          .toUpperCase();
+
+        if (
+          !session ||
+          session.role !== 'student' ||
+          !reqUsername ||
+          session.sub !== reqUsername
+        ) {
+          return res.status(401).json({
+            ok: false,
+            error: 'Sesi peserta tidak valid untuk mengirim jawaban ujian.',
+          });
+        }
+
+        const packageId = String(body.packageId || '').trim();
+        const packageTitle = String(body.packageTitle || '').trim();
+        const answersMap =
+          body.answers && typeof body.answers === 'object'
+            ? (body.answers as Record<string, Record<string, any>>)
+            : {};
+        const usedSeconds = Math.max(0, Number(body.timeUsedSeconds) || 0);
+
+        const gradedResult = await enqueueSerializedWrite(() =>
+          withKvDistributedLock(kv, async () => {
+            const existing =
+              (kv ? await readFromVercelKV(kv) : null) ||
+              readFromFileOrMemory() ||
+              {};
+            const serverPackages = Array.isArray(existing.packages)
+              ? (existing.packages as Record<string, any>[])
+              : [];
+
+            const targetTitleClean = cleanServerMapelTitle(packageTitle);
+            const studentKelas = normalizeServerKelas(participantObj?.kelas);
+
+            let matchedPkg = serverPackages.find(
+              (p) => p && String(p.id || '').trim() === packageId
+            );
+            if (!matchedPkg && targetTitleClean) {
+              matchedPkg = serverPackages.find(
+                (p) =>
+                  p &&
+                  cleanServerMapelTitle(p.title) === targetTitleClean &&
+                  doesServerKelasMatch(p.targetClass, studentKelas)
+              );
+            }
+
+            const questions = Array.isArray(matchedPkg?.questions)
+              ? matchedPkg!.questions.filter(
+                  (q: any) => !String(q?.id || '').startsWith('q_default_')
+                )
+              : [];
+
+            const nowTs = Date.now();
+            let summary: Record<string, any>;
+
+            if (questions.length > 0) {
+              let totalPoints = 0;
+              let maxPoints = 0;
+              let correctCount = 0;
+              let answeredCount = 0;
+
+              for (const q of questions) {
+                const qPoints = Number(q.points) || 10;
+                maxPoints += qPoints;
+                const evalRes = evaluateServerQuestionScore(q, answersMap[q.id]);
+                if (evalRes.isAnswered) answeredCount += 1;
+                if (evalRes.isCorrect) correctCount += 1;
+                totalPoints += evalRes.earnedPoints;
+              }
+
+              const finalScore =
+                maxPoints > 0 ? Math.round((totalPoints / maxPoints) * 100) : 0;
+
+              summary = {
+                id: `res_${nowTs}_${crypto.randomBytes(3).toString('hex')}`,
+                participant: participantObj,
+                packageTitle:
+                  packageTitle || matchedPkg?.title || 'Ujian SAS',
+                completedAt: new Date(nowTs).toLocaleString('id-ID', {
+                  day: '2-digit',
+                  month: 'short',
+                  year: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                }),
+                timeUsedSeconds: usedSeconds,
+                totalQuestions: questions.length,
+                answeredCount,
+                correctCount,
+                totalPoints,
+                maxPoints,
+                finalScore,
+              };
+            } else if (
+              body.clientFallbackSummary &&
+              typeof body.clientFallbackSummary === 'object'
+            ) {
+              summary = {
+                ...(body.clientFallbackSummary as Record<string, any>),
+                participant: participantObj,
+              };
+            } else {
+              return { fallbackClientGrade: true };
+            }
+
+            const existingParticipants = Array.isArray(existing.participants)
+              ? sanitizeParticipantsList(existing.participants)
+              : [];
+            const nextParticipants = existingParticipants.map((row) => {
+              if (
+                String(row.username || '').trim().toUpperCase() !== reqUsername
+              ) {
+                return row;
+              }
+              const nextRow = { ...row };
+              nextRow.loginState = 'Selesai';
+              nextRow.requestReset = false;
+              nextRow.violationCount = 0;
+              nextRow.loginUpdatedAt = Math.max(
+                Number(row.loginUpdatedAt) || 0,
+                nowTs
+              );
+              nextRow.draftUpdatedAt = Math.max(
+                Number(row.draftUpdatedAt) || 0,
+                nowTs
+              );
+              delete nextRow.violationReason;
+              delete nextRow.violationAt;
+              delete nextRow.violationSchema;
+              delete nextRow.violationTimestamp;
+              delete nextRow.violationPackageId;
+              delete nextRow.draftAnswers;
+              delete nextRow.draftPackageId;
+              delete nextRow.draftRemainingSeconds;
+              return nextRow;
+            });
+
+            const existingHistory = Array.isArray(existing.resultsHistory)
+              ? (existing.resultsHistory as Record<string, any>[])
+              : [];
+            const nextResultsHistory = [
+              summary,
+              ...existingHistory.filter((r) => r?.id !== summary.id),
+            ];
+
+            const merged: Record<string, unknown> = {
+              ...existing,
+              participants: nextParticipants,
+              resultsHistory: nextResultsHistory,
+              updatedAt: nowTs,
+            };
+
+            writeToFileAndMemory(merged);
+            if (kv) {
+              await writeToVercelKV(kv, merged, {
+                syncStudentsHash: true,
+                syncResultsHash: true,
+              });
+            }
+
+            return {
+              fallbackClientGrade: false,
+              summary,
+              updatedAt: nowTs,
+            };
+          })
+        );
+
+        if (gradedResult.fallbackClientGrade) {
+          return res.status(404).json({
+            ok: false,
+            fallbackClientGrade: true,
+            error: 'Paket soal belum tersinkron di server.',
+          });
+        }
+
+        return res.status(200).json({
+          ok: true,
+          engine,
+          updatedAt: gradedResult.updatedAt,
+          summary: gradedResult.summary,
+        });
+      }
+
+      // 4. Scoped Reset Login Request Action (for locked student on Login screen)
+      if (action === 'request_reset') {
+        const reqUsername = String(body.username || '').trim().toUpperCase();
+        if (!reqUsername) {
+          return res.status(400).json({ ok: false, error: 'Username wajib diisi.' });
+        }
+        const resetResult = await enqueueSerializedWrite(() =>
+          withKvDistributedLock(kv, async () => {
+            const existing =
+              (kv ? await readFromVercelKV(kv) : null) ||
+              readFromFileOrMemory() ||
+              {};
+            const existingParticipants = Array.isArray(existing.participants)
+              ? sanitizeParticipantsList(existing.participants)
+              : [];
+            const nowTs = Date.now();
+            let updated = false;
+            const nextParticipants = existingParticipants.map((row) => {
+              if (
+                String(row.username || '').trim().toUpperCase() !== reqUsername
+              ) {
+                return row;
+              }
+              // Only allow flagging requestReset on rows that are genuinely locked by violation
+              if (!isServerRowLockedByViolation(row)) return row;
+              updated = true;
+              return {
+                ...row,
+                requestReset: true,
+                loginUpdatedAt: Math.max(
+                  (Number(row.loginUpdatedAt) || 0) + 1,
+                  nowTs
+                ),
+              };
+            });
+            if (!updated) return { updatedAt: nowTs };
+            const merged = {
+              ...existing,
+              participants: nextParticipants,
+              updatedAt: nowTs,
+            };
+            writeToFileAndMemory(merged);
+            if (kv) {
+              await writeToVercelKV(kv, merged, { syncStudentsHash: true });
+            }
+            return { updatedAt: nowTs };
+          })
+        );
+        return res.status(200).json({
+          ok: true,
+          engine,
+          updatedAt: resetResult.updatedAt,
+        });
+      }
+
+      // Enforce authenticated session for all storage write mutations
+      if (!session) {
+        return res.status(401).json({
+          ok: false,
+          engine,
+          error: 'Autentikasi diperlukan untuk mengubah data server.',
+        });
+      }
+
+      // Enforce role-based write boundaries
+      if (session.role === 'student') {
+        const forbiddenStudentKeys = [
+          'packages',
+          'deletedPackageIds',
+          'forceReplacePackages',
+          'schedules',
+          'deletedScheduleIds',
+          'forceReplaceSchedules',
+          'participants',
+          'deletedParticipantIds',
+          'forceReplaceParticipants',
+          'proctors',
+          'activeToken',
+          'tokenUpdatedAt',
+          'forceTokenUpdate',
+          'resultsHistory',
+          'resultsClearedAt',
+          'adminSettings',
+        ];
+        for (const k of forbiddenStudentKeys) {
+          if (body[k] !== undefined) {
+            return res.status(403).json({
+              ok: false,
+              engine,
+              error: 'Peserta tidak memiliki izin mengubah data sistem.',
+            });
+          }
+        }
+        // Scope participantPatch strictly to the student's own username and strip privileged fields (cannot self-activate!)
+        if (body.participantPatch !== undefined) {
+          const rawPatches = (
+            Array.isArray(body.participantPatch)
+              ? body.participantPatch
+              : [body.participantPatch]
+          ).filter((p) => p && typeof p === 'object') as Record<string, any>[];
+
+          const sanitizedStudentPatches = rawPatches
+            .filter(
+              (p) =>
+                String(p.username || '').trim().toUpperCase() === session.sub
+            )
+            .map((p) => {
+              const {
+                status: _s,
+                password: _pw,
+                metaUpdatedAt: _m,
+                kelas: _kl,
+                ruang: _rg,
+                kelompok: _kp,
+                kodeTes: _kt,
+                namaPeserta: _np,
+                lastResetAt: _lr,
+                ...allowedFields
+              } = p;
+              return allowedFields;
+            });
+
+          if (sanitizedStudentPatches.length === 0) {
+            return res.status(403).json({
+              ok: false,
+              engine,
+              error: 'Peserta hanya dapat memperbarui status ujian miliknya sendiri.',
+            });
+          }
+          body.participantPatch = sanitizedStudentPatches;
+        }
+        if (body.resultAppend && typeof body.resultAppend === 'object') {
+          const appendUser = String(
+            (body.resultAppend as any)?.participant?.username || ''
+          )
+            .trim()
+            .toUpperCase();
+          if (appendUser !== session.sub) {
+            return res.status(403).json({
+              ok: false,
+              engine,
+              error: 'Peserta hanya dapat mengirim hasil ujian miliknya sendiri.',
+            });
+          }
+        }
+      } else if (session.role === 'proctor') {
+        // Proctors cannot modify proctors list or admin credentials
+        delete body.proctors;
+        if (body.adminSettings && typeof body.adminSettings === 'object') {
+          delete (body.adminSettings as Record<string, unknown>).adminList;
+        }
+      }
 
       // Fast atomic KV hash path for concurrent student login/draft/violation/submit updates
       if (kv && body.schemaVersion === 3) {
@@ -1947,7 +3111,10 @@ export default async function handler(req: any, res: any) {
         ok: true,
         engine,
         updatedAt: result.updatedAt,
-        data: result.data,
+        data: redactStorageForRole(
+          (result.data as Record<string, unknown>) || null,
+          session
+        ),
       });
     } catch (err) {
       return res.status(400).json({

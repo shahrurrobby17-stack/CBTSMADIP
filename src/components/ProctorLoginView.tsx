@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, ShieldCheck, KeyRound, ArrowLeft, Lock, UserCheck } from 'lucide-react';
 import { AdminProctorItem } from './AdminViews';
+import { authenticateWithServer } from '../utils/vercelStorage';
 
 interface ProctorLoginViewProps {
   onProctorLoginSuccess: (proctorName: string, encryptionCode: string) => void;
@@ -62,49 +63,76 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
     }
 
     let matched = findProctor(proctors, cleanNameUpper);
-    const matchesLocally =
-      Boolean(matched) &&
-      matched?.status === 'Active' &&
-      isProctorPasswordValid(matched, cleanPass) &&
-      String(matched?.encryptionCode || '').trim().toUpperCase() === cleanEnc;
+    let serverAuthPassed = false;
+    let serverProctorName = '';
+    let serverProctorEnc = '';
 
-    if (!matchesLocally && onRefreshProctors) {
-      setIsCheckingLogin(true);
-      try {
-        const freshProctors = await onRefreshProctors();
-        if (Array.isArray(freshProctors) && freshProctors.length > 0) {
-          matched = findProctor(freshProctors, cleanNameUpper) || matched;
+    setIsCheckingLogin(true);
+    try {
+      const authRes = await authenticateWithServer({
+        role: 'proctor',
+        username: cleanNameUpper,
+        password: cleanPass,
+        encryptionCode: cleanEnc,
+      });
+      if (authRes.ok) {
+        serverAuthPassed = true;
+        serverProctorName = String(
+          authRes.account?.fullName || matched?.fullName || cleanName
+        );
+        serverProctorEnc = String(
+          authRes.account?.encryptionCode || matched?.encryptionCode || cleanEnc
+        )
+          .trim()
+          .toUpperCase();
+        if (onRefreshProctors) {
+          onRefreshProctors().catch(() => {});
         }
-      } catch {
-        // fallback to local list
-      } finally {
-        setIsCheckingLogin(false);
+      } else if (!authRes.serverEmpty && !authRes.networkError) {
+        setErrorMsg(
+          authRes.error ||
+            'Login Proktor ditolak. Periksa Nama/ID Proktor, Kata Sandi, Kode Enkripsi, dan status akun Anda.'
+        );
+        return;
+      } else if (onRefreshProctors) {
+        try {
+          const freshProctors = await onRefreshProctors();
+          if (Array.isArray(freshProctors) && freshProctors.length > 0) {
+            matched = findProctor(freshProctors, cleanNameUpper) || matched;
+          }
+        } catch {
+          // fallback to local list
+        }
       }
+    } finally {
+      setIsCheckingLogin(false);
     }
 
-    if (!matched) {
-      setErrorMsg(
-        'Nama atau ID Proktor tidak terdaftar pada Daftar Proktor server.'
-      );
-      return;
-    }
+    if (!serverAuthPassed) {
+      if (!matched) {
+        setErrorMsg(
+          'Nama atau ID Proktor tidak terdaftar pada Daftar Proktor server.'
+        );
+        return;
+      }
 
-    if (matched.status !== 'Active') {
-      setErrorMsg(
-        'Akun Proktor berstatus Non Active. Hubungi Administrator untuk mengaktifkan akses proktor Anda.'
-      );
-      return;
-    }
+      if (matched.status !== 'Active') {
+        setErrorMsg(
+          'Akun Proktor berstatus Non Active. Hubungi Administrator untuk mengaktifkan akses proktor Anda.'
+        );
+        return;
+      }
 
-    if (!isProctorPasswordValid(matched, cleanPass)) {
-      setErrorMsg('Kata Sandi Proktor yang Anda masukkan salah.');
-      return;
-    }
+      if (!isProctorPasswordValid(matched, cleanPass)) {
+        setErrorMsg('Kata Sandi Proktor yang Anda masukkan salah.');
+        return;
+      }
 
-    const expectedEnc = String(matched.encryptionCode || '').trim().toUpperCase();
-    if (!expectedEnc || cleanEnc !== expectedEnc) {
-      setErrorMsg('Kode Enkripsi tidak sesuai dengan data ruang ujian Anda.');
-      return;
+      const expectedEnc = String(matched.encryptionCode || '').trim().toUpperCase();
+      if (!expectedEnc || cleanEnc !== expectedEnc) {
+        setErrorMsg('Kode Enkripsi tidak sesuai dengan data ruang ujian Anda.');
+        return;
+      }
     }
 
     setErrorMsg('');
@@ -135,8 +163,12 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
     }
 
     onProctorLoginSuccess(
-      String(matched.fullName || cleanName).trim().toUpperCase(),
-      expectedEnc
+      String(serverProctorName || matched?.fullName || cleanName)
+        .trim()
+        .toUpperCase(),
+      String(serverProctorEnc || matched?.encryptionCode || cleanEnc)
+        .trim()
+        .toUpperCase()
     );
   };
 

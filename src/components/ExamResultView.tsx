@@ -5,7 +5,12 @@ import {
   Clock,
   CheckCircle2,
 } from 'lucide-react';
-import { ExamPackage, ParticipantProfile, StudentAnswer } from '../types/cbt';
+import {
+  ExamPackage,
+  ExamResultSummary,
+  ParticipantProfile,
+  StudentAnswer,
+} from '../types/cbt';
 import { evaluateQuestionScore } from '../data/cbtData';
 
 interface ExamResultViewProps {
@@ -14,6 +19,8 @@ interface ExamResultViewProps {
   answers: Record<string, StudentAnswer>;
   timeUsedSeconds: number;
   showResultScore?: boolean;
+  serverSummary?: ExamResultSummary | null;
+  isSyncingResult?: boolean;
   onRetakeOrChangePackage: () => void;
   onLogout: () => void;
 }
@@ -24,6 +31,8 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
   answers,
   timeUsedSeconds,
   showResultScore = false,
+  serverSummary = null,
+  isSyncingResult = false,
   onLogout,
 }) => {
   const formatDuration = (secs: number) => {
@@ -33,6 +42,13 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
   };
 
   const scoreStats = useMemo(() => {
+    if (serverSummary) {
+      return {
+        totalQuestions: serverSummary.totalQuestions,
+        correctCount: serverSummary.correctCount,
+        finalScore: serverSummary.finalScore,
+      };
+    }
     const questions = Array.isArray(examPackage?.questions)
       ? examPackage.questions
       : [];
@@ -52,7 +68,7 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
       correctCount,
       finalScore,
     };
-  }, [answers, examPackage]);
+  }, [answers, examPackage, serverSummary]);
 
   return (
     <main className="flex-1 max-w-[760px] w-full mx-auto px-4 sm:px-8 py-8 space-y-6">
@@ -87,7 +103,11 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
             <div className="text-xs text-slate-500">Status Sesi</div>
             <div className="mt-1 text-sm font-semibold text-emerald-700 flex items-center gap-1.5">
               <Award className="w-4 h-4" />
-              <span>Selesai & Jawaban Tersimpan</span>
+              <span>
+                {isSyncingResult
+                  ? 'Menyimpan & Menghitung Nilai di Server...'
+                  : 'Selesai & Jawaban Tersimpan'}
+              </span>
             </div>
           </div>
         </div>
@@ -99,7 +119,7 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
                 Nilai Akhir Anda
               </div>
               <div className="mt-1 font-mono text-3xl font-extrabold text-[#001a6e] tabular-nums">
-                {scoreStats.finalScore}
+                {isSyncingResult && !serverSummary ? '...' : scoreStats.finalScore}
               </div>
             </div>
             <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200">
@@ -109,7 +129,9 @@ export const ExamResultView: React.FC<ExamResultViewProps> = ({
               <div className="mt-1 text-lg font-bold text-emerald-800 flex items-center gap-1.5 tabular-nums">
                 <CheckCircle2 className="w-5 h-5" />
                 <span>
-                  {scoreStats.correctCount} dari {scoreStats.totalQuestions} Soal
+                  {isSyncingResult && !serverSummary
+                    ? 'Memproses...'
+                    : `${scoreStats.correctCount} dari ${scoreStats.totalQuestions} Soal`}
                 </span>
               </div>
             </div>

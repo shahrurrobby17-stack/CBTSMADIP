@@ -78,7 +78,10 @@ import {
   downloadWordQuestionTemplate,
   downloadWordQuestionArchive,
 } from '../utils/wordQuestionParser';
-import { saveVercelStorage } from '../utils/vercelStorage';
+import {
+  authenticateWithServer,
+  saveVercelStorage,
+} from '../utils/vercelStorage';
 
 interface AdminLoginViewProps {
   onAdminLoginSuccess: (adminUsername: string) => void;
@@ -274,44 +277,67 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
     }
 
     let matchedAccount = resolveAdminAccountFromSettings(adminSettings, cleanUpper);
-    const locallyValid =
-      Boolean(matchedAccount) &&
-      String(matchedAccount?.status || 'Aktif').trim() === 'Aktif' &&
-      isAdminPasswordValid(matchedAccount, cleanPass);
+    let serverAuthPassed = false;
+    let serverAdminId = '';
 
-    if (!locallyValid && onRefreshAdminSettings) {
-      setIsCheckingLogin(true);
-      try {
-        const freshSettings = await onRefreshAdminSettings();
-        if (freshSettings && typeof freshSettings === 'object') {
-          matchedAccount =
-            resolveAdminAccountFromSettings(freshSettings, cleanUpper) ||
-            matchedAccount;
+    setIsCheckingLogin(true);
+    try {
+      const authRes = await authenticateWithServer({
+        role: 'admin',
+        username: cleanUpper,
+        password: cleanPass,
+      });
+      if (authRes.ok) {
+        serverAuthPassed = true;
+        serverAdminId = String(
+          authRes.account?.adminId || matchedAccount?.adminId || cleanUpper
+        )
+          .trim()
+          .toUpperCase();
+        if (onRefreshAdminSettings) {
+          onRefreshAdminSettings().catch(() => {});
         }
-      } catch {
-        // fallback to local settings
-      } finally {
-        setIsCheckingLogin(false);
+      } else if (!authRes.serverEmpty && !authRes.networkError) {
+        setErrorMsg(
+          authRes.error ||
+            'Login Administrator ditolak. Periksa Username, Password, dan status akun Anda.'
+        );
+        return;
+      } else if (onRefreshAdminSettings) {
+        try {
+          const freshSettings = await onRefreshAdminSettings();
+          if (freshSettings && typeof freshSettings === 'object') {
+            matchedAccount =
+              resolveAdminAccountFromSettings(freshSettings, cleanUpper) ||
+              matchedAccount;
+          }
+        } catch {
+          // fallback to local settings
+        }
       }
+    } finally {
+      setIsCheckingLogin(false);
     }
 
-    if (!matchedAccount || !matchedAccount.adminId) {
-      setErrorMsg(
-        'Username Administrator tidak terdaftar. Masukkan Username yang benar agar ID Administrator muncul otomatis.'
-      );
-      return;
-    }
+    if (!serverAuthPassed) {
+      if (!matchedAccount || !matchedAccount.adminId) {
+        setErrorMsg(
+          'Username Administrator tidak terdaftar. Masukkan Username yang benar agar ID Administrator muncul otomatis.'
+        );
+        return;
+      }
 
-    if (String(matchedAccount.status || 'Aktif').trim() !== 'Aktif') {
-      setErrorMsg(
-        'Akun Administrator berstatus Non Aktif. Hubungi Penanggung Jawab / Super Admin untuk mengaktifkan akun ini.'
-      );
-      return;
-    }
+      if (String(matchedAccount.status || 'Aktif').trim() !== 'Aktif') {
+        setErrorMsg(
+          'Akun Administrator berstatus Non Aktif. Hubungi Penanggung Jawab / Super Admin untuk mengaktifkan akun ini.'
+        );
+        return;
+      }
 
-    if (!isAdminPasswordValid(matchedAccount, cleanPass)) {
-      setErrorMsg('Password Administrator yang Anda masukkan salah.');
-      return;
+      if (!isAdminPasswordValid(matchedAccount, cleanPass)) {
+        setErrorMsg('Password Administrator yang Anda masukkan salah.');
+        return;
+      }
     }
 
     setErrorMsg('');
@@ -341,7 +367,11 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
       // Ignore
     }
 
-    onAdminLoginSuccess(String(matchedAccount.adminId).trim().toUpperCase());
+    onAdminLoginSuccess(
+      String(serverAdminId || matchedAccount?.adminId || cleanUpper)
+        .trim()
+        .toUpperCase()
+    );
   };
 
   return (
@@ -2401,7 +2431,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     setParticipants((prev) =>
       prev.map((r) =>
         visibleSelectedIds.has(r.id)
-          ? { ...r, status: 'Active', metaUpdatedAt: nowTs }
+          ? {
+              ...r,
+              status: 'Active',
+              metaUpdatedAt: Math.max((r.metaUpdatedAt || 0) + 1, nowTs),
+            }
           : r
       )
     );
@@ -2423,7 +2457,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     setParticipants((prev) =>
       prev.map((r) =>
         visibleSelectedIds.has(r.id)
-          ? { ...r, status: 'Non Active', metaUpdatedAt: nowTs }
+          ? {
+              ...r,
+              status: 'Non Active',
+              metaUpdatedAt: Math.max((r.metaUpdatedAt || 0) + 1, nowTs),
+            }
           : r
       )
     );
@@ -2898,10 +2936,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const visiblePackagesForKelas = useMemo(() => {
     if (statusTesKelas === 'Semua Kelas') return displayPackages;
-    const filtered = displayPackages.filter(
-      (p) => getPkgClass(p) === statusTesKelas
-    );
-    return filtered.length > 0 ? filtered : displayPackages;
+    return displayPackages.filter((p) => getPkgClass(p) === statusTesKelas);
   }, [displayPackages, statusTesKelas]);
 
   const fallbackEmptyPackage: ExamPackage = useMemo(
@@ -2920,9 +2955,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   const selectedPackage: ExamPackage =
     visiblePackagesForKelas.find((p) => p.id === selectedPkgId) ||
-    displayPackages.find((p) => p.id === selectedPkgId) ||
     visiblePackagesForKelas[0] ||
-    displayPackages[0] ||
     fallbackEmptyPackage;
 
   const [lastUploadedWordFile, setLastUploadedWordFile] = useState<string>('');
@@ -3721,13 +3754,18 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         return;
       }
 
+      const addedSlots = ensureBankSoalForSchedules(importedItems);
       onUpdateSchedules([...schedules, ...importedItems]);
       const dupText =
         skippedDuplicates > 0
           ? ` (${skippedDuplicates} duplikat dilewati)`
           : '';
+      const slotText =
+        addedSlots > 0
+          ? ` ${addedSlots} slot Bank Soal baru otomatis dibuat pada menu Status Tes.`
+          : '';
       showNotice(
-        `Berhasil mengunggah ${importedItems.length} jadwal ujian dari "${file.name}"${dupText}. Klik "Aktifkan Mapel" untuk menampilkan token di Proktor & Siswa.`
+        `Berhasil mengunggah ${importedItems.length} jadwal ujian dari "${file.name}"${dupText}.${slotText} Klik "Aktifkan Mapel" untuk menampilkan token di Proktor & Siswa.`
       );
     } catch (err) {
       console.error('Upload jadwal Excel error:', err);
@@ -3737,6 +3775,149 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     } finally {
       e.target.value = '';
     }
+  };
+
+  const ensureBankSoalForSchedules = (newItems: AdminScheduleItem[]): number => {
+    if (!Array.isArray(newItems) || newItems.length === 0) return 0;
+
+    const currentMapelList: any[] = Array.isArray(appConfig.mapelList)
+      ? [...appConfig.mapelList]
+      : [...defaultMapelList];
+    const usedCodes = new Set<string>(
+      [
+        ...currentMapelList.map((m) => String(m?.kode || '').trim().toUpperCase()),
+        ...packages.map((p) => String(p?.code || '').trim().toUpperCase()),
+      ].filter(Boolean)
+    );
+
+    const existingSlotKeys = new Set<string>();
+    const addSlotKey = (name?: string, targetClass?: string) => {
+      const cleanName = String(name || '')
+        .replace(/^Simulasi TKA\s*-\s*/i, '')
+        .trim()
+        .toLowerCase();
+      const cleanCls = String(targetClass || '').trim().toUpperCase();
+      if (cleanName && cleanCls) {
+        existingSlotKeys.add(`${cleanCls}::${cleanName}`);
+      }
+    };
+
+    displayPackages.forEach((p) => addSlotKey(p.title, getPkgClass(p)));
+    packages.forEach((p) => addSlotKey(p.title, getPkgClass(p)));
+    currentMapelList.forEach((m) =>
+      addSlotKey(m?.nama, getTargetClassFromMapel(m || {}))
+    );
+
+    const addedMapels: any[] = [];
+    const addedPackages: ExamPackage[] = [];
+    const reactivatedNames = new Set<string>();
+    const nowTs = Date.now();
+
+    newItems.forEach((item, idx) => {
+      const mapelName = String(item.mapel || '').trim();
+      if (!mapelName) return;
+      const cleanMapelLower = mapelName
+        .replace(/^Simulasi TKA\s*-\s*/i, '')
+        .trim()
+        .toLowerCase();
+      const targetClass = getTargetClassFromMapel({
+        tingkat: item.kelas,
+        nama: mapelName,
+      });
+      const slotKey = `${targetClass.toUpperCase()}::${cleanMapelLower}`;
+      reactivatedNames.add(cleanMapelLower);
+      if (existingSlotKeys.has(slotKey)) return;
+      existingSlotKeys.add(slotKey);
+
+      const durMatch = String(item.durasi || '').match(/\d+/);
+      const durationMinutes = durMatch
+        ? Math.max(10, parseInt(durMatch[0], 10) || 90)
+        : 90;
+
+      const kelasSlug = targetClass
+        .replace(/^Kelas\s+/i, '')
+        .replace(/[^a-zA-Z0-9]+/g, '')
+        .toUpperCase()
+        .slice(0, 6);
+      const mapelSlug = mapelName
+        .replace(/[^a-zA-Z0-9]+/g, '')
+        .toUpperCase()
+        .slice(0, 6);
+      let codeCandidate = `${mapelSlug || 'MPL'}-${kelasSlug || 'X'}`;
+      let suffix = 2;
+      while (usedCodes.has(codeCandidate)) {
+        codeCandidate = `${mapelSlug || 'MPL'}-${kelasSlug || 'X'}${suffix}`;
+        suffix += 1;
+      }
+      usedCodes.add(codeCandidate);
+
+      const kategori = targetClass.includes('IPS')
+        ? 'Peminatan IPS'
+        : targetClass.includes('IPA')
+        ? 'Peminatan IPA'
+        : 'Wajib Umum';
+      const pkgId =
+        'mapel_pkg_' + codeCandidate.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+      addedMapels.push({
+        id: `mp_sch_${nowTs}_${idx}`,
+        kode: codeCandidate,
+        nama: mapelName,
+        kategori,
+        tingkat: targetClass,
+        alokasiMenit: durationMinutes,
+        jumlahSoal: 0,
+      });
+
+      addedPackages.push({
+        id: pkgId,
+        code: codeCandidate,
+        title: mapelName,
+        level: 'SMA / MA / SMK / Sederajat',
+        subtest: kategori,
+        durationMinutes,
+        targetClass,
+        questions: [],
+      });
+    });
+
+    if (addedMapels.length === 0) return 0;
+
+    onUpdatePackages((prevPackages) => {
+      const base = Array.isArray(prevPackages) ? prevPackages : packages;
+      const existingIds = new Set(base.map((p) => p.id));
+      const toAppend = addedPackages.filter((p) => !existingIds.has(p.id));
+      return [...base, ...toAppend];
+    });
+
+    const nextDeletedNames = (
+      Array.isArray(appConfig.deletedMapelNames)
+        ? appConfig.deletedMapelNames
+        : []
+    ).filter(
+      (n) => !reactivatedNames.has(String(n || '').trim().toLowerCase())
+    );
+    const addedCodesSet = new Set(
+      addedMapels.map((m) => String(m.kode || '').trim().toUpperCase())
+    );
+    const nextDeletedCodes = (
+      Array.isArray(appConfig.deletedMapelCodes)
+        ? appConfig.deletedMapelCodes
+        : []
+    ).filter((c) => !addedCodesSet.has(String(c || '').trim().toUpperCase()));
+
+    persistAdminConfig(
+      {
+        ...appConfig,
+        mapelList: [...currentMapelList, ...addedMapels],
+        customMapelConfigured: true,
+        deletedMapelNames: nextDeletedNames,
+        deletedMapelCodes: nextDeletedCodes,
+      },
+      { syncCloud: true }
+    );
+
+    return addedMapels.length;
   };
 
   const handleAddSchedule = (e: React.FormEvent) => {
@@ -3753,11 +3934,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       isActive: false,
       updatedAt: nowTs,
     };
+    const addedSlots = ensureBankSoalForSchedules([item]);
     onUpdateSchedules([...schedules, item]);
     setNewHariTanggal('');
     setNewJadwalMapel('');
+    const slotText =
+      addedSlots > 0
+        ? ' Slot Bank Soal otomatis disiapkan di menu Status Tes.'
+        : '';
     showNotice(
-      `Jadwal ${item.mapel} (Kelas ${item.kelas}) ditambahkan. Klik "Aktifkan Mapel" agar token keluar di Proktor & Siswa.`
+      `Jadwal ${item.mapel} (Kelas ${item.kelas}) ditambahkan.${slotText} Klik "Aktifkan Mapel" agar token keluar di Proktor & Siswa.`
     );
   };
 

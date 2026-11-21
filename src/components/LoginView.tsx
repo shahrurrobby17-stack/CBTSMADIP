@@ -9,10 +9,12 @@ import {
   ProctorParticipantRow,
   doesKelasMatch,
   isParticipantLockedByViolation,
+  isParticipantStatusActive,
   normalizeKelasCode,
   shortenStudentUsername,
 } from './ProctorDashboardView';
 import { AdminScheduleItem, ExamResultSummary } from '../types/cbt';
+import { authenticateWithServer } from '../utils/vercelStorage';
 
 export interface ViolationAlertInfo {
   username: string;
@@ -26,8 +28,6 @@ export interface ViolationAlertInfo {
 interface LoginViewProps {
   onLoginSuccess: (username: string) => void;
   onOpenProctorModal?: () => void;
-  onQuickLoginAdmin?: () => void;
-  onQuickLoginProctor?: () => void;
   participants?: ProctorParticipantRow[];
   activeSchedules?: AdminScheduleItem[];
   resultsHistory?: ExamResultSummary[];
@@ -131,75 +131,117 @@ export const LoginView: React.FC<LoginViewProps> = ({
       );
 
     let row = findMatched(participants);
-    if (
-      onRefreshParticipants &&
-      (!row ||
-        !isStudentPasswordValid(row, cleanPass) ||
-        isParticipantLockedByViolation(row) ||
-        row.status !== 'Active' ||
-        row.loginState === 'Selesai')
-    ) {
-      setIsCheckingLogin(true);
-      try {
-        const freshList = await onRefreshParticipants();
-        if (Array.isArray(freshList) && freshList.length > 0) {
-          row = findMatched(freshList) || row;
+    setIsCheckingLogin(true);
+    let serverAuthPassed = false;
+    let serverAuthRowUsername = '';
+    try {
+      const authRes = await authenticateWithServer({
+        role: 'student',
+        username: cleanUser,
+        password: cleanPass,
+      });
+
+      if (authRes.ok) {
+        serverAuthPassed = true;
+        serverAuthRowUsername = String(
+          authRes.account?.username || row?.username || cleanUser
+        )
+          .trim()
+          .toUpperCase();
+        // Refresh local participant list so confirmation page has fresh server data
+        if (onRefreshParticipants) {
+          try {
+            const freshList = await onRefreshParticipants();
+            if (Array.isArray(freshList) && freshList.length > 0) {
+              row = findMatched(freshList) || row;
+            }
+          } catch {
+            // ignore secondary refresh error
+          }
         }
-      } catch {
-        // fallback to local row
-      } finally {
-        setIsCheckingLogin(false);
+      } else if (!authRes.serverEmpty && !authRes.networkError) {
+        // Server authoritatively rejected login (e.g. Non Active in Kelompok Tes, locked, wrong password, Selesai)
+        if (onRefreshParticipants) {
+          onRefreshParticipants().catch(() => {});
+        }
+        setErrorMsg(
+          authRes.error ||
+            'Akses Login Ditolak. Periksa kembali username, password, dan status peserta Anda.'
+        );
+        return;
+      } else if (onRefreshParticipants) {
+        // Server empty/unreachable: still unconditionally refresh before falling back to local check
+        try {
+          const freshList = await onRefreshParticipants();
+          if (Array.isArray(freshList) && freshList.length > 0) {
+            row = findMatched(freshList) || row;
+          }
+        } catch {
+          // fallback to local row
+        }
       }
+    } finally {
+      setIsCheckingLogin(false);
     }
 
-    if (!row) {
-      setErrorMsg('Username anda tidak terdaftar');
-      return;
-    }
-    if (!isStudentPasswordValid(row, cleanPass)) {
-      setErrorMsg('Password yang Anda masukkan salah.');
-      return;
-    }
-    if (isParticipantLockedByViolation(row)) {
-      setErrorMsg(
-        'Akses Login Ditolak: Akun Anda terkunci karena pelanggaran keluar dari sistem CBT. Anda wajib meminta Reset Login kepada Proktor atau Administrator.'
-      );
-      return;
-    }
-    if (row.status !== 'Active') {
+    if (!serverAuthPassed) {
+      if (!row) {
+        setErrorMsg('Username anda tidak terdaftar');
+        return;
+      }
+      if (!isStudentPasswordValid(row, cleanPass)) {
+        setErrorMsg('Password yang Anda masukkan salah.');
+        return;
+      }
+      if (isParticipantLockedByViolation(row)) {
+        setErrorMsg(
+          'Akses Login Ditolak: Akun Anda terkunci karena pelanggaran keluar dari sistem CBT. Anda wajib meminta Reset Login kepada Proktor atau Administrator.'
+        );
+        return;
+      }
+      if (!isParticipantStatusActive(row.status)) {
+        setErrorMsg(
+          'Akses Login Ditolak: Status peserta Anda masih Non Active pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator untuk mengaktifkan status peserta.'
+        );
+        return;
+      }
+      if (row.loginState === 'Selesai') {
+        const rowUsername = row.username.trim().toUpperCase();
+        const rowKelas = normalizeKelasCode(row.kelas);
+        const relevantSchedules = activeSchedules.filter((s) =>
+          doesKelasMatch(rowKelas, s.kelas)
+        );
+        const completedTitles = new Set(
+          resultsHistory
+            .filter(
+              (r) =>
+                r?.participant?.username?.trim().toUpperCase() === rowUsername
+            )
+            .map((r) => normalizeMapelKey(r.packageTitle))
+            .filter(Boolean)
+        );
+        const hasUncompletedActiveSubject = relevantSchedules.some((s) => {
+          const mapelLower = normalizeMapelKey(s.mapel);
+          return mapelLower && !completedTitles.has(mapelLower);
+        });
+        if (!hasUncompletedActiveSubject) {
+          setErrorMsg(
+            relevantSchedules.length === 0
+              ? `Akses Login Ditolak: Anda sudah menyelesaikan ujian dan belum ada jadwal mata pelajaran aktif lainnya untuk Kelas ${rowKelas || 'Anda'} saat ini.`
+              : 'Akses Login Ditolak: Anda sudah menyelesaikan ujian pada mata pelajaran aktif saat ini. Hubungi Proktor atau Administrator apabila membutuhkan Reset Login.'
+          );
+          return;
+        }
+      }
+    } else if (row && !isParticipantStatusActive(row.status)) {
       setErrorMsg(
         'Akses Login Ditolak: Status peserta Anda masih Non Active pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator untuk mengaktifkan status peserta.'
       );
       return;
     }
-    if (row.loginState === 'Selesai') {
-      const rowUsername = row.username.trim().toUpperCase();
-      const rowKelas = normalizeKelasCode(row.kelas);
-      const relevantSchedules = activeSchedules.filter((s) =>
-        doesKelasMatch(rowKelas, s.kelas)
-      );
-      const completedTitles = new Set(
-        resultsHistory
-          .filter(
-            (r) =>
-              r?.participant?.username?.trim().toUpperCase() === rowUsername
-          )
-          .map((r) => normalizeMapelKey(r.packageTitle))
-          .filter(Boolean)
-      );
-      const hasUncompletedActiveSubject = relevantSchedules.some((s) => {
-        const mapelLower = normalizeMapelKey(s.mapel);
-        return mapelLower && !completedTitles.has(mapelLower);
-      });
-      if (!hasUncompletedActiveSubject) {
-        setErrorMsg(
-          relevantSchedules.length === 0
-            ? `Akses Login Ditolak: Anda sudah menyelesaikan ujian dan belum ada jadwal mata pelajaran aktif lainnya untuk Kelas ${rowKelas || 'Anda'} saat ini.`
-            : 'Akses Login Ditolak: Anda sudah menyelesaikan ujian pada mata pelajaran aktif saat ini. Hubungi Proktor atau Administrator apabila membutuhkan Reset Login.'
-        );
-        return;
-      }
-    }
+
+    const finalLoginUsername =
+      serverAuthRowUsername || row?.username?.trim().toUpperCase() || cleanUser;
 
     // Opsi B: Seketika masuk mode Fullscreen saat tombol Login diklik
     try {
@@ -222,7 +264,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
 
     setErrorMsg('');
-    onLoginSuccess(row.username.trim().toUpperCase());
+    onLoginSuccess(finalLoginUsername);
   };
 
   return (

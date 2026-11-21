@@ -553,7 +553,8 @@ function mergeDuplicateParticipantRows(
 export function mergeParticipantLists(
   remoteRows: ProctorParticipantRow[],
   localRows: ProctorParticipantRow[],
-  deletedIdsInput?: Iterable<string>
+  deletedIdsInput?: Iterable<string>,
+  options?: { serverAuthoritativeStatus?: boolean }
 ): ProctorParticipantRow[] {
   const deletedSet = new Set<string>(
     deletedIdsInput
@@ -606,8 +607,15 @@ export function mergeParticipantLists(
         if (lnk) matchedLocalNameKelas.add(lnk);
 
         const reconciled = reconcileParticipantRow(localMatch, rRow);
+        const authoritativeStatus: 'Active' | 'Non Active' =
+          options?.serverAuthoritativeStatus
+            ? isParticipantStatusActive(rRow.status)
+              ? 'Active'
+              : 'Non Active'
+            : reconciled.status;
         return {
           ...reconciled,
+          status: authoritativeStatus,
           selected: Boolean(localMatch.selected),
         };
       }
@@ -1145,7 +1153,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     setParticipants((prev) =>
       prev.map((r) =>
         visibleSelectedIds.has(r.id)
-          ? { ...r, status: 'Active', metaUpdatedAt: nowTs }
+          ? {
+              ...r,
+              status: 'Active',
+              metaUpdatedAt: Math.max((r.metaUpdatedAt || 0) + 1, nowTs),
+            }
           : r
       )
     );
@@ -1168,7 +1180,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
     setParticipants((prev) =>
       prev.map((r) =>
         visibleSelectedIds.has(r.id)
-          ? { ...r, status: 'Non Active', metaUpdatedAt: nowTs }
+          ? {
+              ...r,
+              status: 'Non Active',
+              metaUpdatedAt: Math.max((r.metaUpdatedAt || 0) + 1, nowTs),
+            }
           : r
       )
     );
@@ -1421,10 +1437,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const visiblePackagesForKelas = useMemo(() => {
     if (statusTesKelas === 'Semua Kelas') return displayPackages;
-    const filtered = displayPackages.filter(
-      (p) => getPkgClass(p) === statusTesKelas
-    );
-    return filtered.length > 0 ? filtered : displayPackages;
+    return displayPackages.filter((p) => getPkgClass(p) === statusTesKelas);
   }, [displayPackages, statusTesKelas]);
 
   const fallbackEmptyPackage: ExamPackage = useMemo(
@@ -1443,9 +1456,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
 
   const selectedPackage: ExamPackage =
     visiblePackagesForKelas.find((p) => p.id === selectedPkgId) ||
-    displayPackages.find((p) => p.id === selectedPkgId) ||
     visiblePackagesForKelas[0] ||
-    displayPackages[0] ||
     fallbackEmptyPackage;
 
   const [lastUploadedWordFile, setLastUploadedWordFile] = useState<string>('');
