@@ -2135,11 +2135,9 @@ export default function App() {
         )?.kelas
     ) || 'X';
 
-  const exactClassSchedules = activeSchedules.filter((s) =>
+  const currentStudentActiveSchedules = activeSchedules.filter((s) =>
     doesKelasMatch(currentStudentKelas, s.kelas)
   );
-  const currentStudentActiveSchedules =
-    exactClassSchedules.length > 0 ? exactClassSchedules : activeSchedules;
 
   const matchedStudentSchedule =
     (participant.activeSubjectTitle
@@ -2655,16 +2653,11 @@ export default function App() {
 
     const resolvedUsername = matchedRow.username.trim().toUpperCase();
     const resolvedFullName = matchedRow.namaPeserta || cleanUser;
-    const resolvedKelas =
-      normalizeKelasCode(matchedRow.kelas) ||
-      (activeSchedules[0] ? normalizeKelasCode(activeSchedules[0].kelas) : 'X') ||
-      'X';
+    const resolvedKelas = normalizeKelasCode(matchedRow.kelas) || 'X';
 
-    const exactStudentSchedules = activeSchedules.filter((s) =>
+    const studentClassSchedules = activeSchedules.filter((s) =>
       doesKelasMatch(resolvedKelas, s.kelas)
     );
-    const studentClassSchedules =
-      exactStudentSchedules.length > 0 ? exactStudentSchedules : activeSchedules;
 
     const completedSubjects = new Set(
       resultsHistoryRef.current
@@ -2684,10 +2677,10 @@ export default function App() {
 
     if (
       matchedRow.loginState === 'Selesai' &&
-      studentClassSchedules.length > 0 &&
-      studentClassSchedules.every((s) =>
-        completedSubjects.has(cleanMapelTitle(s.mapel).toLowerCase())
-      )
+      (studentClassSchedules.length === 0 ||
+        studentClassSchedules.every((s) =>
+          completedSubjects.has(cleanMapelTitle(s.mapel).toLowerCase())
+        ))
     ) {
       return;
     }
@@ -2740,8 +2733,8 @@ export default function App() {
       username: resolvedUsername,
       fullName: resolvedFullName,
       kelas: resolvedKelas,
-      activeSubjectTitle: firstUncompletedSchedule?.mapel,
-      selectedPackageId: scheduledPkg?.id || packages[0]?.id || '',
+      activeSubjectTitle: firstUncompletedSchedule?.mapel || '',
+      selectedPackageId: scheduledPkg?.id || '',
     }));
     setStage('confirm_participant');
   };

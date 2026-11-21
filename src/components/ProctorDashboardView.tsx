@@ -101,17 +101,17 @@ export function normalizeKelasCode(raw?: string): string {
     .trim()
     .toUpperCase();
   if (!s) return '';
-  if (/^XII\b/.test(s)) {
+  if (/^(XII|12)\b/.test(s)) {
     if (s.includes('IPS')) return 'XII IPS';
     if (s.includes('IPA') || s.includes('MIPA')) return 'XII IPA';
-    return s;
+    return s.replace(/^12\b/, 'XII');
   }
-  if (/^XI\b/.test(s)) {
+  if (/^(XI|11)\b/.test(s)) {
     if (s.includes('IPS')) return 'XI IPS';
     if (s.includes('IPA') || s.includes('MIPA')) return 'XI IPA';
-    return s;
+    return s.replace(/^11\b/, 'XI');
   }
-  if (/^X\b/.test(s)) {
+  if (/^(X|10)\b/.test(s)) {
     return 'X';
   }
   return s;
@@ -130,6 +130,7 @@ export function doesKelasMatch(
     .trim()
     .toUpperCase();
   if (!rawA || !rawB) return false;
+  if (rawB === 'SEMUA' || rawB === 'SEMUA KELAS') return true;
   if (rawA === rawB) return true;
   const normA = normalizeKelasCode(studentKelas);
   const normB = normalizeKelasCode(scheduleKelas);

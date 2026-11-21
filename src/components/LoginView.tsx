@@ -175,11 +175,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
     if (row.loginState === 'Selesai') {
       const rowUsername = row.username.trim().toUpperCase();
       const rowKelas = normalizeKelasCode(row.kelas);
-      const classSchedules = activeSchedules.filter((s) =>
+      const relevantSchedules = activeSchedules.filter((s) =>
         doesKelasMatch(rowKelas, s.kelas)
       );
-      const relevantSchedules =
-        classSchedules.length > 0 ? classSchedules : activeSchedules;
       const completedTitles = new Set(
         resultsHistory
           .filter(
@@ -195,7 +193,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
       });
       if (!hasUncompletedActiveSubject) {
         setErrorMsg(
-          'Akses Login Ditolak: Anda sudah menyelesaikan ujian pada mata pelajaran aktif saat ini. Hubungi Proktor atau Administrator apabila membutuhkan Reset Login.'
+          relevantSchedules.length === 0
+            ? `Akses Login Ditolak: Anda sudah menyelesaikan ujian dan belum ada jadwal mata pelajaran aktif lainnya untuk Kelas ${rowKelas || 'Anda'} saat ini.`
+            : 'Akses Login Ditolak: Anda sudah menyelesaikan ujian pada mata pelajaran aktif saat ini. Hubungi Proktor atau Administrator apabila membutuhkan Reset Login.'
         );
         return;
       }

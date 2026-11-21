@@ -184,15 +184,11 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
     [matchedParticipant]
   );
 
-  // Prefer active schedules matching the student's class; if none match specifically, fall back to all active schedules
+  // Strictly show only active schedules matching the student's class (never leak other classes/majors such as IPS to IPA)
   const studentActiveSchedules = useMemo(() => {
-    const exactClassSchedules = activeSchedules.filter((sch) =>
+    return activeSchedules.filter((sch) =>
       doesKelasMatch(studentKelas, sch.kelas)
     );
-    if (exactClassSchedules.length > 0) {
-      return exactClassSchedules;
-    }
-    return activeSchedules;
   }, [activeSchedules, studentKelas]);
 
   const completedSubjectsSet = useMemo(() => {
@@ -383,8 +379,17 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             const exactRemote = remoteActiveList.filter((s) =>
               doesKelasMatch(studentKelas, s.kelas)
             );
+            const matchingSelected = selectedSchedule
+              ? exactRemote.find((s) => s.id === selectedSchedule.id)
+              : undefined;
+            const firstUncompletedRemote = exactRemote.find(
+              (s) => !isScheduleCompleted(s)
+            );
             remoteActiveSchedule =
-              exactRemote[0] || remoteActiveList[0] || undefined;
+              matchingSelected ||
+              firstUncompletedRemote ||
+              exactRemote[0] ||
+              undefined;
           }
           if (
             remoteActiveSchedule &&
@@ -413,7 +418,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
 
     if (!remoteActiveSchedule) {
       setError(
-        'Jadwal ujian belum diaktifkan oleh Administrator. Mata pelajaran dan sesi ujian belum tersedia saat ini.'
+        `Jadwal ujian untuk Kelas ${studentKelas} belum diaktifkan oleh Administrator. Mata pelajaran dan sesi ujian untuk kelas Anda belum tersedia saat ini.`
       );
       return;
     }
@@ -448,7 +453,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
 
   const hasActiveSchedule =
     Boolean(isScheduleActive) &&
-    activeSchedules.length > 0 &&
+    studentActiveSchedules.length > 0 &&
     Boolean(selectedSchedule);
 
   const activeSubjectLabel =
@@ -576,6 +581,12 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
               />
             </div>
           </div>
+
+          {!hasActiveSchedule && (
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs font-medium text-amber-800">
+              Belum ada jadwal mata pelajaran yang aktif untuk <strong>Kelas {studentKelas}</strong> saat ini. Silakan tunggu hingga Administrator/Proktor mengaktifkan jadwal ujian kelas Anda.
+            </div>
+          )}
 
           {allActiveSchedulesCompleted && (
             <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-medium text-emerald-800">
