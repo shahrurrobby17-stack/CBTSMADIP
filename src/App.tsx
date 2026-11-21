@@ -941,7 +941,7 @@ export default function App() {
     birthDay: '18',
     birthMonth: '05',
     birthYear: '2008',
-    selectedPackageId: INITIAL_EXAM_PACKAGES[0].id,
+    selectedPackageId: '',
     enteredToken: DEFAULT_EXAM_TOKEN,
   });
 
@@ -2156,19 +2156,8 @@ export default function App() {
     : undefined;
 
   const selectedPackage: ExamPackage =
-    (pkgBySchedule && getRealQuestionsCount(pkgBySchedule) > 0
-      ? pkgBySchedule
-      : pkgBySelectedId && getRealQuestionsCount(pkgBySelectedId) > 0
-      ? {
-          ...pkgBySelectedId,
-          title:
-            matchedStudentSchedule?.mapel?.trim() || pkgBySelectedId.title,
-        }
-      : pkgBySchedule ||
-        pkgBySelectedId ||
-        packages.find((p) => getRealQuestionsCount(p) > 0)) ||
-    packages[0] ||
-    INITIAL_EXAM_PACKAGES[0] ||
+    pkgBySchedule ||
+    pkgBySelectedId ||
     FALLBACK_EMPTY_PACKAGE;
 
   const [isFullscreenActive, setIsFullscreenActive] = useState<boolean>(false);
@@ -2750,6 +2739,9 @@ export default function App() {
   };
 
   const handleStartExam = () => {
+    if (getRealQuestionsCount(selectedPackage) === 0) {
+      return;
+    }
     examStartedAtRef.current = Date.now();
     requestCbtFullscreen();
 

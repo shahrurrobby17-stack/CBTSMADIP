@@ -18,114 +18,88 @@ import { fetchVercelStorage } from '../utils/vercelStorage';
 export function cleanMapelTitle(raw?: string): string {
   return String(raw || '')
     .replace(/^Simulasi TKA\s*-\s*/i, '')
+    .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
 }
 
-function findMatchingPkgInPool(
-  pool: ExamPackage[],
-  sch: AdminScheduleItem,
-  targetMapelLower: string
-): ExamPackage | undefined {
-  if (pool.length === 0) return undefined;
+function getRealQuestions(pkg?: ExamPackage | null) {
+  if (!pkg || !Array.isArray(pkg.questions)) return [];
+  return pkg.questions.filter(
+    (q) => !String(q?.id || '').startsWith('q_default_')
+  );
+}
 
-  // 1. Exact title + class match
-  if (targetMapelLower) {
-    const exactTitleAndClass = pool.find(
-      (pkg) =>
-        cleanMapelTitle(pkg.title) === targetMapelLower &&
-        doesKelasMatch(getPkgClass(pkg), sch.kelas)
-    );
-    if (exactTitleAndClass) return exactTitleAndClass;
-  }
-
-  // 2. Exact title match
-  if (targetMapelLower) {
-    const exactTitle = pool.find(
-      (pkg) => cleanMapelTitle(pkg.title) === targetMapelLower
-    );
-    if (exactTitle) return exactTitle;
-  }
-
-  // 3. Partial title + class match
-  if (targetMapelLower) {
-    const partialTitleAndClass = pool.find((pkg) => {
-      const pTitle = cleanMapelTitle(pkg.title);
-      return (
-        doesKelasMatch(getPkgClass(pkg), sch.kelas) &&
-        pTitle.length > 0 &&
-        (pTitle.includes(targetMapelLower) || targetMapelLower.includes(pTitle))
-      );
-    });
-    if (partialTitleAndClass) return partialTitleAndClass;
-  }
-
-  // 4. Partial title match (any class)
-  if (targetMapelLower) {
-    const partialTitle = pool.find((pkg) => {
-      const pTitle = cleanMapelTitle(pkg.title);
-      return (
-        pTitle.length > 0 &&
-        (pTitle.includes(targetMapelLower) || targetMapelLower.includes(pTitle))
-      );
-    });
-    if (partialTitle) return partialTitle;
-  }
-
-  // 5. Class match
-  if (sch.kelas) {
-    const classMatch = pool.find((pkg) =>
-      doesKelasMatch(getPkgClass(pkg), sch.kelas)
-    );
-    if (classMatch) return classMatch;
-  }
-
-  return undefined;
+function pickBestMatchingPkg(candidates: ExamPackage[]): ExamPackage | undefined {
+  if (candidates.length === 0) return undefined;
+  return candidates.reduce((best, current) =>
+    getRealQuestions(current).length > getRealQuestions(best).length
+      ? current
+      : best
+  );
 }
 
 export function resolvePackageForSchedule(
   sch: AdminScheduleItem | undefined,
   packages: ExamPackage[]
 ): ExamPackage | undefined {
-  if (packages.length === 0) return undefined;
-
-  const pkgsWithQuestions = packages.filter(
-    (p) =>
-      Array.isArray(p?.questions) &&
-      p.questions.filter((q) => !String(q?.id || '').startsWith('q_default_'))
-        .length > 0
-  );
-
-  if (!sch) {
-    return pkgsWithQuestions[0] || packages[0];
-  }
+  if (!sch) return undefined;
 
   const targetMapelLower = cleanMapelTitle(sch.mapel);
   const parsedDuration = parseInt(String(sch.durasi || ''), 10);
-
-  // ALWAYS prioritize packages that actually have uploaded questions first
-  let matched = findMatchingPkgInPool(
-    pkgsWithQuestions,
-    sch,
-    targetMapelLower
-  );
-
-  // If no package with questions matched, search all packages
-  if (!matched) {
-    matched = findMatchingPkgInPool(packages, sch, targetMapelLower);
-  }
-
-  const basePkg = matched || pkgsWithQuestions[0] || packages[0];
   const normKelas = normalizeKelasCode(sch.kelas) || sch.kelas;
 
+  let matched: ExamPackage | undefined = undefined;
+
+  if (targetMapelLower && packages.length > 0) {
+    // 1. Strictly match exact subject title AND matching class first
+    const exactTitleAndClassMatches = packages.filter(
+      (pkg) =>
+        cleanMapelTitle(pkg.title) === targetMapelLower &&
+        doesKelasMatch(getPkgClass(pkg), sch.kelas)
+    );
+    matched = pickBestMatchingPkg(exactTitleAndClassMatches);
+
+    // 2. If none matched for the exact class, allow exact title match ONLY on class-agnostic ("Semua Kelas") packages
+    if (!matched) {
+      const exactTitleSharedClassMatches = packages.filter((pkg) => {
+        if (cleanMapelTitle(pkg.title) !== targetMapelLower) return false;
+        const rawTarget = String(pkg.targetClass || '').trim().toUpperCase();
+        return (
+          !rawTarget ||
+          rawTarget === 'SEMUA' ||
+          rawTarget === 'SEMUA KELAS'
+        );
+      });
+      matched = pickBestMatchingPkg(exactTitleSharedClassMatches);
+    }
+  }
+
+  // Never steal questions from another subject, another class, or built-in demo packages.
+  // If no Bank Soal package matches this schedule's subject + class yet, return an empty 0-question package.
+  if (!matched) {
+    return {
+      id: `empty_sch_${sch.id}`,
+      code: String(sch.id || 'MAPEL').toUpperCase(),
+      title: sch.mapel.trim() || 'Mata Pelajaran Ujian',
+      level: 'SMA / MA / SMK / Sederajat',
+      subtest: 'Wajib Umum',
+      durationMinutes:
+        !isNaN(parsedDuration) && parsedDuration > 0 ? parsedDuration : 90,
+      targetClass: normKelas ? `Kelas ${normKelas}` : 'Kelas X',
+      questions: [],
+    };
+  }
+
   return {
-    ...basePkg,
-    title: sch.mapel.trim() || basePkg.title,
-    targetClass: normKelas ? `Kelas ${normKelas}` : basePkg.targetClass,
+    ...matched,
+    title: sch.mapel.trim() || matched.title,
+    targetClass: normKelas ? `Kelas ${normKelas}` : matched.targetClass,
     durationMinutes:
       !isNaN(parsedDuration) && parsedDuration > 0
         ? parsedDuration
-        : basePkg.durationMinutes,
+        : matched.durationMinutes,
+    questions: getRealQuestions(matched),
   };
 }
 
@@ -282,29 +256,12 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
   );
   const availablePackages = nonTkaPackages.length > 0 ? nonTkaPackages : packages;
 
-  // Fallback package when no schedule is explicitly active yet (prioritize packages with questions)
-  const fallbackClassPackage = useMemo(() => {
-    const withQuestions = availablePackages.filter(
-      (pkg) => Array.isArray(pkg.questions) && pkg.questions.length > 0
-    );
-    const byClassWithQuestions = withQuestions.find((pkg) =>
-      doesKelasMatch(getPkgClass(pkg), studentKelas)
-    );
-    if (byClassWithQuestions) return byClassWithQuestions;
-    if (withQuestions.length > 0) return withQuestions[0];
-
-    const byClass = availablePackages.find((pkg) =>
-      doesKelasMatch(getPkgClass(pkg), studentKelas)
-    );
-    return byClass || availablePackages[0];
-  }, [availablePackages, studentKelas]);
-
   const activePackage = useMemo(
     () =>
       selectedSchedule
         ? resolvePackageForSchedule(selectedSchedule, availablePackages)
-        : fallbackClassPackage,
-    [selectedSchedule, availablePackages, fallbackClassPackage]
+        : undefined,
+    [selectedSchedule, availablePackages]
   );
 
   const [enteredToken, setEnteredToken] = useState('');
@@ -396,17 +353,10 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
             Array.isArray(res.data.packages) &&
             res.data.packages.length > 0
           ) {
-            const remoteMatchedPkg = resolvePackageForSchedule(
+            resolvedPkg = resolvePackageForSchedule(
               remoteActiveSchedule,
               res.data.packages
             );
-            if (
-              remoteMatchedPkg &&
-              Array.isArray(remoteMatchedPkg.questions) &&
-              remoteMatchedPkg.questions.length > 0
-            ) {
-              resolvedPkg = remoteMatchedPkg;
-            }
           }
         }
       } catch {
@@ -442,11 +392,7 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       fullName: resolvedFullName,
       kelas: studentKelas,
       activeSubjectTitle: resolvedSubjectTitle,
-      selectedPackageId:
-        resolvedPkg?.id ||
-        initialProfile.selectedPackageId ||
-        availablePackages[0]?.id ||
-        '',
+      selectedPackageId: resolvedPkg?.id || '',
       enteredToken: cleanInput,
     });
   };
@@ -629,6 +575,9 @@ export const TestConfirmationView: React.FC<TestConfirmationViewProps> = ({
     year: 'numeric',
   });
 
+  const questionCount = getRealQuestions(examPackage).length;
+  const hasQuestions = questionCount > 0;
+
   return (
     <main className="flex-1 max-w-[1050px] w-full mx-auto px-4 sm:px-8 py-10 flex items-center justify-center">
       <div className="w-full grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
@@ -663,9 +612,15 @@ export const TestConfirmationView: React.FC<TestConfirmationViewProps> = ({
 
             <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
               <span className="text-xs font-semibold text-slate-500">Status Tes</span>
-              <span className="text-sm font-semibold text-emerald-700">
-                Tes Baru (Siap Dikerjakan)
-              </span>
+              {hasQuestions ? (
+                <span className="text-sm font-semibold text-emerald-700">
+                  Tes Baru (Siap Dikerjakan)
+                </span>
+              ) : (
+                <span className="text-sm font-semibold text-amber-700">
+                  Soal Belum Diunggah
+                </span>
+              )}
             </div>
 
             <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
@@ -678,10 +633,21 @@ export const TestConfirmationView: React.FC<TestConfirmationViewProps> = ({
                 Alokasi Waktu Tes
               </span>
               <span className="text-sm font-mono font-bold text-slate-800">
-                {examPackage?.durationMinutes || 90} Menit ({Array.isArray(examPackage?.questions) ? examPackage.questions.length : 0} Butir Soal)
+                {hasQuestions
+                  ? `${examPackage?.durationMinutes || 90} Menit (${questionCount} Butir Soal)`
+                  : `${examPackage?.durationMinutes || 90} Menit (Belum ada butir soal)`}
               </span>
             </div>
           </div>
+
+          {!hasQuestions && (
+            <div className="mt-5 p-3.5 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2.5 text-xs font-medium text-amber-800">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+              <span>
+                Bank soal untuk mata pelajaran <strong>{examPackage?.title || 'ini'}</strong> belum diunggah oleh Administrator. Anda belum dapat memulai ujian hingga soal tersedia.
+              </span>
+            </div>
+          )}
 
           <div className="mt-7 flex flex-col sm:flex-row items-center gap-3">
             <button
@@ -694,7 +660,8 @@ export const TestConfirmationView: React.FC<TestConfirmationViewProps> = ({
             <button
               type="button"
               onClick={onStartExam}
-              className="w-full flex-1 py-2.5 px-6 rounded-full bg-[#0066ff] hover:bg-[#0052cc] text-white text-sm font-semibold shadow-[0_6px_16px_rgba(0,102,255,0.28)] flex items-center justify-center gap-2 transition-all cursor-pointer"
+              disabled={!hasQuestions}
+              className="w-full flex-1 py-2.5 px-6 rounded-full bg-[#0066ff] hover:bg-[#0052cc] text-white text-sm font-semibold shadow-[0_6px_16px_rgba(0,102,255,0.28)] flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Play className="w-4 h-4 fill-current" />
               <span>Mulai</span>
