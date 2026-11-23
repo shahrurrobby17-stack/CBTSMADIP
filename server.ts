@@ -51,7 +51,7 @@ async function startServer() {
   const server = http.createServer(app);
   const PORT = 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '25mb' }));
 
   // Vercel-compatible Serverless Storage API route
   app.all('/api/storage', async (req, res) => {

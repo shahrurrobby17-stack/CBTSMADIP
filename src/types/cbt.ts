@@ -8,22 +8,26 @@ export type QuestionType =
 export interface OptionItem {
   id: string; // 'A', 'B', 'C', 'D', 'E'
   text: string;
+  images?: string[];
 }
 
 export interface StatementItem {
   id: string;
   statement: string;
   correctValue: 'Benar' | 'Salah';
+  images?: string[];
 }
 
 export interface MatchingPremise {
   id: string;
   text: string;
+  images?: string[];
 }
 
 export interface MatchingResponse {
   id: string;
   text: string;
+  images?: string[];
 }
 
 export interface QuestionTableData {
@@ -40,10 +44,12 @@ export interface Question {
   category: string; // e.g., 'Literasi Membaca', 'Numerasi', 'Penalaran Sains'
   stimulusTitle?: string;
   stimulusText?: string; // HTML/paragraphs separated by \n\n
+  stimulusImages?: string[];
   stimulusSource?: string;
   stimulusTable?: QuestionTableData;
   stimulusHighlightBox?: string;
   questionText: string;
+  questionImages?: string[];
   instructionText?: string;
   // For pilihan_ganda and pilihan_ganda_kompleks
   options?: OptionItem[];
