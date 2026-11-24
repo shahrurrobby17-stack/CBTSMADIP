@@ -36,4 +36,11 @@ if (rootEl) {
       <App />
     </ErrorBoundary>
   );
+  (window as Window & { __CBT_APP_MOUNTED__?: boolean }).__CBT_APP_MOUNTED__ = true;
+  try {
+    sessionStorage.removeItem('cbt_boot_recover_once');
+    sessionStorage.removeItem('cbt_chunk_reload_once');
+  } catch {
+    // ignore
+  }
 }

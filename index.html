@@ -21,10 +21,159 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   </head>
   <body class="bg-[#eef1f6] text-slate-800 antialiased selection:bg-blue-600 selection:text-white">
-    <div id="root"></div>
+    <div id="root">
+      <div
+        id="cbt-initial-loader"
+        style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;background:#eef1f6;color:#1e293b;font-family:system-ui,-apple-system,sans-serif;text-align:center;"
+      >
+        <div
+          style="width:44px;height:44px;border-radius:9999px;border:4px solid #cbd5e1;border-top-color:#0088ff;animation:cbtBootSpin 0.85s linear infinite;margin-bottom:14px;"
+        ></div>
+        <div style="font-size:14px;font-weight:700;color:#0f172a;">
+          Memuat Aplikasi CBT...
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-top:4px;">
+          SMA Islam Diponegoro Wagir
+        </div>
+      </div>
+      <style>
+        @keyframes cbtBootSpin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      </style>
+    </div>
     <script>
       (function () {
-        // 1. Suppress incoming Web Notifications, ServiceWorker popups, and Vibrations
+        // 0. Minimal polyfills for older Android Chrome / iOS Safari mobile browsers
+        try {
+          if (typeof Promise !== 'undefined' && typeof Promise.withResolvers !== 'function') {
+            Promise.withResolvers = function () {
+              var resolve, reject;
+              var promise = new Promise(function (res, rej) {
+                resolve = res;
+                reject = rej;
+              });
+              return { promise: promise, resolve: resolve, reject: reject };
+            };
+          }
+          if (typeof Object.hasOwn !== 'function') {
+            Object.hasOwn = function (obj, prop) {
+              return Object.prototype.hasOwnProperty.call(obj, prop);
+            };
+          }
+          if (typeof URL !== 'undefined' && typeof URL.parse !== 'function') {
+            URL.parse = function (url, base) {
+              try {
+                return base !== undefined ? new URL(url, base) : new URL(url);
+              } catch (e) {
+                return null;
+              }
+            };
+          }
+          if (typeof Map !== 'undefined' && typeof Map.prototype.getOrInsertComputed !== 'function') {
+            Map.prototype.getOrInsertComputed = function (key, callbackfn) {
+              if (this.has(key)) return this.get(key);
+              var value = callbackfn(key);
+              this.set(key, value);
+              return value;
+            };
+          }
+        } catch (e) {}
+
+        // 1. Pre-mount error & stale PWA cache recovery so mobile phones never stay on a blank white screen
+        function clearPwaCachesAndReload() {
+          var done = function () {
+            try {
+              window.location.replace(
+                window.location.pathname + '?v=' + Date.now()
+              );
+            } catch (e) {
+              window.location.reload();
+            }
+          };
+          try {
+            var tasks = [];
+            if (navigator && navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+              tasks.push(
+                navigator.serviceWorker.getRegistrations().then(function (regs) {
+                  return Promise.all(
+                    regs.map(function (r) {
+                      return r.unregister().catch(function () {});
+                    })
+                  );
+                }).catch(function () {})
+              );
+            }
+            if (typeof caches !== 'undefined' && caches.keys) {
+              tasks.push(
+                caches.keys().then(function (names) {
+                  return Promise.all(
+                    names.map(function (n) {
+                      return caches.delete(n).catch(function () {});
+                    })
+                  );
+                }).catch(function () {})
+              );
+            }
+            Promise.all(tasks).then(done, done);
+          } catch (e) {
+            done();
+          }
+        }
+
+        function showBootFallback(reasonText) {
+          if (window.__CBT_APP_MOUNTED__) return;
+          // Try automatic one-shot cache cleanup + reload first for stale PWA chunks
+          try {
+            var autoKey = 'cbt_boot_recover_once';
+            var lastTry = Number(sessionStorage.getItem(autoKey) || '0');
+            if (!lastTry || Date.now() - lastTry > 60000) {
+              sessionStorage.setItem(autoKey, String(Date.now()));
+              clearPwaCachesAndReload();
+              return;
+            }
+          } catch (e) {}
+
+          var root = document.getElementById('root');
+          if (!root) return;
+          root.innerHTML =
+            '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:#eef1f6;font-family:system-ui,-apple-system,sans-serif;color:#1e293b;">' +
+              '<div style="max-width:400px;width:100%;background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:22px;box-shadow:0 12px 32px rgba(15,23,42,0.12);">' +
+                '<div style="font-size:16px;font-weight:700;color:#0f172a;margin-bottom:6px;">Gagal Memuat Tampilan CBT</div>' +
+                '<div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:12px;">Biasanya disebabkan cache lama di HP atau koneksi tidak stabil. Klik tombol di bawah untuk membersihkan cache dan memuat ulang.</div>' +
+                '<div id="cbt-boot-err-msg" style="font-size:11px;font-family:monospace;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px;color:#334155;word-break:break-word;margin-bottom:14px;"></div>' +
+                '<button id="cbt-boot-clear-btn" type="button" style="width:100%;padding:11px 16px;border:none;border-radius:10px;background:#001a6e;color:#ffffff;font-size:13px;font-weight:700;cursor:pointer;">Bersihkan Cache &amp; Muat Ulang</button>' +
+              '</div>' +
+            '</div>';
+          var msgEl = document.getElementById('cbt-boot-err-msg');
+          if (msgEl) {
+            msgEl.textContent = String(reasonText || 'Skrip aplikasi gagal dimuat.');
+          }
+          var btn = document.getElementById('cbt-boot-clear-btn');
+          if (btn) {
+            btn.addEventListener('click', clearPwaCachesAndReload);
+          }
+        }
+
+        window.addEventListener('error', function (evt) {
+          if (window.__CBT_APP_MOUNTED__) return;
+          var msg = (evt && evt.message) || 'Terjadi kesalahan saat memuat skrip.';
+          showBootFallback(msg);
+        });
+        window.addEventListener('unhandledrejection', function (evt) {
+          if (window.__CBT_APP_MOUNTED__) return;
+          var reason = evt && evt.reason;
+          var msg = (reason && reason.message) ? reason.message : String(reason || 'Gagal memuat modul aplikasi.');
+          showBootFallback(msg);
+        });
+        window.setTimeout(function () {
+          if (!window.__CBT_APP_MOUNTED__) {
+            showBootFallback('Waktu muat habis (timeout). Periksa koneksi internet atau bersihkan cache browser HP.');
+          }
+        }, 12000);
+
+        // 2. Suppress incoming Web Notifications, ServiceWorker popups, and Vibrations
         try {
           if (typeof window !== 'undefined') {
             var SilentNotification = function () {
@@ -57,51 +206,19 @@
                     list.forEach(function (n) {
                       n.close();
                     });
-                  });
+                  }).catch(function () {});
                 }
               });
             }).catch(function () {});
           }
         } catch (e) {}
 
-        // 2. Request Screen Wake Lock so mobile stays in exam focus mode
-        function requestExamWakeLock() {
-          try {
-            if (navigator && 'wakeLock' in navigator && navigator.wakeLock) {
-              navigator.wakeLock.request('screen').catch(function () {});
-            }
-          } catch (e) {}
-        }
-
-        // 3. Enter Fullscreen on Mobile without interrupting native scroll
-        function enterMobileFullscreen() {
-          var isMobile =
-            window.innerWidth < 768 ||
-            (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
-            /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-          if (!isMobile) return;
-
-          requestExamWakeLock();
-
-          var docEl = document.documentElement;
-          if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-            if (docEl.requestFullscreen) {
-              docEl.requestFullscreen({ navigationUI: 'hide' }).catch(function () {});
-            } else if (docEl.webkitRequestFullscreen) {
-              try {
-                docEl.webkitRequestFullscreen();
-              } catch (e) {}
-            }
+        // 3. Request Screen Wake Lock safely (never force fullscreen on login/admin clicks on mobile)
+        try {
+          if (navigator && 'wakeLock' in navigator && navigator.wakeLock) {
+            navigator.wakeLock.request('screen').catch(function () {});
           }
-        }
-
-        enterMobileFullscreen();
-        window.addEventListener('DOMContentLoaded', enterMobileFullscreen, { passive: true });
-        window.addEventListener('load', enterMobileFullscreen, { passive: true });
-        window.addEventListener('pageshow', enterMobileFullscreen, { passive: true });
-        ['pointerdown', 'click'].forEach(function (evt) {
-          document.addEventListener(evt, enterMobileFullscreen, { capture: true, passive: true });
-        });
+        } catch (e) {}
       })();
     </script>
     <script type="module" src="/src/main.tsx"></script>

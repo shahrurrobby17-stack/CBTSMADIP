@@ -1,5 +1,4 @@
 import * as XLSX from 'xlsx';
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
   Question,
   QuestionType,
@@ -10,18 +9,26 @@ import {
   QuestionTableData,
 } from '../types/cbt';
 
+type PdfJsModule = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
+let cachedPdfJsModule: PdfJsModule | null = null;
 let pdfWorkerConfigured = false;
-async function ensurePdfWorkerConfigured(): Promise<void> {
-  if (pdfWorkerConfigured || typeof window === 'undefined') return;
-  try {
-    const workerMod = await import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url');
-    if (workerMod?.default) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = workerMod.default;
-      pdfWorkerConfigured = true;
-    }
-  } catch {
-    // Non-Vite test environment
+
+async function loadPdfJs(): Promise<PdfJsModule> {
+  if (!cachedPdfJsModule) {
+    cachedPdfJsModule = await import('pdfjs-dist/legacy/build/pdf.mjs');
   }
+  if (!pdfWorkerConfigured && typeof window !== 'undefined') {
+    try {
+      const workerMod = await import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url');
+      if (workerMod?.default) {
+        cachedPdfJsModule.GlobalWorkerOptions.workerSrc = workerMod.default;
+        pdfWorkerConfigured = true;
+      }
+    } catch {
+      // Non-Vite test environment
+    }
+  }
+  return cachedPdfJsModule;
 }
 
 const SUPERSCRIPT_CHAR_MAP: Record<string, string> = {
@@ -4518,7 +4525,7 @@ async function extractPdfImageObjectToDataUrl(
 export async function parsePdfDocumentBlocks(
   bytes: Uint8Array
 ): Promise<DocumentBlock[]> {
-  await ensurePdfWorkerConfigured();
+  const pdfjsLib = await loadPdfJs();
 
   const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(bytes),

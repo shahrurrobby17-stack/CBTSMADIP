@@ -341,31 +341,6 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
 
     setErrorMsg('');
 
-    // Hanya aktifkan mode fullscreen otomatis di perangkat mobile, jangan di laptop agar header/bar aplikasi tetap tampil
-    try {
-      const isMobileDevice =
-        window.innerWidth < 768 ||
-        Boolean(window.matchMedia?.('(pointer: coarse)').matches) ||
-        /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-      if (isMobileDevice) {
-        const doc = document as Document & {
-          webkitFullscreenElement?: Element | null;
-        };
-        const docEl = document.documentElement as HTMLElement & {
-          webkitRequestFullscreen?: (options?: FullscreenOptions) => Promise<void>;
-        };
-        if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
-          if (docEl.requestFullscreen) {
-            docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
-          } else if (docEl.webkitRequestFullscreen) {
-            docEl.webkitRequestFullscreen();
-          }
-        }
-      }
-    } catch {
-      // Ignore
-    }
-
     onAdminLoginSuccess(
       String(serverAdminId || matchedAccount?.adminId || cleanUpper)
         .trim()
@@ -1039,7 +1014,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 }) => {
   // Default view is 'kelompok_tes' to match the user's attached screenshot 100%
   const [activeMenu, setActiveMenu] = useState<AdminSidebarMenuId>('kelompok_tes');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
   const [localParticipants, setLocalParticipants] = useState<
     ProctorParticipantRow[]
   >(INITIAL_ADMIN_PARTICIPANTS);
