@@ -77,6 +77,7 @@ interface ParsedParagraph {
   fullText: string;
   hasRed: boolean;
   segments: TextSegment[];
+  images?: string[];
   numId?: string;
   ilvl?: number;
   numFormat?: string;
@@ -89,6 +90,7 @@ interface ParsedTableCell {
   hasRed: boolean;
   paragraphs: ParsedParagraph[];
   nestedTables: ParsedTable[];
+  images?: string[];
 }
 
 interface ParsedTable {
@@ -98,6 +100,139 @@ interface ParsedTable {
 type DocumentBlock =
   | { kind: 'paragraph'; paragraph: ParsedParagraph }
   | { kind: 'table'; table: ParsedTable };
+
+const SAFE_DATA_IMAGE_REGEX =
+  /^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,[a-zA-Z0-9+/=\s]+$/i;
+
+function isSafeImageDataUrl(src: string | null | undefined): boolean {
+  if (!src) return false;
+  return SAFE_DATA_IMAGE_REGEX.test(src.trim());
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    let bin = '';
+    for (let j = 0; j < sub.length; j++) {
+      bin += String.fromCharCode(sub[j]);
+    }
+    parts.push(bin);
+  }
+  return btoa(parts.join(''));
+}
+
+function mimeFromMediaPath(path: string): string | null {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.bmp')) return 'image/bmp';
+  return null;
+}
+
+async function compressDataUrlIfNeeded(
+  dataUrl: string,
+  maxWidth: number = 920
+): Promise<string> {
+  const clean = dataUrl.trim();
+  if (!isSafeImageDataUrl(clean)) return '';
+  if (typeof document === 'undefined' || typeof Image === 'undefined') {
+    return clean;
+  }
+  // Keep small GIFs intact to avoid losing animation or transparency
+  if (/^data:image\/gif;base64,/i.test(clean) && clean.length < 220000) {
+    return clean;
+  }
+
+  return new Promise<string>((resolve) => {
+    let settled = false;
+    const finish = (val: string) => {
+      if (!settled) {
+        settled = true;
+        resolve(val);
+      }
+    };
+    const timer = setTimeout(() => finish(clean), 2500);
+
+    try {
+      const img = new Image();
+      img.onload = () => {
+        clearTimeout(timer);
+        try {
+          const origW = img.naturalWidth || img.width;
+          const origH = img.naturalHeight || img.height;
+          if (!origW || !origH) {
+            finish(clean);
+            return;
+          }
+          const scale = origW > maxWidth ? maxWidth / origW : 1;
+          const targetW = Math.max(1, Math.round(origW * scale));
+          const targetH = Math.max(1, Math.round(origH * scale));
+
+          if (scale === 1 && clean.length < 75000) {
+            finish(clean);
+            return;
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            finish(clean);
+            return;
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, targetW, targetH);
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+
+          const isPng = /^data:image\/png;base64,/i.test(clean);
+          const jpegOut = canvas.toDataURL('image/jpeg', 0.82);
+          if (isPng && scale === 1) {
+            const pngOut = canvas.toDataURL('image/png');
+            finish(
+              pngOut.length <= Math.min(clean.length, jpegOut.length * 1.25)
+                ? pngOut
+                : jpegOut
+            );
+            return;
+          }
+          finish(jpegOut.length < clean.length ? jpegOut : clean);
+        } catch {
+          finish(clean);
+        }
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        finish(clean);
+      };
+      img.src = clean;
+    } catch {
+      clearTimeout(timer);
+      finish(clean);
+    }
+  });
+}
+
+function mergeUniqueImages(
+  ...lists: (string[] | undefined)[]
+): string[] | undefined {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const list of lists) {
+    if (!list) continue;
+    for (const img of list) {
+      if (img && !seen.has(img)) {
+        seen.add(img);
+        out.push(img);
+      }
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
 
 /**
  * Checks whether a Word color string (hex, named color, or rgb()) represents red.
@@ -198,13 +333,17 @@ async function inflateRaw(compressed: Uint8Array): Promise<Uint8Array> {
 }
 
 /**
- * Extracts XML files from a ZIP archive (.docx) in browser memory.
+ * Extracts XML text files and embedded media binaries from a ZIP archive (.docx) in browser memory.
  */
-async function extractZipFiles(buffer: ArrayBuffer): Promise<Record<string, string>> {
+async function extractZipFiles(buffer: ArrayBuffer): Promise<{
+  textFiles: Record<string, string>;
+  binaryFiles: Record<string, Uint8Array>;
+}> {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
   const decoder = new TextDecoder('utf-8');
-  const extracted: Record<string, string> = {};
+  const textFiles: Record<string, string> = {};
+  const binaryFiles: Record<string, Uint8Array> = {};
 
   let eocdOffset = -1;
   const minEocdSearch = Math.max(0, bytes.length - 65557);
@@ -234,29 +373,105 @@ async function extractZipFiles(buffer: ArrayBuffer): Promise<Record<string, stri
       const fileName = decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + fileNameLen));
       ptr += 46 + fileNameLen + extraLen + commentLen;
 
-      if (
+      const isWantedText =
         fileName === 'word/document.xml' ||
         fileName === 'word/numbering.xml' ||
-        fileName === 'word/styles.xml'
-      ) {
+        fileName === 'word/styles.xml' ||
+        fileName === 'word/_rels/document.xml.rels';
+      const isWantedMedia =
+        fileName.toLowerCase().startsWith('word/media/') &&
+        mimeFromMediaPath(fileName) !== null;
+
+      if (isWantedText || isWantedMedia) {
         if (localHeaderOffset + 30 <= bytes.length) {
           const localNameLen = view.getUint16(localHeaderOffset + 26, true);
           const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
           const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
           const compressedData = bytes.subarray(dataStart, dataStart + compressedSize);
 
+          let rawBytes: Uint8Array | null = null;
           if (compressionMethod === 0) {
-            extracted[fileName] = decoder.decode(compressedData);
+            rawBytes = compressedData;
           } else if (compressionMethod === 8) {
-            const decompressed = await inflateRaw(compressedData);
-            extracted[fileName] = decoder.decode(decompressed);
+            rawBytes = await inflateRaw(compressedData);
+          }
+
+          if (rawBytes) {
+            if (isWantedText) {
+              textFiles[fileName] = decoder.decode(rawBytes);
+            } else if (isWantedMedia) {
+              binaryFiles[fileName] = rawBytes;
+            }
           }
         }
       }
     }
   }
 
-  return extracted;
+  return { textFiles, binaryFiles };
+}
+
+/**
+ * Resolves word/_rels/document.xml.rels relationships to compressed base64 data URLs.
+ */
+async function buildDocxRelImageMap(
+  relsXml: string | undefined,
+  binaryFiles: Record<string, Uint8Array>
+): Promise<Record<string, string>> {
+  const relImageMap: Record<string, string> = {};
+  if (!relsXml || Object.keys(binaryFiles).length === 0) return relImageMap;
+
+  const lowerLookup: Record<string, { path: string; bytes: Uint8Array }> = {};
+  Object.entries(binaryFiles).forEach(([path, data]) => {
+    lowerLookup[path.toLowerCase()] = { path, bytes: data };
+  });
+
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(relsXml, 'application/xml');
+    const relEls = doc.getElementsByTagName('*');
+    const pending: { id: string; mediaPath: string; bytes: Uint8Array; mime: string }[] = [];
+
+    for (let i = 0; i < relEls.length; i++) {
+      const el = relEls[i];
+      const local = el.localName || el.tagName.replace(/^.*:/, '');
+      if (local !== 'Relationship') continue;
+
+      const id = el.getAttribute('Id') || '';
+      const target = (el.getAttribute('Target') || '').replace(/\\/g, '/').trim();
+      if (!id || !target || /^https?:\/\//i.test(target)) continue;
+
+      let resolved = target.replace(/^\/+/, '');
+      if (resolved.startsWith('../')) {
+        resolved = resolved.replace(/^\.\.\//, '');
+      } else if (!resolved.toLowerCase().startsWith('word/')) {
+        resolved = `word/${resolved}`;
+      }
+
+      const found = lowerLookup[resolved.toLowerCase()];
+      if (!found) continue;
+      const mime = mimeFromMediaPath(found.path);
+      if (!mime) continue;
+
+      pending.push({ id, mediaPath: found.path, bytes: found.bytes, mime });
+    }
+
+    const encodedCache: Record<string, string> = {};
+    for (const item of pending) {
+      const cacheKey = item.mediaPath.toLowerCase();
+      if (!encodedCache[cacheKey]) {
+        const rawDataUrl = `data:${item.mime};base64,${uint8ArrayToBase64(item.bytes)}`;
+        encodedCache[cacheKey] = await compressDataUrlIfNeeded(rawDataUrl);
+      }
+      if (encodedCache[cacheKey]) {
+        relImageMap[item.id] = encodedCache[cacheKey];
+      }
+    }
+  } catch {
+    // Ignore malformed rels XML
+  }
+
+  return relImageMap;
 }
 
 /**
@@ -294,15 +509,17 @@ interface DocxStyleAndNumMeta {
   numFormatMap: Record<string, string>; // `${numId}:${ilvl}` -> 'decimal' | 'upperLetter' | 'lowerLetter' | ...
   styleNumMap: Record<string, { numId: string; ilvl: number }>;
   redStyleIds: Set<string>;
+  relImageMap: Record<string, string>;
 }
 
 /**
  * Parses both word/numbering.xml and word/styles.xml so we can resolve numbering formats,
- * style-based numbering, and style-based red colors.
+ * style-based numbering, style-based red colors, and relationship image maps.
  */
 function parseDocxStyleAndNumbering(
   numberingXml?: string,
-  stylesXml?: string
+  stylesXml?: string,
+  relImageMap: Record<string, string> = {}
 ): DocxStyleAndNumMeta {
   const numFormatMap: Record<string, string> = {};
   const styleNumMap: Record<string, { numId: string; ilvl: number }> = {};
@@ -474,7 +691,7 @@ function parseDocxStyleAndNumbering(
     }
   }
 
-  return { numFormatMap, styleNumMap, redStyleIds };
+  return { numFormatMap, styleNumMap, redStyleIds, relImageMap };
 }
 
 /**
@@ -549,7 +766,34 @@ function parseSingleDocxParagraphElement(
   }
 
   const segments: TextSegment[] = [];
+  const paragraphImages: string[] = [];
   let hasEmbeddedDrawing = false;
+
+  const extractRelImageId = (el: Element): string =>
+    el.getAttribute('r:embed') ||
+    el.getAttribute('embed') ||
+    el.getAttribute('r:id') ||
+    el.getAttribute('o:relid') ||
+    el.getAttribute('id') ||
+    '';
+
+  const collectImagesFromDrawingNode = (node: Element) => {
+    const directId = extractRelImageId(node);
+    if (directId && meta.relImageMap[directId] && !paragraphImages.includes(meta.relImageMap[directId])) {
+      paragraphImages.push(meta.relImageMap[directId]);
+    }
+    const subNodes = node.getElementsByTagName('*');
+    for (let sIdx = 0; sIdx < subNodes.length; sIdx++) {
+      const sub = subNodes[sIdx];
+      const sLocal = sub.localName || sub.tagName.replace(/^.*:/, '');
+      if (sLocal === 'blip' || sLocal === 'imagedata') {
+        const rid = extractRelImageId(sub);
+        if (rid && meta.relImageMap[rid] && !paragraphImages.includes(meta.relImageMap[rid])) {
+          paragraphImages.push(meta.relImageMap[rid]);
+        }
+      }
+    }
+  };
 
   const pDescendants = pEl.getElementsByTagName('*');
   for (let rIdx = 0; rIdx < pDescendants.length; rIdx++) {
@@ -560,6 +804,7 @@ function parseSingleDocxParagraphElement(
 
     if (rLocal === 'drawing' || rLocal === 'pict' || rLocal === 'imagedata') {
       hasEmbeddedDrawing = true;
+      collectImagesFromDrawingNode(rEl);
       continue;
     }
 
@@ -619,12 +864,13 @@ function parseSingleDocxParagraphElement(
     }
   }
 
-  if (segments.length === 0 && hasEmbeddedDrawing) {
+  // Only emit text placeholder "[Gambar]" if a drawing existed but could not be extracted (e.g. EMF/WMF vector)
+  if (segments.length === 0 && hasEmbeddedDrawing && paragraphImages.length === 0) {
     segments.push({
       text: '[Gambar]',
       isRed: paragraphLevelRed,
     });
-  } else if (hasEmbeddedDrawing) {
+  } else if (hasEmbeddedDrawing && paragraphImages.length === 0) {
     const combinedTrimmed = segments.map((s) => s.text).join('').trim();
     if (/^(?:\(?[A-Ea-e][\.\)\]]|[A-Ea-e][\.\)\-:]|\d+[\.\)\-:])$/.test(combinedTrimmed)) {
       segments.push({
@@ -636,11 +882,10 @@ function parseSingleDocxParagraphElement(
 
   const fullText = segments.map((s) => s.text).join('').trim();
   const result: ParsedParagraph[] = [];
+  const numFormat =
+    numId !== undefined ? meta.numFormatMap[`${numId}:${ilvl ?? 0}`] : undefined;
 
   if (fullText) {
-    const numFormat =
-      numId !== undefined ? meta.numFormatMap[`${numId}:${ilvl ?? 0}`] : undefined;
-
     if (fullText.includes('\n')) {
       const lines: TextSegment[][] = [[]];
       for (const seg of segments) {
@@ -655,30 +900,45 @@ function parseSingleDocxParagraphElement(
           }
         }
       }
-      let firstLine = true;
-      for (const lineSegs of lines) {
+      const nonEmptyLines = lines.filter(
+        (lineSegs) => lineSegs.map((s) => s.text).join('').trim().length > 0
+      );
+      nonEmptyLines.forEach((lineSegs, lIdx) => {
         const lineText = lineSegs.map((s) => s.text).join('').trim();
-        if (!lineText) continue;
         result.push({
           fullText: lineText,
           hasRed: lineSegs.some((s) => s.isRed),
           segments: lineSegs,
-          numId: firstLine ? numId : undefined,
-          ilvl: firstLine ? ilvl : undefined,
-          numFormat: firstLine ? numFormat : undefined,
+          images:
+            lIdx === nonEmptyLines.length - 1 && paragraphImages.length > 0
+              ? [...paragraphImages]
+              : undefined,
+          numId: lIdx === 0 ? numId : undefined,
+          ilvl: lIdx === 0 ? ilvl : undefined,
+          numFormat: lIdx === 0 ? numFormat : undefined,
         });
-        firstLine = false;
-      }
+      });
     } else {
       result.push({
         fullText,
         hasRed: segments.some((s) => s.isRed),
         segments,
+        images: paragraphImages.length > 0 ? [...paragraphImages] : undefined,
         numId,
         ilvl,
         numFormat,
       });
     }
+  } else if (paragraphImages.length > 0) {
+    result.push({
+      fullText: '',
+      hasRed: paragraphLevelRed,
+      segments: [],
+      images: [...paragraphImages],
+      numId,
+      ilvl,
+      numFormat,
+    });
   }
 
   // Also extract any paragraphs inside nested <w:txbxContent> (Word Text Boxes)
@@ -747,12 +1007,14 @@ function parseDocxTableElement(
         .join('\n')
         .trim();
       const hasRed = cellHasRedBg || cellParagraphs.some((p) => p.hasRed);
+      const cellImages = mergeUniqueImages(...cellParagraphs.map((p) => p.images));
 
       rowCells.push({
         fullText,
         hasRed,
         paragraphs: cellParagraphs,
         nestedTables,
+        images: cellImages,
       });
     }
 
@@ -835,11 +1097,12 @@ function annotateAutoNumberedParagraphs(paragraphs: ParsedParagraph[]): void {
 function parseDocxDocumentBlocks(
   documentXml: string,
   numberingXml?: string,
-  stylesXml?: string
+  stylesXml?: string,
+  relImageMap: Record<string, string> = {}
 ): DocumentBlock[] {
   const parser = new DOMParser();
   const doc = parser.parseFromString(documentXml, 'application/xml');
-  const meta = parseDocxStyleAndNumbering(numberingXml, stylesXml);
+  const meta = parseDocxStyleAndNumbering(numberingXml, stylesXml, relImageMap);
   const blocks: DocumentBlock[] = [];
   const allTopParagraphs: ParsedParagraph[] = [];
 
@@ -938,6 +1201,21 @@ function parseHtmlOrTextDocBlocks(rawContent: string): DocumentBlock[] {
 
     const extractParagraphFromNode = (node: Element): ParsedParagraph | null => {
       const segments: TextSegment[] = [];
+      const images: string[] = [];
+
+      const collectImg = (imgEl: Element) => {
+        const src = (imgEl.getAttribute('src') || '').trim();
+        if (isSafeImageDataUrl(src) && !images.includes(src)) {
+          images.push(src);
+        }
+      };
+
+      if (node.tagName.toUpperCase() === 'IMG') {
+        collectImg(node);
+      } else {
+        node.querySelectorAll('img').forEach(collectImg);
+      }
+
       const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
       let textNode = walker.nextNode();
       while (textNode) {
@@ -956,11 +1234,12 @@ function parseHtmlOrTextDocBlocks(rawContent: string): DocumentBlock[] {
         .join('')
         .replace(/\s+/g, ' ')
         .trim();
-      if (!fullText) return null;
+      if (!fullText && images.length === 0) return null;
       return {
         fullText,
         hasRed: segments.some((s) => s.isRed),
         segments,
+        images: images.length > 0 ? images : undefined,
       };
     };
 
@@ -991,15 +1270,17 @@ function parseHtmlOrTextDocBlocks(rawContent: string): DocumentBlock[] {
           }
 
           const cellBgRed = isElementRed(td, td);
-          const fullText = cellParagraphs.map((p) => p.fullText).join('\n').trim();
+          const fullText = cellParagraphs.map((p) => p.fullText).filter(Boolean).join('\n').trim();
           const hasRed = cellBgRed || cellParagraphs.some((p) => p.hasRed);
+          const cellImages = mergeUniqueImages(...cellParagraphs.map((p) => p.images));
           cells.push({
             fullText,
-            hasRed: hasRed && fullText.length > 0,
+            hasRed: hasRed && (fullText.length > 0 || Boolean(cellImages?.length)),
             paragraphs: cellParagraphs.map((p) =>
               cellBgRed ? { ...p, hasRed: true } : p
             ),
             nestedTables,
+            images: cellImages,
           });
         });
         if (cells.length > 0) rows.push(cells);
@@ -1016,13 +1297,17 @@ function parseHtmlOrTextDocBlocks(rawContent: string): DocumentBlock[] {
           if (parsedTbl.rows.length > 0) {
             blocks.push({ kind: 'table', table: parsedTbl });
           }
+        } else if (tag === 'IMG') {
+          const p = extractParagraphFromNode(child);
+          if (p) blocks.push({ kind: 'paragraph', paragraph: p });
         } else if (
           tag === 'P' ||
           tag === 'LI' ||
           tag === 'H1' ||
           tag === 'H2' ||
           tag === 'H3' ||
-          tag === 'H4'
+          tag === 'H4' ||
+          tag === 'FIGURE'
         ) {
           if (child.querySelector('table')) {
             walkHtmlNodes(child);
@@ -1111,6 +1396,10 @@ function convertParsedTableToQuestionTableData(
  * ONLY when the option letters form a valid option sequence and are not part of a Biologi sentence (e.g. "B. subtilis", "darah B.").
  */
 function splitInlineOptionsIfPresent(para: ParsedParagraph): ParsedParagraph[] {
+  // Never split standalone section headers like "B. Pilihan Ganda Kompleks (...)"
+  if (matchSectionTypeHeader(para.fullText)) {
+    return [para];
+  }
   let rawCombined = '';
   const charRedMap: boolean[] = [];
   for (const seg of para.segments) {
@@ -1293,12 +1582,19 @@ function splitInlineOptionsIfPresent(para: ParsedParagraph): ParsedParagraph[] {
     }
   }
 
+  if (result.length > 0 && para.images && para.images.length > 0) {
+    result[0] = {
+      ...result[0],
+      images: mergeUniqueImages(result[0].images, para.images),
+    };
+  }
+
   return result.length > 0 ? result : [para];
 }
 
 interface ParagraphRecord {
   para: ParsedParagraph;
-  matchedOption?: { letter: string; text: string; isRed: boolean };
+  matchedOption?: { letter: string; text: string; isRed: boolean; images?: string[] };
 }
 
 interface DraftQuestion {
@@ -1307,15 +1603,22 @@ interface DraftQuestion {
   sectionKey?: string;
   stimulusTitle?: string;
   stimulusText?: string;
+  stimulusImages?: string[];
   stimulusTable?: QuestionTableData;
   questionLines: string[];
+  questionImages?: string[];
   unprefixedParagraphs: ParsedParagraph[];
   allParagraphs?: ParagraphRecord[];
-  options: { id: string; text: string; isRed: boolean }[];
+  options: { id: string; text: string; isRed: boolean; images?: string[] }[];
   explicitKeys: string[];
   explicitTextAnswers?: string[];
   explicitStatements?: StatementItem[];
-  explicitMatchingPairs?: { premise: string; response: string }[];
+  explicitMatchingPairs?: {
+    premise: string;
+    response: string;
+    premiseImages?: string[];
+    responseImages?: string[];
+  }[];
   explicitPoints?: number;
 }
 
@@ -1376,7 +1679,7 @@ export function detectQuestionTypeFromText(
  */
 function matchSectionTypeHeader(text: string): QuestionType | null {
   const trimmed = text.trim();
-  if (!trimmed || trimmed.length > 130) return null;
+  if (!trimmed || trimmed.length > 180) return null;
   if (/\?|\.\.\./.test(trimmed)) return null;
 
   const cleaned = trimmed
@@ -1387,35 +1690,35 @@ function matchSectionTypeHeader(text: string): QuestionType | null {
     .trim();
 
   if (
-    /^(?:soal\s+)?(?:pilihan\s+ganda\s+kompleks|pg\s+kompleks|pgk|mcma)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+    /^(?:soal\s+)?(?:pilihan\s+ganda\s+kompleks|pg\s+kompleks|pgk|mcma)(?:\s*(?:\(.*\)|[\-–—:].*))?\s*[:\-]?$/i.test(
       cleaned
     )
   ) {
     return 'pilihan_ganda_kompleks';
   }
   if (
-    /^(?:soal\s+)?(?:benar\s*[\/\-]?\s*salah|benar\s+atau\s+salah|sesuai\s*[\/\-]\s*tidak\s+sesuai|b\s*\/\s*s)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+    /^(?:soal\s+)?(?:benar\s*[\/\-]?\s*salah|benar\s+atau\s+salah|sesuai\s*[\/\-]\s*tidak\s+sesuai|b\s*\/\s*s)(?:\s*(?:\(.*\)|[\-–—:].*))?\s*[:\-]?$/i.test(
       cleaned
     )
   ) {
     return 'benar_salah';
   }
   if (
-    /^(?:soal\s+)?(?:menjodohkan|pasangkan|jodohkan)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+    /^(?:soal\s+)?(?:menjodohkan|pasangkan|jodohkan)(?:\s*(?:\(.*\)|[\-–—:].*))?\s*[:\-]?$/i.test(
       cleaned
     )
   ) {
     return 'menjodohkan';
   }
   if (
-    /^(?:soal\s+)?(?:isian\s+singkat|isian|uraian\s+singkat|uraian|essay|esai)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+    /^(?:soal\s+)?(?:isian\s+singkat|isian|uraian\s+singkat|uraian|essay|esai)(?:\s*(?:\(.*\)|[\-–—:].*))?\s*[:\-]?$/i.test(
       cleaned
     )
   ) {
     return 'isian_singkat';
   }
   if (
-    /^(?:soal\s+)?(?:pilihan\s+ganda|pg)(?:\s*\(.*\))?\s*[:\-]?$/i.test(
+    /^(?:soal\s+)?(?:pilihan\s+ganda|pg)(?:\s*(?:\(.*\)|[\-–—:].*))?\s*[:\-]?$/i.test(
       cleaned
     )
   ) {
@@ -1601,12 +1904,17 @@ function finalizeDraftQuestion(draft: DraftQuestion | null): DraftQuestion | nul
           draft.questionLines = stemRecords
             .map((r) => r.para.fullText.trim())
             .filter(Boolean);
+          draft.questionImages = mergeUniqueImages(
+            draft.questionImages,
+            ...stemRecords.map((r) => r.para.images)
+          );
           draft.options = optRecords.map((r, idx) => ({
             id: letters[idx] || 'E',
             text: r.matchedOption
               ? r.matchedOption.text
               : r.para.fullText.replace(/^[•\-\*▪▫◦☐☑✓✔\d]+[\.\)\-:]?\s*/, '').trim(),
             isRed: r.matchedOption ? r.matchedOption.isRed : r.para.hasRed,
+            images: mergeUniqueImages(r.matchedOption?.images, r.para.images),
           }));
         }
       } else if (allRecords.length >= 6) {
@@ -1617,12 +1925,17 @@ function finalizeDraftQuestion(draft: DraftQuestion | null): DraftQuestion | nul
         draft.questionLines = stemRecords
           .map((r) => r.para.fullText.trim())
           .filter(Boolean);
+        draft.questionImages = mergeUniqueImages(
+          draft.questionImages,
+          ...stemRecords.map((r) => r.para.images)
+        );
         draft.options = optRecords.map((r, idx) => ({
           id: letters[idx] || 'E',
           text: r.matchedOption
             ? r.matchedOption.text
             : r.para.fullText.replace(/^[•\-\*▪▫◦☐☑✓✔\d]+[\.\)\-:]?\s*/, '').trim(),
           isRed: r.matchedOption ? r.matchedOption.isRed : r.para.hasRed,
+          images: mergeUniqueImages(r.matchedOption?.images, r.para.images),
         }));
       }
     }
@@ -1691,10 +2004,15 @@ function finalizeDraftQuestion(draft: DraftQuestion | null): DraftQuestion | nul
         const letters = ['A', 'B', 'C', 'D', 'E'];
 
         draft.questionLines = stemParas.map((p) => p.fullText.trim()).filter(Boolean);
+        draft.questionImages = mergeUniqueImages(
+          draft.questionImages,
+          ...stemParas.map((p) => p.images)
+        );
         draft.options = optParas.map((p, idx) => ({
           id: letters[idx] || 'E',
           text: p.fullText.replace(/^[•\-\*▪▫◦☐☑✓✔\d]+[\.\)\-:]?\s*/, '').trim(),
           isRed: p.hasRed,
+          images: p.images,
         }));
       }
     }
@@ -1709,7 +2027,9 @@ function finalizeDraftQuestion(draft: DraftQuestion | null): DraftQuestion | nul
 
     if (draft.questionLines.length === 0) {
       draft.questionLines = [
-        draft.stimulusTable
+        draft.questionImages && draft.questionImages.length > 0
+          ? 'Perhatikan gambar berikut untuk menjawab pertanyaan!'
+          : draft.stimulusTable
           ? 'Perhatikan tabel berikut untuk menjawab pertanyaan!'
           : 'Pilihlah jawaban yang paling tepat!',
       ];
@@ -1722,7 +2042,8 @@ function finalizeDraftQuestion(draft: DraftQuestion | null): DraftQuestion | nul
     (draft.explicitStatements && draft.explicitStatements.length > 0) ||
     (draft.explicitMatchingPairs && draft.explicitMatchingPairs.length > 0) ||
     (draft.explicitTextAnswers && draft.explicitTextAnswers.length > 0) ||
-    (draft.explicitNumber !== undefined && draft.questionLines.length > 0) ||
+    (draft.explicitNumber !== undefined &&
+      (draft.questionLines.length > 0 || (draft.questionImages?.length ?? 0) > 0)) ||
     (draft.detectedType === 'isian_singkat' && draft.questionLines.length > 0)
   ) {
     const redParas = draft.unprefixedParagraphs.filter((p) => p.hasRed);
@@ -1838,6 +2159,7 @@ function tryExtractBenarSalahFromTable(
       id: `st${statements.length + 1}`,
       statement: stmtCell.fullText.replace(/^\d+[\.\)\-:]\s*/, '').trim(),
       correctValue: isBenar ? 'Benar' : 'Salah',
+      images: stmtCell.images,
     });
   }
 
@@ -1848,43 +2170,108 @@ function tryExtractBenarSalahFromTable(
  * Checks if a table is a Menjodohkan (Premis -> Respon) table for a question.
  */
 function tryExtractMenjodohkanFromTable(
-  table: ParsedTable
-): { premise: string; response: string }[] | null {
+  table: ParsedTable,
+  forceMenjodohkan: boolean = false
+): {
+  premise: string;
+  response: string;
+  premiseImages?: string[];
+  responseImages?: string[];
+}[] | null {
   const rows = table.rows.filter((r) =>
-    r.some((c) => c.fullText.trim().length > 0)
+    r.some((c) => c.fullText.trim().length > 0 || (c.images?.length ?? 0) > 0)
   );
   if (rows.length < 2) return null;
 
   const headers = rows[0].map((c) => c.fullText.trim().toLowerCase());
-  const premCol = headers.findIndex(
+  let premCol = headers.findIndex(
     (h) =>
       h.includes('premis') ||
       h.includes('pernyataan') ||
       h.includes('kolom a') ||
+      h.includes('kolom 1') ||
       h.includes('bagian a') ||
-      h.includes('kiri')
+      h.includes('bagian 1') ||
+      h.includes('kiri') ||
+      h.includes('istilah') ||
+      h.includes('organ') ||
+      h.includes('tokoh') ||
+      h.includes('konsep') ||
+      h === 'soal'
   );
-  const respCol = headers.findIndex(
-    (h) =>
-      h.includes('respon') ||
-      h.includes('pasangan') ||
-      h.includes('jawaban') ||
-      h.includes('kolom b') ||
-      h.includes('bagian b') ||
-      h.includes('kanan')
+  let respCol = headers.findIndex(
+    (h, idx) =>
+      idx !== premCol &&
+      (h.includes('respon') ||
+        h.includes('pasangan') ||
+        h.includes('jawaban') ||
+        h.includes('kolom b') ||
+        h.includes('kolom 2') ||
+        h.includes('bagian b') ||
+        h.includes('bagian 2') ||
+        h.includes('kanan') ||
+        h.includes('pengertian') ||
+        h.includes('definisi') ||
+        h.includes('fungsi') ||
+        h.includes('peran') ||
+        h.includes('penjelasan') ||
+        h.includes('keterangan'))
   );
 
-  if (premCol === -1 || respCol === -1 || premCol === respCol) return null;
+  let startRow = 1;
+  if (premCol === -1 || respCol === -1 || premCol === respCol) {
+    if (!forceMenjodohkan) return null;
+    if (rows[0].length === 2) {
+      premCol = 0;
+      respCol = 1;
+      const looksLikeHeader =
+        /^(kolom|bagian|no|premis|soal|pernyataan|istilah|kiri|kanan|pasangan|jawaban)/i.test(
+          headers[0]
+        ) ||
+        /^(kolom|bagian|respon|pasangan|jawaban|kanan|fungsi|pengertian)/i.test(
+          headers[1]
+        );
+      startRow = looksLikeHeader ? 1 : 0;
+    } else if (rows[0].length === 3) {
+      const col0IsNo =
+        headers[0] === 'no' ||
+        headers[0] === 'no.' ||
+        headers[0] === 'nomor' ||
+        /^\d+\.?$/.test(rows[1]?.[0]?.fullText.trim() || '');
+      if (col0IsNo) {
+        premCol = 1;
+        respCol = 2;
+        startRow = /^(no|no\.|nomor)$/i.test(headers[0]) ? 1 : 0;
+      } else {
+        return null;
+      }
+    } else {
+      return null;
+    }
+  }
 
-  const pairs: { premise: string; response: string }[] = [];
-  for (let rIdx = 1; rIdx < rows.length; rIdx++) {
+  const pairs: {
+    premise: string;
+    response: string;
+    premiseImages?: string[];
+    responseImages?: string[];
+  }[] = [];
+  for (let rIdx = startRow; rIdx < rows.length; rIdx++) {
     const r = rows[rIdx];
-    const pText = r[premCol]?.fullText.replace(/^\d+[\.\)\-:]\s*/, '').trim();
-    const rText = r[respCol]?.fullText
-      .replace(/^[A-Za-z0-9]+[\.\)\-:]\s*/, '')
-      .trim();
-    if (pText && rText) {
-      pairs.push({ premise: pText, response: rText });
+    const pCell = r[premCol];
+    const rCell = r[respCol];
+    const pText = pCell?.fullText.replace(/^\d+[\.\)\-:]\s*/, '').trim() || '';
+    const rText =
+      rCell?.fullText.replace(/^[A-Za-z0-9]+[\.\)\-:]\s*/, '').trim() || '';
+    const hasPrem = Boolean(pText || (pCell?.images?.length ?? 0) > 0);
+    const hasResp = Boolean(rText || (rCell?.images?.length ?? 0) > 0);
+    if (hasPrem && hasResp) {
+      pairs.push({
+        premise: pText || `Premis ${pairs.length + 1}`,
+        response: rText || `Pasangan ${pairs.length + 1}`,
+        premiseImages: pCell?.images,
+        responseImages: rCell?.images,
+      });
     }
   }
 
@@ -1897,9 +2284,9 @@ function tryExtractMenjodohkanFromTable(
  */
 function tryExtractOptionsOnlyFromTable(
   table: ParsedTable
-): { id: string; text: string; isRed: boolean }[] | null {
+): { id: string; text: string; isRed: boolean; images?: string[] }[] | null {
   const rows = table.rows.filter((r) =>
-    r.some((c) => c.fullText.trim().length > 0)
+    r.some((c) => c.fullText.trim().length > 0 || (c.images?.length ?? 0) > 0)
   );
   if (rows.length === 0 || rows.length > 7) return null;
 
@@ -1919,7 +2306,12 @@ function tryExtractOptionsOnlyFromTable(
     headers = rows[0].map((c) => c.fullText.replace(/\n+/g, ' ').trim());
   }
 
-  const extractedOptions: { id: string; text: string; isRed: boolean }[] = [];
+  const extractedOptions: {
+    id: string;
+    text: string;
+    isRed: boolean;
+    images?: string[];
+  }[] = [];
 
   for (let rIdx = startRow; rIdx < rows.length; rIdx++) {
     const r = rows[rIdx];
@@ -1936,11 +2328,13 @@ function tryExtractOptionsOnlyFromTable(
           colTexts.push(val);
         }
       }
-      const text = colTexts.join(' — ') || `Pilihan ${letter}`;
+      const rowImages = mergeUniqueImages(...r.slice(1).map((c) => c.images));
+      const text = colTexts.join(' — ') || (rowImages ? '' : `Pilihan ${letter}`);
       extractedOptions.push({
         id: letter,
         text,
         isRed: r.some((cell) => cell.hasRed),
+        images: rowImages,
       });
       continue;
     }
@@ -1955,27 +2349,36 @@ function tryExtractOptionsOnlyFromTable(
         .slice(2)
         .map((c) => c.fullText.replace(/\n+/g, ' ').trim())
         .filter(Boolean);
-      const text = colTexts.join(' — ') || `Pilihan ${letter}`;
+      const rowImages = mergeUniqueImages(...r.slice(2).map((c) => c.images));
+      const text = colTexts.join(' — ') || (rowImages ? '' : `Pilihan ${letter}`);
       extractedOptions.push({
         id: letter,
         text,
         isRed: r.some((cell) => cell.hasRed),
+        images: rowImages,
       });
       continue;
     }
 
     // Check if cells in the row are inline options like [A. Satu | D. Empat]
     let allCellsAreOptions = true;
-    const rowOpts: { id: string; text: string; isRed: boolean }[] = [];
+    const rowOpts: {
+      id: string;
+      text: string;
+      isRed: boolean;
+      images?: string[];
+    }[] = [];
     for (const cell of r) {
       if (!cell.fullText.trim()) continue;
       const m = cell.fullText.trim().match(OPTION_LINE_REGEX);
       if (m) {
-        const letter = (m[1] || m[2] || m[3] || 'A').toUpperCase();
+        const letter = (m[2] || m[3] || m[4] || 'A').toUpperCase();
+        const bodyText = (m[6] || '').trim();
         rowOpts.push({
           id: letter,
-          text: (m[4] || '').trim() || `Pilihan ${letter}`,
-          isRed: cell.hasRed,
+          text: bodyText || (cell.images?.length ? '' : `Pilihan ${letter}`),
+          isRed: cell.hasRed || Boolean(m[1] || m[5]),
+          images: cell.images,
         });
       } else {
         allCellsAreOptions = false;
@@ -2097,10 +2500,15 @@ function tryExtractQuestionsFromBankSoalTable(
         detectQuestionTypeFromText(qCell.fullText) ||
         undefined;
 
-      const options: { id: string; text: string; isRed: boolean }[] = [];
+      const options: {
+        id: string;
+        text: string;
+        isRed: boolean;
+        images?: string[];
+      }[] = [];
       optCols.forEach(({ letter, idx }) => {
         const cell = r[idx];
-        if (cell && cell.fullText.trim()) {
+        if (cell && (cell.fullText.trim() || (cell.images?.length ?? 0) > 0)) {
           const { cleanedText, isMarkedCorrect } = extractTrailingCorrectMarker(
             cell.fullText.replace(/^[A-Ea-e][\.\)\-:]\s*/, '').trim()
           );
@@ -2108,6 +2516,7 @@ function tryExtractQuestionsFromBankSoalTable(
             id: letter,
             text: cleanedText,
             isRed: cell.hasRed || isMarkedCorrect,
+            images: cell.images,
           });
         }
       });
@@ -2116,7 +2525,7 @@ function tryExtractQuestionsFromBankSoalTable(
       if (stmtCols.length > 0) {
         stmtCols.forEach((sIdx, i) => {
           const cell = r[sIdx];
-          if (cell && cell.fullText.trim()) {
+          if (cell && (cell.fullText.trim() || (cell.images?.length ?? 0) > 0)) {
             const rawSt = cell.fullText.trim();
             const isBenar =
               cell.hasRed ||
@@ -2128,6 +2537,7 @@ function tryExtractQuestionsFromBankSoalTable(
                 .replace(/\s*\((?:benar|salah|b|s|sesuai|tidak\s*sesuai)\)\s*$/i, '')
                 .trim(),
               correctValue: isBenar ? 'Benar' : 'Salah',
+              images: cell.images,
             });
           }
         });
@@ -2201,6 +2611,7 @@ function tryExtractQuestionsFromBankSoalTable(
               ? 'isian_singkat'
               : undefined),
           questionLines: [qCell.fullText.replace(/^\d+[\.\)\-:]\s*/, '').trim()],
+          questionImages: qCell.images,
           unprefixedParagraphs: [],
           options,
           explicitKeys,
@@ -2480,6 +2891,7 @@ interface CollectedStimulus {
   num?: number;
   title: string;
   paragraphs: string[];
+  images: string[];
   table?: QuestionTableData;
   attachedCount: number;
 }
@@ -2622,12 +3034,14 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       const splitParas = splitInlineOptionsIfPresent(b.paragraph);
       for (const sp of splitParas) {
         const t = sp.fullText.trim();
-        if (!t) continue;
+        const hasImgs = Boolean(sp.images && sp.images.length > 0);
+        if (!t && !hasImgs) continue;
         if (
-          /^(soal\s+ujian|bank\s+soal|daftar\s+soal|template\s+soal|petunjuk\s+pengerjaan\s*:?\s*$)/i.test(
+          !hasImgs &&
+          /^(soal\s+ujian|kumpulan\s+soal|latihan\s+soal|bank\s+soal|daftar\s+soal|template\s+soal|asesmen\s+.*|petunjuk\s+pengerjaan\s*:?\s*$)/i.test(
             t
           ) &&
-          t.length < 80
+          t.length < 110
         ) {
           continue;
         }
@@ -2655,6 +3069,7 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
     explicitNumber,
     detectedType: currentSectionType,
     questionLines: [],
+    questionImages: [],
     unprefixedParagraphs: [],
     allParagraphs: [],
     options: [],
@@ -2671,7 +3086,7 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       chosenStimulus = stimuliByNumber[sNum];
     } else if (activeStimulus) {
       const referencesPrevious =
-        /\b(?:stimulus|wacana|teks|tabel|data|eksperimen|reaksi|grafik|bacaan)\s+(?:di\s*atas|tersebut|ini)\b/i.test(
+        /\b(?:stimulus|wacana|teks|tabel|data|eksperimen|reaksi|grafik|bacaan|gambar|diagram)\s+(?:di\s*atas|tersebut|ini)\b/i.test(
           stemJoined
         );
       if (
@@ -2687,6 +3102,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       draft.stimulusTitle = chosenStimulus.title;
       if (chosenStimulus.paragraphs.length > 0) {
         draft.stimulusText = chosenStimulus.paragraphs.join('\n\n');
+      }
+      if (chosenStimulus.images.length > 0) {
+        draft.stimulusImages = mergeUniqueImages(
+          draft.stimulusImages,
+          chosenStimulus.images
+        );
       }
       if (!draft.stimulusTable && chosenStimulus.table) {
         draft.stimulusTable = chosenStimulus.table;
@@ -2791,7 +3212,13 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       }
 
       // 0B. Check if this table is a Menjodohkan Table for the current question!
-      const matchPairs = tryExtractMenjodohkanFromTable(block.table);
+      const forceMenjodohkanTable =
+        currentSectionType === 'menjodohkan' ||
+        currentDraft?.detectedType === 'menjodohkan';
+      const matchPairs = tryExtractMenjodohkanFromTable(
+        block.table,
+        forceMenjodohkanTable
+      );
       if (matchPairs && matchPairs.length >= 2) {
         if (!currentDraft) {
           currentDraft = createEmptyDraft();
@@ -2860,6 +3287,61 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
 
     const para = block.paragraph;
     const text = para.fullText.trim();
+    const paraImages = para.images && para.images.length > 0 ? para.images : undefined;
+
+    // Handle standalone image-only paragraphs (e.g. embedded figure/diagram in Word or PDF)
+    if (!text && paraImages) {
+      if (inAnswerKeySection) continue;
+      if (collectingStimulus && activeStimulus) {
+        activeStimulus.images = mergeUniqueImages(activeStimulus.images, paraImages) || [];
+        continue;
+      }
+      if (currentDraft) {
+        if (currentDraft.options.length > 0) {
+          const lastOpt = currentDraft.options[currentDraft.options.length - 1];
+          const lastOptIsPlaceholder =
+            !lastOpt.text ||
+            lastOpt.text === '[Gambar]' ||
+            /^Pilihan\s+[A-H]$/i.test(lastOpt.text);
+          if (lastOptIsPlaceholder) {
+            lastOpt.images = mergeUniqueImages(lastOpt.images, paraImages);
+            if (lastOpt.text === '[Gambar]' || /^Pilihan\s+[A-H]$/i.test(lastOpt.text)) {
+              lastOpt.text = '';
+            }
+            continue;
+          }
+          const expectedNext =
+            currentDraft.explicitNumber !== undefined
+              ? currentDraft.explicitNumber + 1
+              : undefined;
+          const upcoming = inspectBeforeNextQuestion(i + 1, expectedNext);
+          if (upcoming.optionCount > 0 && currentDraft.options.length < 5) {
+            lastOpt.images = mergeUniqueImages(lastOpt.images, paraImages);
+            continue;
+          }
+          if (currentDraft.options.length >= 2) {
+            flushDraft();
+            currentDraft = createEmptyDraft();
+            currentDraft.questionImages = mergeUniqueImages(
+              currentDraft.questionImages,
+              paraImages
+            );
+            continue;
+          }
+        }
+        currentDraft.questionImages = mergeUniqueImages(
+          currentDraft.questionImages,
+          paraImages
+        );
+      } else {
+        currentDraft = createEmptyDraft();
+        currentDraft.questionImages = mergeUniqueImages(
+          currentDraft.questionImages,
+          paraImages
+        );
+      }
+      continue;
+    }
 
     // Check if we entered a document-end "KUNCI JAWABAN" section
     if (
@@ -2932,6 +3414,23 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       continue;
     }
 
+    // Skip preamble metadata/header lines before the very first question begins
+    if (
+      !currentDraft &&
+      drafts.length === 0 &&
+      !collectingStimulus &&
+      !paraImages &&
+      !matchNumberedQuestionLine(para) &&
+      !matchOptionLine(para, 0) &&
+      !matchStimulusHeader(text) &&
+      /^(?:mata\s+pelajaran|mapel|kelas|semester|tahun\s+(?:ajaran|pelajaran)|waktu|alokasi\s+waktu|nama\s+(?:siswa|peserta)|petunjuk(?:\s+umum)?|ujian\s+|penilaian\s+|sumatif\s+|ulangan\s+|evaluasi\s+|try\s*out\s+|simulasi\s+)/i.test(
+        text
+      ) &&
+      text.length < 160
+    ) {
+      continue;
+    }
+
     // Skip section-level "Petunjuk: ..." lines (do not turn them into fake questions)
     const petunjukMatch = text.match(/^petunjuk\s*[:\-]\s*(.+)$/i);
     if (petunjukMatch) {
@@ -2951,6 +3450,7 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         num: stimNum,
         title: stimMatch.title,
         paragraphs: [],
+        images: paraImages ? [...paraImages] : [],
         attachedCount: 0,
       };
       if (stimNum !== undefined) {
@@ -2965,6 +3465,9 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       const maybeOpt = matchOptionLine(para, 0);
       if (!maybeQ && !maybeOpt) {
         activeStimulus.paragraphs.push(text);
+        if (paraImages) {
+          activeStimulus.images = mergeUniqueImages(activeStimulus.images, paraImages) || [];
+        }
         continue;
       }
       collectingStimulus = false;
@@ -2982,6 +3485,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       }
       if (!currentDraft) {
         currentDraft = createEmptyDraft(numVal);
+      }
+      if (paraImages) {
+        currentDraft.questionImages = mergeUniqueImages(
+          currentDraft.questionImages,
+          paraImages
+        );
       }
       continue;
     }
@@ -3036,6 +3545,8 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
     const optMatch = matchOptionLine(para, currentDraft?.options.length ?? 0);
     if (optMatch) {
       const { letter: optLetter, text: optText, isRed, isCheckbox } = optMatch;
+      const cleanOptText =
+        paraImages && /^Pilihan\s+[A-H]$/i.test(optText) ? '' : optText;
 
       if (!currentDraft) {
         currentDraft = createEmptyDraft();
@@ -3063,6 +3574,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         ) {
           for (const prevOpt of currentDraft.options) {
             currentDraft.questionLines.push(`${prevOpt.id}. ${prevOpt.text}`);
+            if (prevOpt.images?.length) {
+              currentDraft.questionImages = mergeUniqueImages(
+                currentDraft.questionImages,
+                prevOpt.images
+              );
+            }
           }
           currentDraft.options = [];
           if (currentDraft.allParagraphs) {
@@ -3079,12 +3596,18 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       inInternalNumberedList = false;
       currentDraft.options.push({
         id: optLetter,
-        text: optText,
+        text: cleanOptText,
         isRed,
+        images: paraImages,
       });
       currentDraft.allParagraphs?.push({
         para,
-        matchedOption: optMatch,
+        matchedOption: {
+          letter: optLetter,
+          text: cleanOptText,
+          isRed,
+          images: paraImages,
+        },
       });
       continue;
     }
@@ -3094,11 +3617,41 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
     if (qMatch) {
       const { qNum, qText } = qMatch;
 
+      // If a standalone image preceded this numbered question, reuse that draft so the image stays attached!
+      if (
+        currentDraft &&
+        currentDraft.questionLines.length === 0 &&
+        currentDraft.options.length === 0 &&
+        currentDraft.explicitNumber === undefined &&
+        (currentDraft.questionImages?.length ?? 0) > 0
+      ) {
+        currentDraft.explicitNumber = qNum;
+        const inlineType = detectQuestionTypeFromText(qText);
+        if (inlineType) currentDraft.detectedType = inlineType;
+        currentDraft.questionLines.push(qText);
+        if (paraImages) {
+          currentDraft.questionImages = mergeUniqueImages(
+            currentDraft.questionImages,
+            paraImages
+          );
+        }
+        const cleanPara = { ...para, fullText: qText };
+        currentDraft.unprefixedParagraphs.push(cleanPara);
+        currentDraft.allParagraphs?.push({ para: cleanPara });
+        continue;
+      }
+
       if (!currentDraft) {
         currentDraft = createEmptyDraft(qNum);
         const inlineType = detectQuestionTypeFromText(qText);
         if (inlineType) currentDraft.detectedType = inlineType;
         currentDraft.questionLines.push(qText);
+        if (paraImages) {
+          currentDraft.questionImages = mergeUniqueImages(
+            currentDraft.questionImages,
+            paraImages
+          );
+        }
         const cleanPara = { ...para, fullText: qText };
         currentDraft.unprefixedParagraphs.push(cleanPara);
         currentDraft.allParagraphs?.push({ para: cleanPara });
@@ -3139,6 +3692,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         internalListCounter = qNum;
         const lineWithNum = /^\d+/.test(text) ? text : `${qNum}. ${qText}`;
         currentDraft.questionLines.push(lineWithNum);
+        if (paraImages) {
+          currentDraft.questionImages = mergeUniqueImages(
+            currentDraft.questionImages,
+            paraImages
+          );
+        }
         currentDraft.unprefixedParagraphs.push(para);
         currentDraft.allParagraphs?.push({ para });
         continue;
@@ -3148,6 +3707,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
         internalListCounter = qNum;
         const lineWithNum = /^\d+/.test(text) ? text : `${qNum}. ${qText}`;
         currentDraft.questionLines.push(lineWithNum);
+        if (paraImages) {
+          currentDraft.questionImages = mergeUniqueImages(
+            currentDraft.questionImages,
+            paraImages
+          );
+        }
         currentDraft.unprefixedParagraphs.push(para);
         currentDraft.allParagraphs?.push({ para });
         continue;
@@ -3159,6 +3724,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       const inlineType = detectQuestionTypeFromText(qText);
       if (inlineType) currentDraft.detectedType = inlineType;
       currentDraft.questionLines.push(qText);
+      if (paraImages) {
+        currentDraft.questionImages = mergeUniqueImages(
+          currentDraft.questionImages,
+          paraImages
+        );
+      }
       const cleanPara = { ...para, fullText: qText };
       currentDraft.unprefixedParagraphs.push(cleanPara);
       currentDraft.allParagraphs?.push({ para: cleanPara });
@@ -3202,6 +3773,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
           });
         }
         currentDraft.questionLines.push(text);
+        if (paraImages) {
+          currentDraft.questionImages = mergeUniqueImages(
+            currentDraft.questionImages,
+            paraImages
+          );
+        }
         currentDraft.unprefixedParagraphs.push(para);
         currentDraft.allParagraphs?.push({ para });
         continue;
@@ -3226,10 +3803,22 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
       currentDraft = createEmptyDraft();
       if (inlineTypeInPara) currentDraft.detectedType = inlineTypeInPara;
       currentDraft.questionLines.push(text);
+      if (paraImages) {
+        currentDraft.questionImages = mergeUniqueImages(
+          currentDraft.questionImages,
+          paraImages
+        );
+      }
       currentDraft.unprefixedParagraphs.push(para);
       currentDraft.allParagraphs?.push({ para });
     } else {
       currentDraft.questionLines.push(text);
+      if (paraImages) {
+        currentDraft.questionImages = mergeUniqueImages(
+          currentDraft.questionImages,
+          paraImages
+        );
+      }
       currentDraft.unprefixedParagraphs.push(para);
       currentDraft.allParagraphs?.push({ para });
     }
@@ -3287,7 +3876,12 @@ function buildDraftsFromBlockSequence(blocks: DocumentBlock[]): DraftQuestion[] 
  */
 function tryExtractMatchingPairsFromDraft(
   draft: DraftQuestion
-): { premise: string; response: string }[] | null {
+): {
+  premise: string;
+  response: string;
+  premiseImages?: string[];
+  responseImages?: string[];
+}[] | null {
   if (draft.explicitMatchingPairs && draft.explicitMatchingPairs.length >= 2) {
     return draft.explicitMatchingPairs;
   }
@@ -3309,7 +3903,12 @@ function tryExtractMatchingPairsFromDraft(
       ? draft.options.map((o) => o.text)
       : draft.questionLines.slice(1);
 
-  const pairs: { premise: string; response: string }[] = [];
+  const pairs: {
+    premise: string;
+    response: string;
+    premiseImages?: string[];
+    responseImages?: string[];
+  }[] = [];
   for (const line of candidateStrings) {
     const cleaned = line.replace(/^[A-Za-z0-9]+[\.\)\-:]\s*/, '').trim();
     const m = cleaned.match(pairRegex);
@@ -3331,7 +3930,7 @@ function tryExtractMatchingPairsFromDraft(
 
 /**
  * Helper to check if a draft's options or statements have explicit Benar/Salah suffixes
- * e.g. "Pernyataan 1 (Benar)" / "Pernyataan 2 (Salah)" or options are literally ["Benar", "Salah"].
+ * e.g. "Pernyataan 1 (Benar)" / "Pernyataan 2 (Salah)" or options are literally ["Benar", "Salah"] (including radio symbols "O Benar" / "○ Salah").
  */
 function tryExtractBenarSalahFromDraft(
   draft: DraftQuestion
@@ -3339,6 +3938,9 @@ function tryExtractBenarSalahFromDraft(
   if (draft.explicitStatements && draft.explicitStatements.length > 0) {
     return draft.explicitStatements;
   }
+
+  const stripRadioPrefix = (raw: string) =>
+    raw.replace(/^(?:[oO○◯●•▪▫◦☐☑✓✔\-\*]|\[[xXvV✓✔\s]?\]|\(\s*\))\s+/, '').trim();
 
   const bsSuffixRegex =
     /^(.*?)[\s\-:]+[\(\[]?(benar|salah|sesuai|tidak\s+sesuai)[\)\]]?\s*$/i;
@@ -3361,15 +3963,18 @@ function tryExtractBenarSalahFromDraft(
           id: `st${idx + 1}`,
           statement: stText,
           correctValue: isBenar ? 'Benar' : 'Salah',
+          images: o.images,
         };
       });
     }
 
-    // Check if the 2 options are literally "Benar" and "Salah" (True/False single statement question)
+    // Check if the 2 options are literally "Benar" and "Salah" (including "O Benar" / "○ Salah" / "• Benar")
+    const opt0Clean = stripRadioPrefix(draft.options[0].text.trim());
+    const opt1Clean = stripRadioPrefix(draft.options[1].text.trim());
     if (
       draft.options.length === 2 &&
-      /^(benar|true|sesuai)$/i.test(draft.options[0].text.trim()) &&
-      /^(salah|false|tidak\s+sesuai)$/i.test(draft.options[1].text.trim())
+      /^(benar|true|sesuai)$/i.test(opt0Clean) &&
+      /^(salah|false|tidak\s+sesuai)$/i.test(opt1Clean)
     ) {
       const isFirstCorrect =
         draft.options[0].isRed ||
@@ -3403,6 +4008,7 @@ function tryExtractBenarSalahFromDraft(
         id: `st${idx + 1}`,
         statement: o.text,
         correctValue: isBenar ? 'Benar' : 'Salah',
+        images: o.images,
       };
     });
   }
@@ -3428,10 +4034,21 @@ function buildQuestionsFromBlocks(
   drafts.forEach((draft, idx) => {
     const qNum = startingNumber + idx;
     const rawQuestionText =
-      draft.questionLines.join(' ').trim() || `Pertanyaan Soal No. ${qNum}`;
+      draft.questionLines.join(' ').trim() ||
+      (draft.questionImages && draft.questionImages.length > 0
+        ? 'Perhatikan gambar berikut untuk menjawab pertanyaan!'
+        : `Pertanyaan Soal No. ${qNum}`);
     const stemDetectedType =
       draft.detectedType || detectQuestionTypeFromText(rawQuestionText);
     const questionPoints = draft.explicitPoints || 10;
+    const cleanStimulusImages =
+      draft.stimulusImages && draft.stimulusImages.length > 0
+        ? draft.stimulusImages
+        : undefined;
+    const cleanQuestionImages =
+      draft.questionImages && draft.questionImages.length > 0
+        ? draft.questionImages
+        : undefined;
 
     // 1. Check Menjodohkan (Matching)
     const matchingPairs = tryExtractMatchingPairsFromDraft(draft);
@@ -3443,8 +4060,16 @@ function buildQuestionsFromBlocks(
       matchingPairs.forEach((pair, pIdx) => {
         const pId = `p${pIdx + 1}`;
         const rId = `r${pIdx + 1}`;
-        premises.push({ id: pId, text: pair.premise });
-        responses.push({ id: rId, text: pair.response });
+        premises.push({
+          id: pId,
+          text: pair.premise,
+          ...(pair.premiseImages?.length ? { images: pair.premiseImages } : {}),
+        });
+        responses.push({
+          id: rId,
+          text: pair.response,
+          ...(pair.responseImages?.length ? { images: pair.responseImages } : {}),
+        });
         correctPairs[pId] = rId;
       });
 
@@ -3461,7 +4086,9 @@ function buildQuestionsFromBlocks(
         category: defaultCategory,
         stimulusTitle: draft.stimulusTitle,
         stimulusText: draft.stimulusText,
+        stimulusImages: cleanStimulusImages,
         questionText: stemOnly,
+        questionImages: cleanQuestionImages,
         stimulusTable: draft.stimulusTable,
         instructionText:
           'Pasangkan setiap pernyataan di sebelah kiri dengan pasangan yang tepat di sebelah kanan!',
@@ -3484,7 +4111,9 @@ function buildQuestionsFromBlocks(
         category: defaultCategory,
         stimulusTitle: draft.stimulusTitle,
         stimulusText: draft.stimulusText,
+        stimulusImages: cleanStimulusImages,
         questionText: rawQuestionText,
+        questionImages: cleanQuestionImages,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Tentukan Benar atau Salah untuk setiap pernyataan!',
         statements: bsStatements,
@@ -3517,7 +4146,9 @@ function buildQuestionsFromBlocks(
         category: defaultCategory,
         stimulusTitle: draft.stimulusTitle,
         stimulusText: draft.stimulusText,
+        stimulusImages: cleanStimulusImages,
         questionText: rawQuestionText,
+        questionImages: cleanQuestionImages,
         stimulusTable: draft.stimulusTable,
         instructionText:
           'Ketiklah jawaban singkat atau uraian dengan tepat pada kolom yang tersedia!',
@@ -3536,6 +4167,7 @@ function buildQuestionsFromBlocks(
       .map((o, oIdx) => ({
         id: letters[oIdx] || o.id,
         text: o.text,
+        ...(o.images?.length ? { images: o.images } : {}),
       }));
 
     const redOptionIds = draft.options
@@ -3566,7 +4198,9 @@ function buildQuestionsFromBlocks(
         category: defaultCategory,
         stimulusTitle: draft.stimulusTitle,
         stimulusText: draft.stimulusText,
+        stimulusImages: cleanStimulusImages,
         questionText: rawQuestionText,
+        questionImages: cleanQuestionImages,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Pilihlah lebih dari satu jawaban yang benar!',
         options: normalizedOptions,
@@ -3583,7 +4217,9 @@ function buildQuestionsFromBlocks(
         category: defaultCategory,
         stimulusTitle: draft.stimulusTitle,
         stimulusText: draft.stimulusText,
+        stimulusImages: cleanStimulusImages,
         questionText: rawQuestionText,
+        questionImages: cleanQuestionImages,
         stimulusTable: draft.stimulusTable,
         instructionText: 'Pilih satu jawaban yang paling tepat!',
         options: normalizedOptions,
@@ -3777,9 +4413,104 @@ function isPdfInlineOptionRow(
   return optStart.test(spans[0].text.trim()) && optStart.test(spans[1].text.trim());
 }
 
+async function extractPdfImageObjectToDataUrl(
+  rawImgObj: unknown,
+  maxWidth: number = 920
+): Promise<string | null> {
+  if (!rawImgObj || typeof document === 'undefined') return null;
+  const imgObj = rawImgObj as {
+    width?: number;
+    height?: number;
+    data?: Uint8ClampedArray | Uint8Array;
+    kind?: number;
+    bitmap?: CanvasImageSource;
+  };
+
+  try {
+    const srcW = Number(imgObj.width || 0);
+    const srcH = Number(imgObj.height || 0);
+    // Skip tiny spacer/bullet images or thin decorative lines
+    if (srcW < 28 || srcH < 28) return null;
+
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = srcW;
+    srcCanvas.height = srcH;
+    const srcCtx = srcCanvas.getContext('2d');
+    if (!srcCtx) return null;
+
+    if (imgObj.bitmap) {
+      srcCtx.fillStyle = '#ffffff';
+      srcCtx.fillRect(0, 0, srcW, srcH);
+      srcCtx.drawImage(imgObj.bitmap, 0, 0, srcW, srcH);
+    } else if (imgObj.data && imgObj.data.length > 0) {
+      const rgba = new Uint8ClampedArray(srcW * srcH * 4);
+      const data = imgObj.data;
+      const pixelCount = srcW * srcH;
+
+      if (data.length >= pixelCount * 4) {
+        rgba.set(data.subarray(0, pixelCount * 4));
+      } else if (data.length >= pixelCount * 3) {
+        for (let p = 0, s = 0, d = 0; p < pixelCount; p++, s += 3, d += 4) {
+          rgba[d] = data[s];
+          rgba[d + 1] = data[s + 1];
+          rgba[d + 2] = data[s + 2];
+          rgba[d + 3] = 255;
+        }
+      } else if (data.length >= pixelCount) {
+        for (let p = 0, d = 0; p < pixelCount; p++, d += 4) {
+          const g = data[p];
+          rgba[d] = g;
+          rgba[d + 1] = g;
+          rgba[d + 2] = g;
+          rgba[d + 3] = 255;
+        }
+      } else {
+        // 1-bit monochrome mask
+        const rowBytes = Math.ceil(srcW / 8);
+        for (let y = 0; y < srcH; y++) {
+          for (let x = 0; x < srcW; x++) {
+            const byte = data[y * rowBytes + (x >> 3)] ?? 255;
+            const bit = (byte >> (7 - (x & 7))) & 1;
+            const v = bit ? 255 : 0;
+            const d = (y * srcW + x) * 4;
+            rgba[d] = v;
+            rgba[d + 1] = v;
+            rgba[d + 2] = v;
+            rgba[d + 3] = 255;
+          }
+        }
+      }
+
+      const imageData = srcCtx.createImageData(srcW, srcH);
+      imageData.data.set(rgba);
+      srcCtx.putImageData(imageData, 0, 0);
+    } else {
+      return null;
+    }
+
+    const scale = srcW > maxWidth ? maxWidth / srcW : 1;
+    const outW = Math.max(1, Math.round(srcW * scale));
+    const outH = Math.max(1, Math.round(srcH * scale));
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = outW;
+    outCanvas.height = outH;
+    const outCtx = outCanvas.getContext('2d');
+    if (!outCtx) return null;
+    outCtx.fillStyle = '#ffffff';
+    outCtx.fillRect(0, 0, outW, outH);
+    outCtx.drawImage(srcCanvas, 0, 0, outW, outH);
+
+    const jpegDataUrl = outCanvas.toDataURL('image/jpeg', 0.82);
+    return isSafeImageDataUrl(jpegDataUrl) ? jpegDataUrl : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Parses a .pdf question file into DocumentBlocks using pdfjs-dist, preserving:
  * - Red text color metadata from PDF graphics operator lists (for PG/PGK/B-S keys)
+ * - Embedded raster images & diagrams extracted via PDF graphics operators
  * - Superscripts and subscripts converted cleanly to Unicode (H₂O, 10⁻³¹, S²⁻)
  * - Multi-column tables reconstructed via X-interval projection & cross-page merging
  * - Multi-line wrapped paragraphs and checkbox/option lines
@@ -3819,6 +4550,7 @@ export async function parsePdfDocumentBlocks(
     spans: PdfVisualSpan[];
     hasRed: boolean;
     fullText: string;
+    images?: string[];
   }
 
   const allBlocks: DocumentBlock[] = [];
@@ -3826,8 +4558,15 @@ export async function parsePdfDocumentBlocks(
   for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
     const page = await pdfDoc.getPage(pageNum);
 
-    // 1. Collect red-colored text draw coordinates from page operator list
+    // 1. Collect red-colored text draw coordinates AND embedded images from page operator list
     const redDraws: { x: number; y: number; text: string }[] = [];
+    const pendingImages: {
+      x: number;
+      y: number;
+      width: number;
+      name?: string;
+      inlineObj?: unknown;
+    }[] = [];
     try {
       const opList = await page.getOperatorList();
       const { OPS } = pdfjsLib;
@@ -3865,6 +4604,32 @@ export async function parsePdfDocumentBlocks(
           const g = Math.round(255 * (1 - m) * (1 - k));
           const b = Math.round(255 * (1 - y) * (1 - k));
           fillColor = `rgb(${r}, ${g}, ${b})`;
+        } else if (
+          fn === OPS.paintImageXObject ||
+          fn === (OPS as Record<string, number>).paintJpegXObject ||
+          fn === OPS.paintImageXObjectRepeat
+        ) {
+          const dispW = Math.hypot(ctm[0], ctm[1]);
+          const dispH = Math.hypot(ctm[2], ctm[3]);
+          if (dispW >= 24 && dispH >= 24 && typeof args[0] === 'string') {
+            pendingImages.push({
+              x: ctm[4],
+              y: ctm[5] + Math.abs(ctm[3]) * 0.5,
+              width: dispW,
+              name: args[0],
+            });
+          }
+        } else if (fn === OPS.paintInlineImageXObject) {
+          const dispW = Math.hypot(ctm[0], ctm[1]);
+          const dispH = Math.hypot(ctm[2], ctm[3]);
+          if (dispW >= 24 && dispH >= 24 && args[0]) {
+            pendingImages.push({
+              x: ctm[4],
+              y: ctm[5] + Math.abs(ctm[3]) * 0.5,
+              width: dispW,
+              inlineObj: args[0],
+            });
+          }
         } else if (fn === OPS.beginText) {
           tm = [1, 0, 0, 1, 0, 0];
           tlm = [1, 0, 0, 1, 0, 0];
@@ -3931,6 +4696,63 @@ export async function parsePdfDocumentBlocks(
       }
     } catch {
       // If operator list inspection fails on a malformed PDF stream, proceed with text extraction
+    }
+
+    // Resolve embedded PDF images to compressed data URLs
+    const resolvedPdfImages: { x: number; y: number; width: number; dataUrl: string }[] = [];
+    if (pendingImages.length > 0 && typeof document !== 'undefined') {
+      const resolvePdfObj = (name: string): Promise<unknown> =>
+        new Promise((resolve) => {
+          let settled = false;
+          const finish = (val: unknown) => {
+            if (!settled) {
+              settled = true;
+              resolve(val);
+            }
+          };
+          const timer = setTimeout(() => finish(null), 1200);
+          try {
+            if (page.objs.has(name)) {
+              clearTimeout(timer);
+              finish(page.objs.get(name));
+              return;
+            }
+            if (page.commonObjs.has(name)) {
+              clearTimeout(timer);
+              finish(page.commonObjs.get(name));
+              return;
+            }
+            page.objs.get(name, (obj: unknown) => {
+              clearTimeout(timer);
+              finish(obj);
+            });
+          } catch {
+            clearTimeout(timer);
+            finish(null);
+          }
+        });
+
+      const imgCache: Record<string, string | null> = {};
+      for (const pImg of pendingImages) {
+        let dataUrl: string | null = null;
+        if (pImg.inlineObj) {
+          dataUrl = await extractPdfImageObjectToDataUrl(pImg.inlineObj);
+        } else if (pImg.name) {
+          if (!(pImg.name in imgCache)) {
+            const obj = await resolvePdfObj(pImg.name);
+            imgCache[pImg.name] = await extractPdfImageObjectToDataUrl(obj);
+          }
+          dataUrl = imgCache[pImg.name];
+        }
+        if (dataUrl) {
+          resolvedPdfImages.push({
+            x: pImg.x,
+            y: pImg.y,
+            width: pImg.width,
+            dataUrl,
+          });
+        }
+      }
     }
 
     // 2. Extract positioned text items
@@ -4134,6 +4956,22 @@ export async function parsePdfDocumentBlocks(
       });
     }
 
+    // Insert extracted PDF images into visualRows in vertical reading order (top to bottom)
+    if (resolvedPdfImages.length > 0) {
+      for (const imgEntry of resolvedPdfImages) {
+        visualRows.push({
+          baseY: imgEntry.y,
+          minX: imgEntry.x,
+          maxX: imgEntry.x + imgEntry.width,
+          spans: [],
+          hasRed: false,
+          fullText: '',
+          images: [imgEntry.dataUrl],
+        });
+      }
+      visualRows.sort((a, b) => b.baseY - a.baseY);
+    }
+
     // 5. Partition visualRows into Table Regions vs Paragraph Regions
     const isTableBreakHeading = (txt: string) =>
       Boolean(matchStimulusHeader(txt)) ||
@@ -4143,6 +4981,7 @@ export async function parsePdfDocumentBlocks(
       CHECKBOX_OPTION_REGEX.test(txt);
 
     const rowIsMultiCol = (r: PdfVisualRow) =>
+      !r.images?.length &&
       r.spans.length >= 2 &&
       !isPdfInlineOptionRow(r.spans) &&
       !isTableBreakHeading(r.fullText);
@@ -4151,6 +4990,7 @@ export async function parsePdfDocumentBlocks(
       prevTableRow: PdfVisualRow,
       cand: PdfVisualRow
     ) => {
+      if (cand.images?.length) return false;
       if (cand.spans.length >= 2) return rowIsMultiCol(cand);
       if (isTableBreakHeading(cand.fullText)) return false;
       if (NUMBERED_QUESTION_REGEX.test(cand.fullText)) return false;
@@ -4191,6 +5031,19 @@ export async function parsePdfDocumentBlocks(
       };
 
       for (const r of paraRows) {
+        if (r.images && r.images.length > 0 && !r.fullText) {
+          flushPara();
+          allBlocks.push({
+            kind: 'paragraph',
+            paragraph: {
+              fullText: '',
+              hasRed: false,
+              segments: [],
+              images: [...r.images],
+            },
+          });
+          continue;
+        }
         if (curLines.length === 0) {
           curLines.push(r);
           continue;
@@ -4419,9 +5272,30 @@ export async function parsePdfDocumentBlocks(
   return mergedBlocks;
 }
 
+function countTotalQuestionImages(questions: Question[]): number {
+  let count = 0;
+  for (const q of questions) {
+    count += q.stimulusImages?.length ?? 0;
+    count += q.questionImages?.length ?? 0;
+    if (q.options) {
+      for (const o of q.options) count += o.images?.length ?? 0;
+    }
+    if (q.statements) {
+      for (const s of q.statements) count += s.images?.length ?? 0;
+    }
+    if (q.premises) {
+      for (const p of q.premises) count += p.images?.length ?? 0;
+    }
+    if (q.responses) {
+      for (const r of q.responses) count += r.images?.length ?? 0;
+    }
+  }
+  return count;
+}
+
 /**
  * Main entry point to parse any uploaded question file (.docx, .doc, .pdf, .xlsx, .xls, .csv, .txt, .rtf, .json, .html)
- * into CBT Question items, automatically recognizing each question's type according to the file content.
+ * into CBT Question items, automatically recognizing each question's type and embedded images according to the file content.
  */
 export async function parseWordQuestions(
   file: File,
@@ -4432,6 +5306,7 @@ export async function parseWordQuestions(
   questions: Question[];
   redDetectedCount: number;
   tableCount: number;
+  imageCount: number;
   typeBreakdown: Record<string, number>;
 }> {
   const fileNameLower = file.name.trim().toLowerCase();
@@ -4456,7 +5331,13 @@ export async function parseWordQuestions(
         category: item.category || defaultCategory,
         stimulusTitle: item.stimulusTitle,
         stimulusText: item.stimulusText,
+        stimulusImages: Array.isArray(item.stimulusImages)
+          ? item.stimulusImages.filter((src) => isSafeImageDataUrl(src))
+          : undefined,
         questionText: item.questionText || `Pertanyaan No. ${startingNumber + idx}`,
+        questionImages: Array.isArray(item.questionImages)
+          ? item.questionImages.filter((src) => isSafeImageDataUrl(src))
+          : undefined,
         instructionText: item.instructionText || 'Pilih jawaban yang tepat!',
         options: item.options,
         correctOptionId: item.correctOptionId,
@@ -4480,6 +5361,7 @@ export async function parseWordQuestions(
         questions,
         redDetectedCount: questions.length,
         tableCount: questions.filter((q) => Boolean(q.stimulusTable)).length,
+        imageCount: countTotalQuestionImages(questions),
         typeBreakdown,
       };
     }
@@ -4511,13 +5393,18 @@ export async function parseWordQuestions(
   if (isPdfContainer) {
     blocks = await parsePdfDocumentBlocks(bytes);
   } else if (isZipContainer && !isSpreadsheetExt) {
-    const zipFiles = await extractZipFiles(buffer);
-    const documentXml = zipFiles['word/document.xml'];
+    const { textFiles, binaryFiles } = await extractZipFiles(buffer);
+    const documentXml = textFiles['word/document.xml'];
     if (documentXml) {
+      const relImageMap = await buildDocxRelImageMap(
+        textFiles['word/_rels/document.xml.rels'],
+        binaryFiles
+      );
       blocks = parseDocxDocumentBlocks(
         documentXml,
-        zipFiles['word/numbering.xml'],
-        zipFiles['word/styles.xml']
+        textFiles['word/numbering.xml'],
+        textFiles['word/styles.xml'],
+        relImageMap
       );
     } else {
       // ZIP container without word/document.xml (e.g. .xlsx renamed or spreadsheet)
@@ -4563,13 +5450,14 @@ export async function parseWordQuestions(
   ).length;
 
   const tableCount = questions.filter((q) => Boolean(q.stimulusTable)).length;
+  const imageCount = countTotalQuestionImages(questions);
 
   const typeBreakdown: Record<string, number> = {};
   questions.forEach((q) => {
     typeBreakdown[q.type] = (typeBreakdown[q.type] || 0) + 1;
   });
 
-  return { questions, redDetectedCount, tableCount, typeBreakdown };
+  return { questions, redDetectedCount, tableCount, imageCount, typeBreakdown };
 }
 
 /**

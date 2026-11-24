@@ -7,6 +7,7 @@ const STUDENTS_HASH_KEY = 'smadip_cbt_vercel_students_v1';
 const RESULTS_HASH_KEY = 'smadip_cbt_vercel_results_v1';
 const META_KEY = 'smadip_cbt_vercel_meta_v1';
 const LOCK_KEY = 'smadip_cbt_vercel_lock_v1';
+const SESSION_SECRET_KEY = 'smadip_cbt_internal_session_secret_v1';
 
 // Global in-memory cache, write mutex, and ephemeral session secret fallback across warm serverless invocations
 declare global {
@@ -1621,14 +1622,48 @@ interface SessionClaims {
   exp: number;
 }
 
-function getSessionSigningSecret(): string {
+async function resolveSessionSigningSecret(
+  kv: { url: string; token: string } | null
+): Promise<string> {
   const envSecret = (process.env.CBT_SESSION_SECRET || '').trim();
   if (envSecret) return envSecret;
-  if (!globalThis.__SMADIP_CBT_SESSION_SECRET__) {
-    globalThis.__SMADIP_CBT_SESSION_SECRET__ = crypto
-      .randomBytes(32)
-      .toString('hex');
+  if (globalThis.__SMADIP_CBT_SESSION_SECRET__) {
+    return String(globalThis.__SMADIP_CBT_SESSION_SECRET__);
   }
+
+  if (kv) {
+    try {
+      const readPipe = await kvPipeline(kv, [['GET', SESSION_SECRET_KEY]]);
+      const existingSecret =
+        readPipe.ok && typeof readPipe.results[0] === 'string'
+          ? readPipe.results[0].trim()
+          : '';
+      if (existingSecret && existingSecret.length >= 32) {
+        globalThis.__SMADIP_CBT_SESSION_SECRET__ = existingSecret;
+        return existingSecret;
+      }
+
+      const generated = crypto.randomBytes(32).toString('hex');
+      const setPipe = await kvPipeline(kv, [
+        ['SET', SESSION_SECRET_KEY, generated, 'NX'],
+        ['GET', SESSION_SECRET_KEY],
+      ]);
+      const agreedSecret =
+        setPipe.ok && typeof setPipe.results[1] === 'string'
+          ? setPipe.results[1].trim()
+          : '';
+      if (agreedSecret && agreedSecret.length >= 32) {
+        globalThis.__SMADIP_CBT_SESSION_SECRET__ = agreedSecret;
+        return agreedSecret;
+      }
+    } catch {
+      // Fallback to in-memory secret if KV is transiently unreachable
+    }
+  }
+
+  globalThis.__SMADIP_CBT_SESSION_SECRET__ = crypto
+    .randomBytes(32)
+    .toString('hex');
   return String(globalThis.__SMADIP_CBT_SESSION_SECRET__);
 }
 
@@ -1639,7 +1674,11 @@ function safeEqualStr(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function createSessionToken(role: SessionRole, sub: string): string {
+function createSessionToken(
+  role: SessionRole,
+  sub: string,
+  secret: string
+): string {
   const claims: SessionClaims = {
     role,
     sub: sub.trim().toUpperCase(),
@@ -1649,13 +1688,13 @@ function createSessionToken(role: SessionRole, sub: string): string {
     'base64url'
   );
   const sig = crypto
-    .createHmac('sha256', getSessionSigningSecret())
+    .createHmac('sha256', secret)
     .update(payloadB64)
     .digest('base64url');
   return `${payloadB64}.${sig}`;
 }
 
-function verifySessionToken(req: any): SessionClaims | null {
+function verifySessionToken(req: any, secret: string): SessionClaims | null {
   try {
     const authHeader = String(
       req?.headers?.authorization || req?.headers?.Authorization || ''
@@ -1667,7 +1706,7 @@ function verifySessionToken(req: any): SessionClaims | null {
     const payloadB64 = token.slice(0, dotIdx);
     const sig = token.slice(dotIdx + 1);
     const expectedSig = crypto
-      .createHmac('sha256', getSessionSigningSecret())
+      .createHmac('sha256', secret)
       .update(payloadB64)
       .digest('base64url');
     if (!safeEqualStr(sig, expectedSig)) return null;
@@ -1824,6 +1863,7 @@ function redactStorageForRole(
   }
 
   // Student or unauthenticated caller: strictly strip passwords, admin/proctor lists, activeToken, and all answer keys
+  const isAuthenticatedStudent = session?.role === 'student' && Boolean(session.sub);
   const safeData: Record<string, unknown> = { ...data };
   delete safeData.activeToken;
   delete safeData.proctors;
@@ -1832,7 +1872,19 @@ function redactStorageForRole(
     safeData.participants = (safeData.participants as Record<string, any>[]).map(
       (row) => {
         if (!row || typeof row !== 'object') return row;
-        const { password: _pw, ...safeRow } = row;
+        const rowUser = String(row.username || '').trim().toUpperCase();
+        const isOwnRow = isAuthenticatedStudent && rowUser === session!.sub;
+        if (isOwnRow) {
+          const { password: _pw, ...safeRow } = row;
+          return safeRow;
+        }
+        const {
+          password: _pw,
+          draftAnswers: _da,
+          draftPackageId: _dp,
+          draftRemainingSeconds: _dr,
+          ...safeRow
+        } = row;
         return safeRow;
       }
     );
@@ -1844,12 +1896,24 @@ function redactStorageForRole(
         if (!pkg || typeof pkg !== 'object') return pkg;
         return {
           ...pkg,
-          questions: Array.isArray(pkg.questions)
-            ? pkg.questions.map((q: any) => redactQuestionForStudent(q))
-            : [],
+          questions:
+            isAuthenticatedStudent && Array.isArray(pkg.questions)
+              ? pkg.questions.map((q: any) => redactQuestionForStudent(q))
+              : [],
         };
       }
     );
+  }
+
+  if (Array.isArray(safeData.resultsHistory)) {
+    safeData.resultsHistory = isAuthenticatedStudent
+      ? (safeData.resultsHistory as Record<string, any>[]).filter(
+          (r) =>
+            String(r?.participant?.username || '')
+              .trim()
+              .toUpperCase() === session!.sub
+        )
+      : [];
   }
 
   if (
@@ -1962,7 +2026,7 @@ function isServerPasswordMatch(
 ): boolean {
   const expected = expectedRaw.trim();
   const input = inputRaw.trim();
-  if (!expected) return true;
+  if (!expected || !input) return false;
   if (safeEqualStr(input, expected)) return true;
   if (
     expected === expected.toUpperCase() &&
@@ -1971,6 +2035,29 @@ function isServerPasswordMatch(
     return true;
   }
   return false;
+}
+
+function dedupeServerResultsHistory(
+  candidates: Record<string, any>[]
+): Record<string, any>[] {
+  const seenIds = new Set<string>();
+  const seenUserSubject = new Set<string>();
+  const result: Record<string, any>[] = [];
+  for (const item of candidates) {
+    if (!item || typeof item !== 'object') continue;
+    const id = String(item.id || '').trim();
+    if (id && seenIds.has(id)) continue;
+    const uKey = String(item?.participant?.username || '')
+      .trim()
+      .toUpperCase();
+    const pkgKey = cleanServerMapelTitle(item?.packageTitle);
+    const compositeKey = uKey && pkgKey ? `${uKey}__${pkgKey}` : '';
+    if (compositeKey && seenUserSubject.has(compositeKey)) continue;
+    if (id) seenIds.add(id);
+    if (compositeKey) seenUserSubject.add(compositeKey);
+    result.push(item);
+  }
+  return result;
 }
 
 const BOOTSTRAP_ADMIN_ACCOUNTS = [
@@ -2003,7 +2090,8 @@ export default async function handler(req: any, res: any) {
 
   const kv = getKvConfig();
   const engine = kv ? 'vercel-kv' : 'vercel-serverless';
-  const session = verifySessionToken(req);
+  const sessionSecret = await resolveSessionSigningSecret(kv);
+  const session = verifySessionToken(req, sessionSecret);
 
   if (req.method === 'GET') {
     let sinceParam = 0;
@@ -2190,7 +2278,7 @@ export default async function handler(req: any, res: any) {
           }
 
           const adminId = String(matchedAdmin.adminId).trim().toUpperCase();
-          const token = createSessionToken('admin', adminId);
+          const token = createSessionToken('admin', adminId, sessionSecret);
           return res.status(200).json({
             ok: true,
             token,
@@ -2260,7 +2348,7 @@ export default async function handler(req: any, res: any) {
           )
             .trim()
             .toUpperCase();
-          const token = createSessionToken('proctor', sub);
+          const token = createSessionToken('proctor', sub, sessionSecret);
           return res.status(200).json({
             ok: true,
             token,
@@ -2370,7 +2458,7 @@ export default async function handler(req: any, res: any) {
             }
           }
 
-          const token = createSessionToken('student', rowUsername);
+          const token = createSessionToken('student', rowUsername, sessionSecret);
           return res.status(200).json({
             ok: true,
             token,
@@ -2419,31 +2507,38 @@ export default async function handler(req: any, res: any) {
           (p) => String(p.username || '').trim().toUpperCase() === reqUsername
         );
 
-        if (studentRow) {
-          if (isServerRowLockedByViolation(studentRow)) {
-            return res.status(403).json({
-              ok: false,
-              reason: 'locked',
-              participantStatus: isServerRowStatusActive(studentRow.status)
-                ? 'Active'
-                : 'Non Active',
-              error:
-                'Akses Ditolak: Akun Anda terkunci karena pelanggaran. Hubungi Proktor/Administrator untuk Reset Login.',
-            });
-          }
-          if (!isServerRowStatusActive(studentRow.status)) {
-            return res.status(403).json({
-              ok: false,
-              reason: 'non_active',
-              participantStatus: 'Non Active',
-              error:
-                'Akses Ditolak: Status peserta Anda telah dinonaktifkan (Non Active) pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator.',
-            });
-          }
+        if (!studentRow) {
+          return res.status(403).json({
+            ok: false,
+            reason: 'non_active',
+            participantStatus: 'Non Active',
+            error:
+              'Akses Ditolak: Data peserta Anda tidak ditemukan atau telah dihapus dari daftar peserta aktif. Silakan hubungi Proktor atau Administrator.',
+          });
         }
 
-        const studentKelas =
-          normalizeServerKelas(studentRow?.kelas) || 'X';
+        if (isServerRowLockedByViolation(studentRow)) {
+          return res.status(403).json({
+            ok: false,
+            reason: 'locked',
+            participantStatus: isServerRowStatusActive(studentRow.status)
+              ? 'Active'
+              : 'Non Active',
+            error:
+              'Akses Ditolak: Akun Anda terkunci karena pelanggaran. Hubungi Proktor/Administrator untuk Reset Login.',
+          });
+        }
+        if (!isServerRowStatusActive(studentRow.status)) {
+          return res.status(403).json({
+            ok: false,
+            reason: 'non_active',
+            participantStatus: 'Non Active',
+            error:
+              'Akses Ditolak: Status peserta Anda telah dinonaktifkan (Non Active) pada menu Kelompok Tes. Silakan hubungi Proktor atau Administrator.',
+          });
+        }
+
+        const studentKelas = normalizeServerKelas(studentRow.kelas);
         const allSchedules = Array.isArray(existing.schedules)
           ? (existing.schedules as Record<string, any>[])
           : [];
@@ -2633,10 +2728,10 @@ export default async function handler(req: any, res: any) {
             const existingHistory = Array.isArray(existing.resultsHistory)
               ? (existing.resultsHistory as Record<string, any>[])
               : [];
-            const nextResultsHistory = [
+            const nextResultsHistory = dedupeServerResultsHistory([
               summary,
-              ...existingHistory.filter((r) => r?.id !== summary.id),
-            ];
+              ...existingHistory,
+            ]);
 
             const merged: Record<string, unknown> = {
               ...existing,
@@ -2967,21 +3062,12 @@ export default async function handler(req: any, res: any) {
             : null;
 
         if (appendedItem || incomingHistory.length > 0 || baseExistingHistory.length > 0) {
-          const seenIds = new Set<string>();
-          const combinedHistory: Record<string, any>[] = [];
           const candidates = [
             ...(appendedItem ? [appendedItem] : []),
             ...incomingHistory,
             ...baseExistingHistory,
           ];
-          for (const item of candidates) {
-            if (!item || typeof item !== 'object') continue;
-            const id = String((item as any).id || '').trim();
-            if (id && seenIds.has(id)) continue;
-            if (id) seenIds.add(id);
-            combinedHistory.push(item);
-          }
-          nextResultsHistory = combinedHistory;
+          nextResultsHistory = dedupeServerResultsHistory(candidates);
         }
       }
 

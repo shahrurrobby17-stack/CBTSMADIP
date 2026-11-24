@@ -1704,6 +1704,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         questions: importedQuestions,
         redDetectedCount,
         tableCount,
+        imageCount,
         typeBreakdown,
       } = await parseWordQuestions(file, newQuestionType, startNum, defaultCat);
 
@@ -1739,9 +1740,11 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
         .map((t) => `${typeBreakdown[t]} ${getQuestionTypeLabel(t)}`)
         .join(', ');
       const tableInfo =
-        tableCount > 0 ? `, termasuk ${tableCount} tabel soal` : '';
+        tableCount > 0 ? `, ${tableCount} tabel soal` : '';
+      const imageInfo =
+        imageCount > 0 ? `, ${imageCount} gambar terbaca` : '';
       showNotice(
-        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} soal dikenali otomatis (${breakdownSummary}; ${redDetectedCount} kunci jawaban${tableInfo}).`
+        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} soal dikenali otomatis (${breakdownSummary}; ${redDetectedCount} kunci jawaban${tableInfo}${imageInfo}).`
       );
     } catch {
       showNotice(
@@ -3005,7 +3008,7 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                       <span className="font-bold text-rose-600 underline">
                         warna merah
                       </span>{' '}
-                      pada tulisan opsi jawaban yang benar atau sertakan ringkasan kunci jawaban di dalam file Word/PDF (mendukung Stimulus/Wacana, PG Kompleks, Benar/Salah, serta tabel). Jika sudah Upload File Soal, kolom Pertanyaan Soal dan Jawaban di bawah <strong>tidak harus diisi</strong>.
+                      pada tulisan opsi jawaban yang benar atau sertakan ringkasan kunci jawaban di dalam file Word/PDF (otomatis membaca <strong>gambar soal/opsi/stimulus</strong> dari Word .docx & PDF, tabel, Stimulus/Wacana, PG Kompleks, Benar/Salah, serta Menjodohkan). Jika sudah Upload File Soal, kolom Pertanyaan Soal dan Jawaban di bawah <strong>tidak harus diisi</strong>.
                     </span>
                   </div>
                   {lastUploadedWordFile && (
@@ -3869,15 +3872,15 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {classResults.map((r, idx) => (
-                              <tr key={r.id} className="hover:bg-slate-50/80">
+                              <tr key={r.id || idx} className="hover:bg-slate-50/80">
                                 <td className="py-3 px-4 font-mono text-slate-500">
                                   {idx + 1}
                                 </td>
                                 <td className="py-3 px-4 font-mono font-semibold text-slate-800">
-                                  {r.participant.username}
+                                  {r?.participant?.username || '-'}
                                 </td>
                                 <td className="py-3 px-4 font-semibold text-slate-800">
-                                  {r.participant.fullName}
+                                  {r?.participant?.fullName || '-'}
                                 </td>
                                 <td className="py-3 px-4 font-semibold text-slate-700">
                                   Kelas {cls}

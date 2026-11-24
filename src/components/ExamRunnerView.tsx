@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { ExamPackage, Question, StudentAnswer } from '../types/cbt';
 import { getQuestionTypeLabel, isQuestionAnswered } from '../data/cbtData';
+import { QuestionImageGallery } from './QuestionImageGallery';
 
 interface ExamRunnerViewProps {
   examPackage: ExamPackage;
@@ -480,7 +481,9 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
               {(currentQuestion.stimulusTitle ||
                 currentQuestion.stimulusText ||
                 currentQuestion.stimulusHighlightBox ||
-                currentQuestion.stimulusSource) && (
+                currentQuestion.stimulusSource ||
+                (currentQuestion.stimulusImages &&
+                  currentQuestion.stimulusImages.length > 0)) && (
                 <div className="mb-4 p-4 sm:p-5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
                   {currentQuestion.stimulusTitle && (
                     <h4 className="font-bold text-slate-900 text-xs sm:text-sm uppercase tracking-wide">
@@ -492,6 +495,13 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                       {currentQuestion.stimulusText}
                     </div>
                   )}
+                  {currentQuestion.stimulusImages &&
+                    currentQuestion.stimulusImages.length > 0 && (
+                      <QuestionImageGallery
+                        images={currentQuestion.stimulusImages}
+                        altPrefix={`Gambar Stimulus Soal ${displayQuestionNumber}`}
+                      />
+                    )}
                   {currentQuestion.stimulusHighlightBox && (
                     <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-[#001a6e] font-semibold text-xs sm:text-sm whitespace-pre-line">
                       {currentQuestion.stimulusHighlightBox}
@@ -509,6 +519,15 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
               <div className={`font-semibold text-slate-900 whitespace-pre-line ${fontSizeClass}`}>
                 {currentQuestion.questionText}
               </div>
+
+              {/* Optional Images attached to Question Stem */}
+              {currentQuestion.questionImages &&
+                currentQuestion.questionImages.length > 0 && (
+                  <QuestionImageGallery
+                    images={currentQuestion.questionImages}
+                    altPrefix={`Gambar Soal ${displayQuestionNumber}`}
+                  />
+                )}
 
               {/* Optional Table inside Question */}
               {currentQuestion.stimulusTable && (
@@ -591,9 +610,20 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                             >
                               {displayLetter}
                             </span>
-                            <span className={`text-slate-800 ${fontSizeClass}`}>
-                              {opt.text}
-                            </span>
+                            <div className="flex-1 min-w-0">
+                              {opt.text && (
+                                <span className={`block text-slate-800 ${fontSizeClass}`}>
+                                  {opt.text}
+                                </span>
+                              )}
+                              {opt.images && opt.images.length > 0 && (
+                                <QuestionImageGallery
+                                  images={opt.images}
+                                  altPrefix={`Gambar Opsi ${displayLetter}`}
+                                  compact
+                                />
+                              )}
+                            </div>
                           </button>
                         );
                       })}
@@ -604,7 +634,7 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                 {currentQuestion.type === 'pilihan_ganda_kompleks' &&
                   currentQuestion.options && (
                     <div className="space-y-2.5">
-                      {currentQuestion.options.map((opt) => {
+                      {currentQuestion.options.map((opt, optIdx) => {
                         const isChecked = (
                           currentAnswer.selectedOptionIds || []
                         ).includes(opt.id);
@@ -626,9 +656,20 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                                 <Square className="w-5 h-5 text-slate-400" />
                               )}
                             </span>
-                            <span className={`text-slate-800 ${fontSizeClass}`}>
-                              {opt.text}
-                            </span>
+                            <div className="flex-1 min-w-0">
+                              {opt.text && (
+                                <span className={`block text-slate-800 ${fontSizeClass}`}>
+                                  {opt.text}
+                                </span>
+                              )}
+                              {opt.images && opt.images.length > 0 && (
+                                <QuestionImageGallery
+                                  images={opt.images}
+                                  altPrefix={`Gambar Opsi ${optIdx + 1}`}
+                                  compact
+                                />
+                              )}
+                            </div>
                           </button>
                         );
                       })}
@@ -658,7 +699,14 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                             return (
                               <tr key={st.id} className="hover:bg-slate-50/80">
                                 <td className={`py-3.5 px-4 text-slate-800 ${fontSizeClass}`}>
-                                  {st.statement}
+                                  <div>{st.statement}</div>
+                                  {st.images && st.images.length > 0 && (
+                                    <QuestionImageGallery
+                                      images={st.images}
+                                      altPrefix={`Gambar Pernyataan ${st.id}`}
+                                      compact
+                                    />
+                                  )}
                                 </td>
                                 <td className="py-3.5 px-3 text-center">
                                   <button
@@ -751,9 +799,18 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                                     : 'bg-white hover:bg-slate-50 border-slate-200'
                                 }`}
                               >
-                                <span className="text-xs sm:text-sm font-medium text-slate-800">
-                                  {pIdx + 1}. {prem.text}
-                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <span className="block text-xs sm:text-sm font-medium text-slate-800">
+                                    {pIdx + 1}. {prem.text}
+                                  </span>
+                                  {prem.images && prem.images.length > 0 && (
+                                    <QuestionImageGallery
+                                      images={prem.images}
+                                      altPrefix={`Gambar Premis ${pIdx + 1}`}
+                                      compact
+                                    />
+                                  )}
+                                </div>
                                 {pairedResponseId && (
                                   <span
                                     className={`px-2 py-0.5 rounded text-[11px] font-bold shrink-0 flex items-center gap-1 ${colorObj.badge}`}
@@ -800,9 +857,18 @@ export const ExamRunnerView: React.FC<ExamRunnerViewProps> = ({
                                     : 'bg-white hover:bg-slate-50 border-slate-200'
                                 }`}
                               >
-                                <span className="text-xs sm:text-sm text-slate-800">
-                                  {String.fromCharCode(65 + rIdx)}. {resp.text}
-                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <span className="block text-xs sm:text-sm text-slate-800">
+                                    {String.fromCharCode(65 + rIdx)}. {resp.text}
+                                  </span>
+                                  {resp.images && resp.images.length > 0 && (
+                                    <QuestionImageGallery
+                                      images={resp.images}
+                                      altPrefix={`Gambar Respon ${String.fromCharCode(65 + rIdx)}`}
+                                      compact
+                                    />
+                                  )}
+                                </div>
                                 {isPaired && colorObj && (
                                   <span
                                     className={`px-2 py-0.5 rounded text-[11px] font-bold shrink-0 ${colorObj.badge}`}

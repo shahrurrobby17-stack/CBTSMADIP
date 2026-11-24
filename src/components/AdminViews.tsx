@@ -44,9 +44,11 @@ import {
   Edit,
   X,
   Check,
+  Image as ImageIcon,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { TutWuriLogo } from './PusmendikHeader';
+import { QuestionImageGallery } from './QuestionImageGallery';
 import {
   AdminScheduleItem,
   ExamPackage,
@@ -1045,14 +1047,37 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [localProctors, setLocalProctors] = useState<AdminProctorItem[]>(
     INITIAL_ADMIN_PROCTORS
   );
-  const rawParticipants = externalParticipants ?? localParticipants;
+  const rawParticipants = Array.isArray(externalParticipants)
+    ? externalParticipants
+    : localParticipants;
   const participants = useMemo(
     () => sanitizeParticipantRows(rawParticipants),
     [rawParticipants]
   );
   const setParticipants = onUpdateParticipants ?? setLocalParticipants;
-  const proctors = externalProctors ?? localProctors;
+  const proctors = useMemo(
+    () =>
+      (Array.isArray(externalProctors) ? externalProctors : localProctors).filter(
+        (pr) => Boolean(pr && typeof pr === 'object')
+      ),
+    [externalProctors, localProctors]
+  );
   const setProctors = onUpdateProctors ?? setLocalProctors;
+  const safeSchedules = useMemo(
+    () => (Array.isArray(schedules) ? schedules : []),
+    [schedules]
+  );
+  const safePackages = useMemo(
+    () => (Array.isArray(packages) ? packages : []),
+    [packages]
+  );
+  const safeResultsHistory = useMemo(
+    () =>
+      (Array.isArray(resultsHistory) ? resultsHistory : []).filter(
+        (r) => Boolean(r && typeof r === 'object')
+      ),
+    [resultsHistory]
+  );
 
   // Add New Proctor Form States
   const [newProctorName, setNewProctorName] = useState('');
@@ -1085,14 +1110,24 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     return Array.from(roomSet);
   }, [proctors, participants]);
 
+  const availableKodeTesList = useMemo(() => {
+    const kodeSet = new Set<string>(['SAS26SMADIP1']);
+    participants.forEach((p) => {
+      const kt = String(p?.kodeTes || '').trim();
+      if (kt) kodeSet.add(kt);
+    });
+    return Array.from(kodeSet);
+  }, [participants]);
+
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [toastMsg, setToastMsg] = useState<string>('');
   const [showLogoutConfirmModal, setShowLogoutConfirmModal] = useState<boolean>(false);
 
   // Question Bank & Token states
-  const [selectedPkgId, setSelectedPkgId] = useState(packages[0]?.id || '');
+  const [selectedPkgId, setSelectedPkgId] = useState(safePackages[0]?.id || '');
   const [statusTesKelas, setStatusTesKelas] = useState('Semua Kelas');
   const [statusTesTipeSoal, setStatusTesTipeSoal] = useState('Semua Tipe Soal');
+  const [appendUploadMode, setAppendUploadMode] = useState(false);
   const [showQuestionPreviewModal, setShowQuestionPreviewModal] = useState(false);
   const [previewQuestionIdx, setPreviewQuestionIdx] = useState(0);
   const [customTokenInput, setCustomTokenInput] = useState(activeToken);
@@ -1156,17 +1191,17 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const [newDurasi, setNewDurasi] = useState('90 Menit');
 
   const activeSchedules = useMemo(
-    () => schedules.filter((s) => s.isActive),
-    [schedules]
+    () => safeSchedules.filter((s) => s?.isActive),
+    [safeSchedules]
   );
   const isAnyScheduleActive = activeSchedules.length > 0;
 
   // Auto-generated Username (SA2026 + Angka Acak) & Password for next participant in Daftar Peserta
   const nextAutoSequence = useMemo(() => {
     const usedUsernames = new Set(
-      participants.map((p) => p.username.trim().toUpperCase())
+      participants.map((p) => String(p?.username || '').trim().toUpperCase())
     );
-    let seed = (participants.length + 1) * 379 + 1423;
+    const seed = (participants.length + 1) * 379 + 1423;
     let candidate = 1000 + (seed % 9000);
     while (usedUsernames.has(`SA2026${candidate}`)) {
       candidate = 1000 + ((candidate + 437) % 9000);
@@ -1259,6 +1294,150 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     updatedAt: 0,
   };
 
+  const normalizeAdminConfig = (
+    sourceObj: any,
+    fallbackPrev?: typeof defaultAdminConfig
+  ): typeof defaultAdminConfig => {
+    const base = fallbackPrev || defaultAdminConfig;
+    if (!sourceObj || typeof sourceObj !== 'object') {
+      return {
+        ...base,
+        logoKartuPeserta:
+          base.logoKartuPeserta ||
+          (() => {
+            try {
+              return localStorage.getItem('cbt_kartu_peserta_logo') || '';
+            } catch {
+              return '';
+            }
+          })(),
+      };
+    }
+
+    const parsed = sourceObj;
+    const isCustomMapelConfigured = Boolean(parsed.customMapelConfigured);
+    const deletedCodesSet = new Set<string>(
+      Array.isArray(parsed.deletedMapelCodes)
+        ? parsed.deletedMapelCodes.map((c: any) =>
+            String(c || '').trim().toUpperCase()
+          )
+        : []
+    );
+    const deletedNamesSet = new Set<string>(
+      Array.isArray(parsed.deletedMapelNames)
+        ? parsed.deletedMapelNames.map((n: any) =>
+            String(n || '').trim().toLowerCase()
+          )
+        : []
+    );
+
+    const rawMapelList = Array.isArray(parsed.mapelList)
+      ? parsed.mapelList
+      : Array.isArray(base.mapelList)
+      ? base.mapelList
+      : defaultMapelList;
+
+    const normalizedMapelList = rawMapelList
+      .filter((m: any) => m && typeof m === 'object')
+      .map((m: any) => ({
+        ...m,
+        tingkat: getTargetClassFromMapel(m),
+      }))
+      .filter((m: any) => {
+        const mKode = String(m.kode || '').trim().toUpperCase();
+        const mNama = String(m.nama || '').trim().toLowerCase();
+        if (mKode && deletedCodesSet.has(mKode)) return false;
+        if (mNama && deletedNamesSet.has(mNama)) return false;
+        return true;
+      });
+
+    if (
+      !isCustomMapelConfigured &&
+      deletedCodesSet.size === 0 &&
+      deletedNamesSet.size === 0 &&
+      normalizedMapelList.length < 10
+    ) {
+      const existingCodes = new Set(
+        normalizedMapelList.map((m: any) => String(m.kode || '').trim().toUpperCase())
+      );
+      defaultMapelList.forEach((defM: any) => {
+        const defCode = String(defM.kode || '').trim().toUpperCase();
+        if (defCode && !existingCodes.has(defCode)) {
+          normalizedMapelList.push({
+            ...defM,
+            tingkat: getTargetClassFromMapel(defM),
+          });
+          existingCodes.add(defCode);
+        }
+      });
+    }
+
+    const migratedAdminNama =
+      !parsed.adminNama || parsed.adminNama === 'ROMEO GALISTRA, S.Pd.'
+        ? 'SHAHRUR ROBBY, S.Pd.'
+        : String(parsed.adminNama);
+
+    const rawAdminList = Array.isArray(parsed.adminList) && parsed.adminList.length > 0
+      ? parsed.adminList
+      : Array.isArray(base.adminList) && base.adminList.length > 0
+      ? base.adminList
+      : defaultAdminList;
+
+    const migratedAdminList = rawAdminList
+      .filter((adm: any) => adm && typeof adm === 'object')
+      .map((adm: any) =>
+        adm.adminId === 'K05060108-KB6K' &&
+        adm.namaLengkap === 'ROMEO GALISTRA, S.Pd.'
+          ? {
+              ...adm,
+              namaLengkap: 'SHAHRUR ROBBY, S.Pd.',
+              email: 'shahrurrobby17@gmail.com',
+              password: adm.password || 'SAS2026',
+            }
+          : {
+              ...adm,
+              adminId: String(adm.adminId || 'ADMIN_SMADIP'),
+              namaLengkap: String(adm.namaLengkap || 'Administrator CBT'),
+              password: adm.password || 'SAS2026',
+            }
+      );
+
+    const normalizedInterval =
+      !parsed.updatedAt && parsed.tokenIntervalMenit === 15
+        ? 10
+        : Number(parsed.tokenIntervalMenit) || 10;
+
+    let savedLogo = '';
+    try {
+      savedLogo = localStorage.getItem('cbt_kartu_peserta_logo') || '';
+    } catch {
+      savedLogo = '';
+    }
+
+    return {
+      ...base,
+      ...parsed,
+      tokenIntervalMenit: normalizedInterval,
+      enforceMinFinishTime: Boolean(parsed.enforceMinFinishTime),
+      logoKartuPeserta:
+        typeof parsed.logoKartuPeserta === 'string'
+          ? parsed.logoKartuPeserta || savedLogo
+          : savedLogo,
+      namaProktor: String(parsed.namaProktor || base.namaProktor || 'DRS. H. AHMAD FAUZI, M.PD.'),
+      adminNama: migratedAdminNama,
+      adminList: migratedAdminList.length > 0 ? migratedAdminList : defaultAdminList,
+      kelasList:
+        Array.isArray(parsed.kelasList) && parsed.kelasList.length > 0
+          ? parsed.kelasList
+          : Array.isArray(base.kelasList) && base.kelasList.length > 0
+          ? base.kelasList
+          : defaultKelasList,
+      mapelList: normalizedMapelList,
+      deletedMapelCodes: Array.from(deletedCodesSet),
+      deletedMapelNames: Array.from(deletedNamesSet),
+    };
+  };
+
   const [appConfig, setAppConfig] = useState<typeof defaultAdminConfig>(() => {
     try {
       const sourceObj =
@@ -1268,114 +1447,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               const saved = localStorage.getItem('cbt_admin_settings');
               return saved ? JSON.parse(saved) : null;
             })();
-      if (sourceObj) {
-        const parsed = sourceObj;
-        const isCustomMapelConfigured = Boolean(parsed.customMapelConfigured);
-        const deletedCodesSet = new Set<string>(
-          Array.isArray(parsed.deletedMapelCodes)
-            ? parsed.deletedMapelCodes.map((c: any) => String(c || '').trim().toUpperCase())
-            : []
-        );
-        const deletedNamesSet = new Set<string>(
-          Array.isArray(parsed.deletedMapelNames)
-            ? parsed.deletedMapelNames.map((n: any) => String(n || '').trim().toLowerCase())
-            : []
-        );
-
-        const rawMapelList = Array.isArray(parsed.mapelList)
-          ? parsed.mapelList
-          : defaultMapelList;
-
-        let normalizedMapelList = rawMapelList
-          .filter((m: any) => m && typeof m === 'object')
-          .map((m: any) => ({
-            ...m,
-            tingkat: getTargetClassFromMapel(m),
-          }))
-          .filter((m: any) => {
-            const mKode = String(m.kode || '').trim().toUpperCase();
-            const mNama = String(m.nama || '').trim().toLowerCase();
-            if (mKode && deletedCodesSet.has(mKode)) return false;
-            if (mNama && deletedNamesSet.has(mNama)) return false;
-            return true;
-          });
-
-        // Hanya lengkapi dengan mapel standar jika admin belum pernah menghapus/mengatur mapel secara kustom
-        if (
-          !isCustomMapelConfigured &&
-          deletedCodesSet.size === 0 &&
-          deletedNamesSet.size === 0 &&
-          normalizedMapelList.length < 10
-        ) {
-          const existingCodes = new Set(
-            normalizedMapelList.map((m: any) => (m.kode || '').trim().toUpperCase())
-          );
-          defaultMapelList.forEach((defM: any) => {
-            const defCode = (defM.kode || '').trim().toUpperCase();
-            if (defCode && !existingCodes.has(defCode)) {
-              normalizedMapelList.push({
-                ...defM,
-                tingkat: getTargetClassFromMapel(defM),
-              });
-              existingCodes.add(defCode);
-            }
-          });
-        }
-
-        const migratedAdminNama =
-          !parsed.adminNama || parsed.adminNama === 'ROMEO GALISTRA, S.Pd.'
-            ? 'SHAHRUR ROBBY, S.Pd.'
-            : parsed.adminNama;
-
-        const migratedAdminList =
-          Array.isArray(parsed.adminList) && parsed.adminList.length > 0
-            ? parsed.adminList.map((adm: any) =>
-                adm.adminId === 'K05060108-KB6K' &&
-                adm.namaLengkap === 'ROMEO GALISTRA, S.Pd.'
-                  ? {
-                      ...adm,
-                      namaLengkap: 'SHAHRUR ROBBY, S.Pd.',
-                      email: 'shahrurrobby17@gmail.com',
-                      password: adm.password || 'SAS2026',
-                    }
-                  : {
-                      ...adm,
-                      password: adm.password || 'SAS2026',
-                    }
-              )
-            : defaultAdminList;
-
-        const normalizedInterval =
-          !parsed.updatedAt && parsed.tokenIntervalMenit === 15
-            ? 10
-            : Number(parsed.tokenIntervalMenit) || 10;
-
-        return {
-          ...defaultAdminConfig,
-          ...parsed,
-          tokenIntervalMenit: normalizedInterval,
-          enforceMinFinishTime: Boolean(parsed.enforceMinFinishTime),
-          logoKartuPeserta:
-            parsed.logoKartuPeserta ||
-            localStorage.getItem('cbt_kartu_peserta_logo') ||
-            '',
-          namaProktor: parsed.namaProktor || 'DRS. H. AHMAD FAUZI, M.PD.',
-          adminNama: migratedAdminNama,
-          adminList: migratedAdminList,
-          kelasList:
-            Array.isArray(parsed.kelasList) && parsed.kelasList.length > 0
-              ? parsed.kelasList
-              : defaultKelasList,
-          mapelList: normalizedMapelList,
-        };
-      }
+      return normalizeAdminConfig(sourceObj, defaultAdminConfig);
     } catch {
-      // fallback
+      return normalizeAdminConfig(null, defaultAdminConfig);
     }
-    return {
-      ...defaultAdminConfig,
-      logoKartuPeserta: localStorage.getItem('cbt_kartu_peserta_logo') || '',
-    };
   });
 
   useEffect(() => {
@@ -1389,10 +1464,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     const localTs =
       typeof appConfig.updatedAt === 'number' ? appConfig.updatedAt : 0;
     if (remoteTs > localTs) {
-      setAppConfig((prev) => ({
-        ...prev,
-        ...externalAdminSettings,
-      }));
+      setAppConfig((prev) => normalizeAdminConfig(externalAdminSettings, prev));
     }
   }, [externalAdminSettings, appConfig.updatedAt]);
 
@@ -1435,6 +1507,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       const rawDataUrl = reader.result as string;
       const img = new Image();
       img.onload = () => {
+        let finalDataUrl = rawDataUrl;
         try {
           const canvas = document.createElement('canvas');
           const maxSize = 240;
@@ -1452,37 +1525,24 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           canvas.width = Math.max(1, width);
           canvas.height = Math.max(1, height);
           const ctx = canvas.getContext('2d');
-          let finalDataUrl = rawDataUrl;
           if (ctx) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             finalDataUrl = canvas.toDataURL('image/png');
           }
-
-          setAppConfig((prev) => {
-            const updated = { ...prev, logoKartuPeserta: finalDataUrl };
-            try {
-              localStorage.setItem('cbt_kartu_peserta_logo', finalDataUrl);
-              localStorage.setItem('cbt_admin_settings', JSON.stringify(updated));
-            } catch {
-              // ignore storage quota warning
-            }
-            return updated;
-          });
-          showNotice('Logo Kop Kartu Peserta berhasil diunggah dan disimpan!');
         } catch {
-          setAppConfig((prev) => {
-            const updated = { ...prev, logoKartuPeserta: rawDataUrl };
-            try {
-              localStorage.setItem('cbt_kartu_peserta_logo', rawDataUrl);
-              localStorage.setItem('cbt_admin_settings', JSON.stringify(updated));
-            } catch {
-              // ignore
-            }
-            return updated;
-          });
-          showNotice('Logo Kop Kartu Peserta berhasil diunggah dan disimpan!');
+          finalDataUrl = rawDataUrl;
         }
+        try {
+          localStorage.setItem('cbt_kartu_peserta_logo', finalDataUrl);
+        } catch {
+          // ignore storage quota warning
+        }
+        persistAdminConfig(
+          { ...appConfig, logoKartuPeserta: finalDataUrl },
+          { syncCloud: true }
+        );
+        showNotice('Logo Kop Kartu Peserta berhasil diunggah dan disinkronkan!');
       };
       img.onerror = () => {
         showNotice('Gagal membaca file gambar logo. Silakan pilih file gambar lain.');
@@ -1494,17 +1554,16 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   };
 
   const handleRemoveLogoKartuPeserta = () => {
-    setAppConfig((prev) => {
-      const updated = { ...prev, logoKartuPeserta: '' };
-      try {
-        localStorage.removeItem('cbt_kartu_peserta_logo');
-        localStorage.setItem('cbt_admin_settings', JSON.stringify(updated));
-      } catch {
-        // ignore
-      }
-      return updated;
-    });
-    showNotice('Logo Kop Kartu Peserta berhasil dihapus.');
+    try {
+      localStorage.removeItem('cbt_kartu_peserta_logo');
+    } catch {
+      // ignore
+    }
+    persistAdminConfig(
+      { ...appConfig, logoKartuPeserta: '' },
+      { syncCloud: true }
+    );
+    showNotice('Logo Kop Kartu Peserta berhasil dihapus dan disinkronkan.');
   };
 
   const [editingProctor, setEditingProctor] = useState<AdminProctorItem | null>(null);
@@ -2048,6 +2107,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       .replace(/^Simulasi TKA\s*-\s*/i, '')
       .trim()
       .toLowerCase();
+    const targetClass = itemToDelete ? getTargetClassFromMapel(itemToDelete) : '';
 
     const updatedList = currentList.filter(
       (m: { kode: string }) => m.kode !== kodeToDelete
@@ -2060,12 +2120,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         ...(cleanTargetKode ? [cleanTargetKode] : []),
       ])
     );
+    // Only track deletedMapelNames when no unique kode exists so same-subject other classes stay intact
     const nextDeletedNames = Array.from(
       new Set([
         ...(Array.isArray(appConfig.deletedMapelNames)
           ? appConfig.deletedMapelNames
           : []),
-        ...(cleanTargetNama ? [cleanTargetNama] : []),
+        ...(!cleanTargetKode && cleanTargetNama ? [cleanTargetNama] : []),
       ])
     );
 
@@ -2078,14 +2139,23 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     };
     persistAdminConfig(updatedConfig, { syncCloud: true });
 
-    // Juga hapus dari daftar paket soal CBT agar sinkron di status tes
+    // Juga hapus dari daftar paket soal CBT agar sinkron di status tes (tanpa menghapus kelas lain)
     onUpdatePackages((prevPackages) => {
-      const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
+      const baseList = Array.isArray(prevPackages) ? prevPackages : safePackages;
       return baseList.filter((p) => {
         const pCode = (p.code || '').trim().toUpperCase();
-        const pTitle = (p.title || '').replace(/^Simulasi TKA\s*-\s*/i, '').trim().toLowerCase();
+        const pTitle = (p.title || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .trim()
+          .toLowerCase();
         if (cleanTargetKode && pCode === cleanTargetKode) return false;
-        if (cleanTargetNama && pTitle === cleanTargetNama) return false;
+        if (
+          cleanTargetNama &&
+          pTitle === cleanTargetNama &&
+          (!targetClass || getPkgClass(p) === targetClass)
+        ) {
+          return false;
+        }
         return true;
       });
     });
@@ -2229,25 +2299,31 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     };
     const updatedList = [...currentList, newEntry];
     const updatedDaftar = updatedList.map((k: { kode: string }) => k.kode).join(', ');
-    setAppConfig({
-      ...appConfig,
-      kelasList: updatedList,
-      daftarKelas: updatedDaftar,
-    });
+    persistAdminConfig(
+      {
+        ...appConfig,
+        kelasList: updatedList,
+        daftarKelas: updatedDaftar,
+      },
+      { syncCloud: true }
+    );
     setNewPengaturanKelasKode('');
-    showNotice(`Kolom kelas ${cleanKode} berhasil ditambahkan!`);
+    showNotice(`Kolom kelas ${cleanKode} berhasil ditambahkan dan disinkronkan!`);
   };
 
   const handleDeleteKelasFromSettings = (kodeToDelete: string) => {
     const currentList = Array.isArray(appConfig.kelasList) ? appConfig.kelasList : defaultKelasList;
     const updatedList = currentList.filter((k: { kode: string }) => k.kode !== kodeToDelete);
     const updatedDaftar = updatedList.map((k: { kode: string }) => k.kode).join(', ');
-    setAppConfig({
-      ...appConfig,
-      kelasList: updatedList,
-      daftarKelas: updatedDaftar,
-    });
-    showNotice(`Kelas ${kodeToDelete} berhasil dihapus dari pengaturan.`);
+    persistAdminConfig(
+      {
+        ...appConfig,
+        kelasList: updatedList,
+        daftarKelas: updatedDaftar,
+      },
+      { syncCloud: true }
+    );
+    showNotice(`Kelas ${kodeToDelete} berhasil dihapus dari pengaturan dan disinkronkan.`);
   };
 
   const handleSaveSettings = (e: React.FormEvent) => {
@@ -3069,16 +3145,19 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   };
 
   const handleDeleteMapelPackage = (pkgToDelete: ExamPackage) => {
-    const pkgTitle = pkgToDelete.title.replace(/^Simulasi TKA\s*-\s*/i, '').replace(/\s*\(SMA\/MA\/SMK\)/i, '');
+    const pkgTitle = (pkgToDelete.title || '')
+      .replace(/^Simulasi TKA\s*-\s*/i, '')
+      .replace(/\s*\(SMA\/MA\/SMK\)/i, '');
     const cleanTargetKode = (pkgToDelete.code || '').trim().toUpperCase();
     const cleanTargetNama = (pkgToDelete.title || '')
       .replace(/^Simulasi TKA\s*-\s*/i, '')
       .trim()
       .toLowerCase();
+    const targetClass = getPkgClass(pkgToDelete);
 
-    // 1. Hapus dari packages
+    // 1. Hapus dari packages (hanya untuk mapel & kelas yang cocok)
     onUpdatePackages((prevPackages) => {
-      const baseList = Array.isArray(prevPackages) ? prevPackages : packages;
+      const baseList = Array.isArray(prevPackages) ? prevPackages : safePackages;
       return baseList.filter((p) => {
         if (p.id === pkgToDelete.id) return false;
         const pCode = (p.code || '').trim().toUpperCase();
@@ -3087,23 +3166,35 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           .trim()
           .toLowerCase();
         if (cleanTargetKode && pCode === cleanTargetKode) return false;
-        if (cleanTargetNama && pTitle === cleanTargetNama) return false;
+        if (
+          cleanTargetNama &&
+          pTitle === cleanTargetNama &&
+          getPkgClass(p) === targetClass
+        ) {
+          return false;
+        }
         return true;
       });
     });
 
-    // 2. Hapus dari appConfig.mapelList & simpan ke localStorage
+    // 2. Hapus dari appConfig.mapelList & sinkronkan ke cloud + localStorage
     const currentMapelList = Array.isArray(appConfig.mapelList)
       ? appConfig.mapelList
       : defaultMapelList;
     const updatedMapelList = currentMapelList.filter((m: any) => {
-      const mKode = (m.kode || '').trim().toUpperCase();
-      const mNama = (m.nama || '')
+      const mKode = String(m?.kode || '').trim().toUpperCase();
+      const mNama = String(m?.nama || '')
         .replace(/^Simulasi TKA\s*-\s*/i, '')
         .trim()
         .toLowerCase();
       if (cleanTargetKode && mKode === cleanTargetKode) return false;
-      if (cleanTargetNama && mNama === cleanTargetNama) return false;
+      if (
+        cleanTargetNama &&
+        mNama === cleanTargetNama &&
+        getTargetClassFromMapel(m) === targetClass
+      ) {
+        return false;
+      }
       return true;
     });
 
@@ -3120,7 +3211,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         ...(Array.isArray(appConfig.deletedMapelNames)
           ? appConfig.deletedMapelNames
           : []),
-        ...(cleanTargetNama ? [cleanTargetNama] : []),
+        ...(!cleanTargetKode && cleanTargetNama ? [cleanTargetNama] : []),
       ])
     );
 
@@ -3131,12 +3222,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       deletedMapelCodes: nextDeletedCodes,
       deletedMapelNames: nextDeletedNames,
     };
-    setAppConfig(updatedConfig);
-    try {
-      localStorage.setItem('cbt_admin_settings', JSON.stringify(updatedConfig));
-    } catch {
-      // ignore
-    }
+    persistAdminConfig(updatedConfig, { syncCloud: true });
 
     // 3. Update selectedPkgId jika yang dihapus sedang dipilih
     const remainingVisible = displayPackages.filter((p) => p.id !== pkgToDelete.id);
@@ -3146,7 +3232,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       );
     }
 
-    showNotice(`Mata pelajaran "${pkgTitle}" (${pkgToDelete.code}) berhasil dihapus.`);
+    showNotice(`Mata pelajaran "${pkgTitle}" (${pkgToDelete.code}) berhasil dihapus dan disinkronkan.`);
   };
 
   const handleAddQuestion = (e: React.FormEvent) => {
@@ -3323,9 +3409,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     if (!file || !selectedPackage) return;
 
     try {
-      const existingRealQuestions = selectedPackage.questions.filter(
-        (q) => !q.id.startsWith('q_default_') && !q.id.startsWith('word_q_')
-      );
+      const existingRealQuestions = selectedPackage.questions.filter((q) => {
+        if (q.id.startsWith('q_default_')) return false;
+        if (!appendUploadMode && q.id.startsWith('word_q_')) return false;
+        return true;
+      });
       const startNum = existingRealQuestions.length + 1;
       const defaultCat =
         selectedPackage.subtest || newCategory.trim() || 'Sumatif Akhir Semester';
@@ -3333,6 +3421,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         questions: importedQuestions,
         redDetectedCount,
         tableCount,
+        imageCount,
         typeBreakdown,
       } = await parseWordQuestions(file, newQuestionType, startNum, defaultCat);
 
@@ -3368,9 +3457,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         .map((t) => `${typeBreakdown[t]} ${getQuestionTypeLabel(t)}`)
         .join(', ');
       const tableInfo =
-        tableCount > 0 ? `, termasuk ${tableCount} tabel soal` : '';
+        tableCount > 0 ? `, ${tableCount} tabel` : '';
+      const imageInfo =
+        imageCount > 0 ? `, ${imageCount} gambar` : '';
       showNotice(
-        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} soal dikenali otomatis (${breakdownSummary}; ${redDetectedCount} kunci jawaban${tableInfo}).`
+        `Berhasil mengunggah "${file.name}": ${importedQuestions.length} soal dikenali otomatis (${breakdownSummary}; ${redDetectedCount} kunci jawaban${tableInfo}${imageInfo}).`
       );
     } catch {
       showNotice(
@@ -3450,13 +3541,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
     // Keep appConfig in sync if this matches the first proctor
     if (proctors[0]?.id === editingProctorForm.id) {
-      const nextCfg = { ...appConfig, namaProktor: updatedName };
-      setAppConfig(nextCfg);
-      try {
-        localStorage.setItem('cbt_admin_settings', JSON.stringify(nextCfg));
-      } catch {
-        // ignore
-      }
+      persistAdminConfig(
+        { ...appConfig, namaProktor: updatedName },
+        { syncCloud: true }
+      );
     }
 
     // Keep active proctor session in sync in localStorage
@@ -4112,15 +4200,17 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   String(adm?.username || '').trim().toUpperCase() === cleanInput ||
                   String(adm?.namaLengkap || '').trim().toUpperCase() === cleanInput
               );
-              const displayAdminName =
+              const displayAdminName = String(
                 matchedAdmin?.namaLengkap ||
-                appConfig?.adminNama ||
-                'SHAHRUR ROBBY, S.Pd.';
-              const displayAdminId =
+                  appConfig?.adminNama ||
+                  'SHAHRUR ROBBY, S.Pd.'
+              );
+              const displayAdminId = String(
                 matchedAdmin?.adminId ||
-                appConfig?.adminId ||
-                adminUsername ||
-                'K05060108-KB6K';
+                  appConfig?.adminId ||
+                  adminUsername ||
+                  'K05060108-KB6K'
+              );
 
               return (
                 <div className="flex items-center gap-3 text-right">
@@ -4133,7 +4223,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     </div>
                   </div>
                   <div className="w-9 h-9 rounded-lg bg-[#0095ff] text-white font-bold text-sm flex items-center justify-center shadow-xs">
-                    {displayAdminName.charAt(0).toUpperCase()}
+                    {(displayAdminName.charAt(0) || 'A').toUpperCase()}
                   </div>
                 </div>
               );
@@ -4226,7 +4316,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-slate-700 bg-white border border-slate-200 rounded-lg shadow-2xs focus:outline-none focus:border-[#0095ff]"
                     >
                       <option value="SEMUA">Semua Kode Tes</option>
-                      <option value="SAS26SMADIP1">SAS26SMADIP1</option>
+                      {availableKodeTesList.map((kt) => (
+                        <option key={kt} value={kt}>
+                          {kt}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
@@ -4996,10 +5090,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           if (!proctorSearch.trim()) return true;
                           const q = proctorSearch.toLowerCase();
                           return (
-                            pr.proctorId.toLowerCase().includes(q) ||
-                            pr.fullName.toLowerCase().includes(q) ||
-                            pr.roomName.toLowerCase().includes(q) ||
-                            pr.rombel.toLowerCase().includes(q)
+                            String(pr?.proctorId || '').toLowerCase().includes(q) ||
+                            String(pr?.fullName || '').toLowerCase().includes(q) ||
+                            String(pr?.roomName || '').toLowerCase().includes(q) ||
+                            String(pr?.rombel || '').toLowerCase().includes(q)
                           );
                         })
                         .map((pr) => (
@@ -5092,10 +5186,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       if (!proctorSearch.trim()) return true;
                       const q = proctorSearch.toLowerCase();
                       return (
-                        pr.proctorId.toLowerCase().includes(q) ||
-                        pr.fullName.toLowerCase().includes(q) ||
-                        pr.roomName.toLowerCase().includes(q) ||
-                        pr.rombel.toLowerCase().includes(q)
+                        String(pr?.proctorId || '').toLowerCase().includes(q) ||
+                        String(pr?.fullName || '').toLowerCase().includes(q) ||
+                        String(pr?.roomName || '').toLowerCase().includes(q) ||
+                        String(pr?.rombel || '').toLowerCase().includes(q)
                       );
                     })
                     .map((pr) => (
@@ -5575,7 +5669,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           if (!matchesMenu) return false;
                           if (participantSearchQuery.trim()) {
                             const q = participantSearchQuery.trim().toLowerCase();
-                            return p.namaPeserta.toLowerCase().includes(q);
+                            return (
+                              String(p?.namaPeserta || '').toLowerCase().includes(q) ||
+                              String(p?.username || '').toLowerCase().includes(q)
+                            );
                           }
                           return true;
                         });
@@ -6629,6 +6726,19 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       Template Word
                     </button>
 
+                    <label
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-700 font-semibold cursor-pointer select-none hover:bg-slate-100 transition-colors"
+                      title="Centang jika ingin menambahkan soal dari file ke soal yang sudah ada tanpa mengganti hasil unggahan sebelumnya"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={appendUploadMode}
+                        onChange={(e) => setAppendUploadMode(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded accent-[#0066ff] cursor-pointer"
+                      />
+                      <span>Tambahkan ke soal yang ada</span>
+                    </label>
+
                     <div className="flex items-center gap-1.5 ml-auto">
                       <label className="font-semibold text-slate-700 whitespace-nowrap">
                         Jenis Input Manual:
@@ -6660,7 +6770,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       <span className="font-bold text-rose-600 underline">
                         warna merah
                       </span>{' '}
-                      pada tulisan opsi jawaban yang benar atau sertakan ringkasan kunci jawaban di dalam file Word/PDF (mendukung Stimulus/Wacana, PG Kompleks, Benar/Salah, serta tabel). Jika sudah Upload File Soal, kolom Pertanyaan Soal dan Jawaban di bawah <strong>tidak harus diisi</strong>.
+                      pada tulisan opsi jawaban yang benar atau sertakan ringkasan kunci jawaban di dalam file Word/PDF (otomatis membaca <strong>gambar soal/opsi/stimulus</strong> dari Word .docx & PDF, tabel, Stimulus/Wacana, PG Kompleks, Benar/Salah, serta Menjodohkan). Jika sudah Upload File Soal, kolom Pertanyaan Soal dan Jawaban di bawah <strong>tidak harus diisi</strong>.
                     </span>
                   </div>
                   {lastUploadedWordFile && (
@@ -7023,7 +7133,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       onClick={() =>
                         generateExamReportPDF(
                           'ALL',
-                          resultsHistory,
+                          safeResultsHistory,
                           participants
                         )
                       }
@@ -7032,7 +7142,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                       <Download className="w-4 h-4" />
                       <span>Unduh Laporan Semua Kelas (PDF)</span>
                     </button>
-                    {resultsHistory.length > 0 && (
+                    {safeResultsHistory.length > 0 && (
                       <button
                         type="button"
                         onClick={onClearHistory}
@@ -7047,7 +7157,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 {/* Daftar Kartu Unduh Cepat Setiap Kelas */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                   {STATUS_TES_CLASS_GROUPS.map((cls) => {
-                    const classResults = resultsHistory.filter((r) =>
+                    const classResults = safeResultsHistory.filter((r) =>
                       doesKelasMatch(
                         resolveResultClass(r, participants),
                         cls
@@ -7079,7 +7189,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           onClick={() =>
                             generateExamReportPDF(
                               cls,
-                              resultsHistory,
+                              safeResultsHistory,
                               participants
                             )
                           }
@@ -7096,7 +7206,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
               {/* Tabel Laporan Nilai Hasil Ujian Per Kelas */}
               {STATUS_TES_CLASS_GROUPS.map((cls) => {
-                const classResults = resultsHistory.filter((r) =>
+                const classResults = safeResultsHistory.filter((r) =>
                   doesKelasMatch(resolveResultClass(r, participants), cls)
                 );
                 const classStudents = participants.filter((p) =>
@@ -7124,7 +7234,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         onClick={() =>
                           generateExamReportPDF(
                             cls,
-                            resultsHistory,
+                            safeResultsHistory,
                             participants
                           )
                         }
@@ -7163,15 +7273,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {classResults.map((r, idx) => (
-                              <tr key={r.id} className="hover:bg-slate-50/80">
+                              <tr key={r.id || idx} className="hover:bg-slate-50/80">
                                 <td className="py-3 px-4 font-mono text-slate-500">
                                   {idx + 1}
                                 </td>
                                 <td className="py-3 px-4 font-mono font-semibold text-slate-800">
-                                  {r.participant.username}
+                                  {r?.participant?.username || '-'}
                                 </td>
                                 <td className="py-3 px-4 font-semibold text-slate-800">
-                                  {r.participant.fullName}
+                                  {r?.participant?.fullName || '-'}
                                 </td>
                                 <td className="py-3 px-4 font-semibold text-slate-700">
                                   Kelas {cls}
@@ -7394,26 +7504,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         value={appConfig.namaProktor ?? proctors[0]?.fullName ?? 'DRS. H. AHMAD FAUZI, M.PD.'}
                         onChange={(e) => {
                           const val = e.target.value;
-                          setAppConfig({ ...appConfig, namaProktor: val });
-                          if (proctors.length > 0) {
-                            setProctors((prev) =>
-                              prev.map((pr, idx) =>
-                                idx === 0 ? { ...pr, fullName: val.toUpperCase() } : pr
-                              )
-                            );
-                          }
-                          try {
-                            const raw = localStorage.getItem('cbt_proctor_session');
-                            if (raw) {
-                              const s = JSON.parse(raw);
-                              if (s) {
-                                s.name = val.toUpperCase();
-                                localStorage.setItem('cbt_proctor_session', JSON.stringify(s));
-                              }
-                            }
-                          } catch {
-                            // ignore
-                          }
+                          setAppConfig((prev) => ({ ...prev, namaProktor: val }));
                         }}
                         placeholder="Contoh: DRS. H. AHMAD FAUZI, M.PD."
                         className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-800 font-medium focus:ring-2 focus:ring-[#0095ff] outline-none"
@@ -8936,7 +9027,28 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
             </div>
 
             {/* Active Question Content */}
-            {activeQuestion && (
+            {activeQuestion && (() => {
+              const totalQuestionImages =
+                (activeQuestion.stimulusImages?.length || 0) +
+                (activeQuestion.questionImages?.length || 0) +
+                (activeQuestion.options?.reduce(
+                  (acc, o) => acc + (o.images?.length || 0),
+                  0
+                ) || 0) +
+                (activeQuestion.statements?.reduce(
+                  (acc, s) => acc + (s.images?.length || 0),
+                  0
+                ) || 0) +
+                (activeQuestion.premises?.reduce(
+                  (acc, pr) => acc + (pr.images?.length || 0),
+                  0
+                ) || 0) +
+                (activeQuestion.responses?.reduce(
+                  (acc, rs) => acc + (rs.images?.length || 0),
+                  0
+                ) || 0);
+
+              return (
               <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-4 text-xs">
                 {/* Question Meta Header */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
@@ -8953,6 +9065,12 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                     <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-bold text-[11px]">
                       Bobot: {activeQuestion.points || 10} Poin
                     </span>
+                    {totalQuestionImages > 0 && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 font-bold text-[11px]">
+                        <ImageIcon className="w-3 h-3" />
+                        <span>{totalQuestionImages} Gambar</span>
+                      </span>
+                    )}
                   </div>
 
                   {onDeleteQuestion && (
@@ -8971,7 +9089,9 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                 {/* Stimulus Content */}
                 {(activeQuestion.stimulusTitle ||
                   activeQuestion.stimulusText ||
-                  activeQuestion.stimulusTable) && (
+                  activeQuestion.stimulusTable ||
+                  (activeQuestion.stimulusImages &&
+                    activeQuestion.stimulusImages.length > 0)) && (
                   <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
                     {activeQuestion.stimulusTitle && (
                       <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">
@@ -8983,6 +9103,14 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                         {activeQuestion.stimulusText}
                       </p>
                     )}
+                    {activeQuestion.stimulusImages &&
+                      activeQuestion.stimulusImages.length > 0 && (
+                        <QuestionImageGallery
+                          images={activeQuestion.stimulusImages}
+                          altPrefix={`Gambar stimulus soal ${activeQuestion.number}`}
+                          maxHeightClass="max-h-64"
+                        />
+                      )}
                     {activeQuestion.stimulusTable && (
                       <div className="overflow-x-auto border border-slate-200 rounded-lg bg-white">
                         {activeQuestion.stimulusTable.title && (
@@ -9028,11 +9156,19 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                   </div>
                 )}
 
-                {/* Question Text */}
-                <div className="space-y-1.5">
+                {/* Question Text & Images */}
+                <div className="space-y-2">
                   <p className="text-sm font-semibold text-slate-900 leading-relaxed whitespace-pre-line">
                     {activeQuestion.questionText}
                   </p>
+                  {activeQuestion.questionImages &&
+                    activeQuestion.questionImages.length > 0 && (
+                      <QuestionImageGallery
+                        images={activeQuestion.questionImages}
+                        altPrefix={`Gambar soal ${activeQuestion.number}`}
+                        maxHeightClass="max-h-72"
+                      />
+                    )}
                   {activeQuestion.instructionText && (
                     <p className="text-[11px] italic text-slate-500">
                       {activeQuestion.instructionText}
@@ -9070,8 +9206,16 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                             >
                               {opt.id}
                             </span>
-                            <div className="flex-1 pt-0.5 leading-relaxed">
-                              {opt.text}
+                            <div className="flex-1 pt-0.5 leading-relaxed space-y-1.5">
+                              {opt.text && <div>{opt.text}</div>}
+                              {opt.images && opt.images.length > 0 && (
+                                <QuestionImageGallery
+                                  images={opt.images}
+                                  altPrefix={`Gambar opsi ${opt.id}`}
+                                  compact
+                                  maxHeightClass="max-h-40"
+                                />
+                              )}
                             </div>
                             {showAnswerKey && isCorrect && (
                               <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white font-bold text-[10px] shrink-0">
@@ -9102,8 +9246,16 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                         <tbody className="divide-y divide-slate-200">
                           {activeQuestion.statements.map((st) => (
                             <tr key={st.id} className="bg-white">
-                              <td className="py-2.5 px-3.5 text-slate-800">
-                                {st.statement}
+                              <td className="py-2.5 px-3.5 text-slate-800 space-y-1.5">
+                                {st.statement && <div>{st.statement}</div>}
+                                {st.images && st.images.length > 0 && (
+                                  <QuestionImageGallery
+                                    images={st.images}
+                                    altPrefix={`Gambar pernyataan ${st.id}`}
+                                    compact
+                                    maxHeightClass="max-h-36"
+                                  />
+                                )}
                               </td>
                               <td className="py-2.5 px-3.5 text-center">
                                 <span
@@ -9157,14 +9309,33 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                             );
                             return (
                               <tr key={prem.id} className="bg-white">
-                                <td className="py-2.5 px-3.5 font-medium text-slate-800">
-                                  {prem.text}
+                                <td className="py-2.5 px-3.5 font-medium text-slate-800 space-y-1.5">
+                                  {prem.text && <div>{prem.text}</div>}
+                                  {prem.images && prem.images.length > 0 && (
+                                    <QuestionImageGallery
+                                      images={prem.images}
+                                      altPrefix={`Gambar premis ${prem.id}`}
+                                      compact
+                                      maxHeightClass="max-h-32"
+                                    />
+                                  )}
                                 </td>
-                                <td className="py-2.5 px-3.5">
+                                <td className="py-2.5 px-3.5 space-y-1.5">
                                   {showAnswerKey ? (
-                                    <span className="inline-flex px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold">
-                                      {matchedResp?.text || matchedRespId || '-'}
-                                    </span>
+                                    <div className="space-y-1.5">
+                                      <span className="inline-flex px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold">
+                                        {matchedResp?.text || matchedRespId || '-'}
+                                      </span>
+                                      {matchedResp?.images &&
+                                        matchedResp.images.length > 0 && (
+                                          <QuestionImageGallery
+                                            images={matchedResp.images}
+                                            altPrefix={`Gambar respon ${matchedResp.id}`}
+                                            compact
+                                            maxHeightClass="max-h-32"
+                                          />
+                                        )}
+                                    </div>
                                   ) : (
                                     <span className="text-slate-400 italic">
                                       Pilih pasangan respon...
@@ -9209,7 +9380,8 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
                   </div>
                 )}
               </div>
-            )}
+              );
+            })()}
 
             {/* Footer Navigation */}
             <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-3 shrink-0">

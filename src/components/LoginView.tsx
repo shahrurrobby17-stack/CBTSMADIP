@@ -44,8 +44,8 @@ function isStudentPasswordValid(
 ): boolean {
   if (!row) return false;
   const expectedPass = String(row.password || '').trim();
-  if (!expectedPass) return true;
   const cleanEntered = enteredPassword.trim();
+  if (!expectedPass || !cleanEntered) return false;
   if (cleanEntered === expectedPass) return true;
   if (cleanEntered.toUpperCase() === expectedPass.toUpperCase()) {
     return true;

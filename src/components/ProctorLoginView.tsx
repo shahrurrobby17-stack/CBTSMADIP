@@ -38,7 +38,7 @@ export const ProctorLoginView: React.FC<ProctorLoginViewProps> = ({
   ) => {
     if (!item) return false;
     const expectedPass = String(item.password || '').trim();
-    if (!expectedPass) return true;
+    if (!expectedPass || !cleanPass) return false;
     if (cleanPass === expectedPass) return true;
     if (
       expectedPass === expectedPass.toUpperCase() &&

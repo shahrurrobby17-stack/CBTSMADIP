@@ -2027,13 +2027,25 @@ export default function App() {
             setResultsHistory([]);
           } else if (Array.isArray(res.data.resultsHistory)) {
             const seenIds = new Set<string>();
+            const seenUserSubject = new Set<string>();
             const mergedHistory: ExamResultSummary[] = [];
             for (const item of [
               ...res.data.resultsHistory,
               ...resultsHistoryRef.current,
             ]) {
               if (!item || !item.id || seenIds.has(item.id)) continue;
+              const uKey = String(item?.participant?.username || '')
+                .trim()
+                .toUpperCase();
+              const pkgKey = String(item?.packageTitle || '')
+                .replace(/^Simulasi TKA\s*-\s*/i, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+              const compositeKey = uKey && pkgKey ? `${uKey}__${pkgKey}` : '';
+              if (compositeKey && seenUserSubject.has(compositeKey)) continue;
               seenIds.add(item.id);
+              if (compositeKey) seenUserSubject.add(compositeKey);
               mergedHistory.push(item);
             }
             resultsHistoryRef.current = mergedHistory;
@@ -3057,17 +3069,35 @@ export default function App() {
   const applyAuthoritativeResultSummary = useCallback(
     (localResultId: string, serverSummary: ExamResultSummary) => {
       setResultsHistory((prev) => {
-        let replaced = false;
-        const nextHistory = prev.map((item) => {
+        const targetUser = String(serverSummary?.participant?.username || '')
+          .trim()
+          .toUpperCase();
+        const targetPkg = String(serverSummary?.packageTitle || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        const filteredPrev = prev.filter((item) => {
+          if (!item) return false;
           if (item.id === localResultId || item.id === serverSummary.id) {
-            replaced = true;
-            return serverSummary;
+            return false;
           }
-          return item;
+          if (targetUser && targetPkg) {
+            const itemUser = String(item?.participant?.username || '')
+              .trim()
+              .toUpperCase();
+            const itemPkg = String(item?.packageTitle || '')
+              .replace(/^Simulasi TKA\s*-\s*/i, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+            if (itemUser === targetUser && itemPkg === targetPkg) {
+              return false;
+            }
+          }
+          return true;
         });
-        const finalHistory = replaced
-          ? nextHistory
-          : [serverSummary, ...nextHistory];
+        const finalHistory = [serverSummary, ...filteredPrev];
         resultsHistoryRef.current = finalHistory;
         try {
           localStorage.setItem(
@@ -3225,7 +3255,25 @@ export default function App() {
       });
 
       setResultsHistory((prev) => {
-        const nextHistory = [summary, ...prev];
+        const targetPkg = String(summary.packageTitle || '')
+          .replace(/^Simulasi TKA\s*-\s*/i, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        const dedupedPrev = prev.filter((item) => {
+          if (!item) return false;
+          if (item.id === summary.id) return false;
+          const itemUser = String(item?.participant?.username || '')
+            .trim()
+            .toUpperCase();
+          const itemPkg = String(item?.packageTitle || '')
+            .replace(/^Simulasi TKA\s*-\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          return !(cleanUser && targetPkg && itemUser === cleanUser && itemPkg === targetPkg);
+        });
+        const nextHistory = [summary, ...dedupedPrev];
         resultsHistoryRef.current = nextHistory;
         try {
           localStorage.setItem(
@@ -3351,7 +3399,16 @@ export default function App() {
     selectedPackage?.id,
   ]);
 
+  const cancelAuthSpinner = () => {
+    if (authSpinTimerRef.current) {
+      window.clearTimeout(authSpinTimerRef.current);
+      authSpinTimerRef.current = null;
+    }
+    setIsAuthSpinning(false);
+  };
+
   const handleLogout = () => {
+    cancelAuthSpinner();
     if (stage === 'exam_running') {
       if ((selectedPackage?.questions?.length || 0) === 0) {
         handleCancelEmptyExam();
@@ -3409,6 +3466,7 @@ export default function App() {
         resultsHistory={resultsHistory}
         onClearHistory={() => handleUpdateResultsHistory([])}
         onLogoutProctor={() => {
+          cancelAuthSpinner();
           clearAuthSessionToken();
           exitCbtFullscreen();
           setStage('login');
@@ -3443,6 +3501,7 @@ export default function App() {
         lastSyncedLabel={lastSyncedLabel}
         onForceSyncStorage={pushToVercelCloud}
         onLogoutAdmin={() => {
+          cancelAuthSpinner();
           clearAuthSessionToken();
           exitCbtFullscreen();
           setStage('login');
@@ -3462,10 +3521,20 @@ export default function App() {
         participantCode={!isAuthScreen ? participant.username : undefined}
         onLogout={!isAuthScreen ? handleLogout : undefined}
         onOpenAdminLogin={
-          stage !== 'exam_running' ? () => setStage('admin_login') : undefined
+          stage !== 'exam_running'
+            ? () => {
+                cancelAuthSpinner();
+                setStage('admin_login');
+              }
+            : undefined
         }
         onOpenProctorModal={
-          stage !== 'exam_running' ? () => setStage('proctor_login') : undefined
+          stage !== 'exam_running'
+            ? () => {
+                cancelAuthSpinner();
+                setStage('proctor_login');
+              }
+            : undefined
         }
         onExitApp={stage === 'login' ? handleExitApp : undefined}
         compact={stage === 'exam_running'}
@@ -3475,7 +3544,10 @@ export default function App() {
       {stage === 'login' && (
         <LoginView
           onLoginSuccess={handleLoginSuccess}
-          onOpenProctorModal={() => setStage('proctor_login')}
+          onOpenProctorModal={() => {
+            cancelAuthSpinner();
+            setStage('proctor_login');
+          }}
           onExitApp={handleExitApp}
           participants={participants}
           activeSchedules={activeSchedules}
@@ -3507,12 +3579,19 @@ export default function App() {
             }
             setIsAuthSpinning(true);
             authSpinTimerRef.current = window.setTimeout(() => {
+              authSpinTimerRef.current = null;
               setIsAuthSpinning(false);
               setStage('proctor_dashboard');
             }, 5000);
           }}
-          onBackToStudentLogin={() => setStage('login')}
-          onGoToAdminLogin={() => setStage('admin_login')}
+          onBackToStudentLogin={() => {
+            cancelAuthSpinner();
+            setStage('login');
+          }}
+          onGoToAdminLogin={() => {
+            cancelAuthSpinner();
+            setStage('admin_login');
+          }}
         />
       )}
 
@@ -3532,12 +3611,19 @@ export default function App() {
             }
             setIsAuthSpinning(true);
             authSpinTimerRef.current = window.setTimeout(() => {
+              authSpinTimerRef.current = null;
               setIsAuthSpinning(false);
               setStage('admin_dashboard');
             }, 5000);
           }}
-          onBackToStudentLogin={() => setStage('login')}
-          onGoToProctorLogin={() => setStage('proctor_login')}
+          onBackToStudentLogin={() => {
+            cancelAuthSpinner();
+            setStage('login');
+          }}
+          onGoToProctorLogin={() => {
+            cancelAuthSpinner();
+            setStage('proctor_login');
+          }}
         />
       )}
 
