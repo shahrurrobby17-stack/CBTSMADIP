@@ -1,16 +1,21 @@
 import React from 'react';
 import { AlertTriangle, RefreshCw, RotateCcw } from 'lucide-react';
 
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+  onResetToLogin?: () => void;
+}
+
 interface ErrorBoundaryState {
   hasError: boolean;
   errorMessage: string;
 }
 
 export class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
+  ErrorBoundaryProps,
   ErrorBoundaryState
 > {
-  constructor(props: { children: React.ReactNode }) {
+  constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, errorMessage: '' };
   }
@@ -34,6 +39,13 @@ export class ErrorBoundary extends React.Component<
 
   handleReload = (): void => {
     window.location.reload();
+  };
+
+  handleBackToLogin = (): void => {
+    this.setState({ hasError: false, errorMessage: '' });
+    if (this.props.onResetToLogin) {
+      this.props.onResetToLogin();
+    }
   };
 
   handleResetCacheAndReload = async (): Promise<void> => {
@@ -111,6 +123,15 @@ export class ErrorBoundary extends React.Component<
               <span>Bersihkan Cache</span>
             </button>
           </div>
+          {this.props.onResetToLogin && (
+            <button
+              type="button"
+              onClick={this.handleBackToLogin}
+              className="w-full py-2 px-4 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-semibold transition-colors cursor-pointer"
+            >
+              Kembali ke Halaman Login
+            </button>
+          )}
         </div>
       </div>
     );

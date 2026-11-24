@@ -296,9 +296,6 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
         )
           .trim()
           .toUpperCase();
-        if (onRefreshAdminSettings) {
-          onRefreshAdminSettings().catch(() => {});
-        }
       } else if (!authRes.serverEmpty && !authRes.networkError) {
         setErrorMsg(
           authRes.error ||
@@ -788,17 +785,18 @@ export const STATUS_TES_CLASS_GROUPS = [
   'Kelas XII IPS',
 ] as const;
 
-export function getTargetClassFromMapel(mapel: {
-  tingkat?: string;
-  kategori?: string;
-  nama?: string;
-  kode?: string;
-}): string {
-  const rawTingkat = (mapel.tingkat || '').trim();
+export function getTargetClassFromMapel(mapel?: {
+  tingkat?: string | number | null;
+  kategori?: string | number | null;
+  nama?: string | number | null;
+  kode?: string | number | null;
+} | null): string {
+  if (!mapel || typeof mapel !== 'object') return 'Kelas X';
+  const rawTingkat = String(mapel.tingkat ?? '').trim();
   const tingkatUpper = rawTingkat.toUpperCase();
-  const katUpper = (mapel.kategori || '').toUpperCase();
-  const namaUpper = (mapel.nama || '').toUpperCase();
-  const kodeUpper = (mapel.kode || '').toUpperCase();
+  const katUpper = String(mapel.kategori ?? '').toUpperCase();
+  const namaUpper = String(mapel.nama ?? '').toUpperCase();
+  const kodeUpper = String(mapel.kode ?? '').toUpperCase();
 
   if (tingkatUpper === 'KELAS XII IPA' || tingkatUpper === 'XII IPA' || tingkatUpper === 'XII-IPA') {
     return 'Kelas XII IPA';
@@ -905,16 +903,17 @@ export function getTargetClassFromMapel(mapel: {
 }
 
 export const getPkgClass = (pkg?: ExamPackage | null): string => {
-  if (!pkg) return 'Kelas X';
+  if (!pkg || typeof pkg !== 'object') return 'Kelas X';
+  const rawTargetClass = String(pkg.targetClass ?? '').trim();
   if (
-    pkg.targetClass &&
-    pkg.targetClass !== 'Semua Kelas' &&
-    !pkg.targetClass.toUpperCase().includes('SEMUA')
+    rawTargetClass &&
+    rawTargetClass !== 'Semua Kelas' &&
+    !rawTargetClass.toUpperCase().includes('SEMUA')
   ) {
-    return pkg.targetClass;
+    return rawTargetClass;
   }
   return getTargetClassFromMapel({
-    tingkat: pkg.targetClass,
+    tingkat: rawTargetClass,
     kategori: pkg.subtest,
     nama: pkg.title,
     kode: pkg.code,
@@ -1099,8 +1098,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   const availableExamRooms = useMemo(() => {
     const roomSet = new Set<string>(DEFAULT_EXAM_ROOMS);
     proctors.forEach((pr) => {
-      if (pr.roomName && pr.roomName.trim()) {
-        roomSet.add(pr.roomName.trim());
+      const rn = String(pr?.roomName ?? '').trim();
+      if (rn) {
+        roomSet.add(rn);
       }
     });
     participants.forEach((p) => {
@@ -1463,8 +1463,18 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         : 0;
     const localTs =
       typeof appConfig.updatedAt === 'number' ? appConfig.updatedAt : 0;
-    if (remoteTs > localTs) {
-      setAppConfig((prev) => normalizeAdminConfig(externalAdminSettings, prev));
+    const hasNewAdminList =
+      Array.isArray(externalAdminSettings.adminList) &&
+      externalAdminSettings.adminList.length > 0 &&
+      remoteTs >= localTs;
+    if (remoteTs > localTs || hasNewAdminList) {
+      setAppConfig((prev) => {
+        try {
+          return normalizeAdminConfig(externalAdminSettings, prev);
+        } catch {
+          return prev;
+        }
+      });
     }
   }, [externalAdminSettings, appConfig.updatedAt]);
 
@@ -2387,8 +2397,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         }
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
-          const matchUser = (row.username || '').toLowerCase().includes(q);
-          const matchName = (row.namaPeserta || '').toLowerCase().includes(q);
+          const matchUser = String(row.username ?? '').toLowerCase().includes(q);
+          const matchName = String(row.namaPeserta ?? '').toLowerCase().includes(q);
           const matchRuang = resolveParticipantRuang(row).toLowerCase().includes(q);
           if (!matchUser && !matchName && !matchRuang) return false;
         }
@@ -2902,12 +2912,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       : defaultMapelList;
     const deletedCodesSet = new Set<string>(
       Array.isArray(appConfig.deletedMapelCodes)
-        ? appConfig.deletedMapelCodes.map((c) => String(c || '').trim().toUpperCase())
+        ? appConfig.deletedMapelCodes.map((c) => String(c ?? '').trim().toUpperCase())
         : []
     );
     const deletedNamesSet = new Set<string>(
       Array.isArray(appConfig.deletedMapelNames)
-        ? appConfig.deletedMapelNames.map((n) => String(n || '').trim().toLowerCase())
+        ? appConfig.deletedMapelNames.map((n) => String(n ?? '').trim().toLowerCase())
         : []
     );
 
@@ -2916,8 +2926,8 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
     currentMapelList.forEach((mapel: any) => {
       if (!mapel || typeof mapel !== 'object') return;
-      const cleanKode = (mapel.kode || '').trim().toUpperCase();
-      const cleanNama = (mapel.nama || '')
+      const cleanKode = String(mapel.kode ?? '').trim().toUpperCase();
+      const cleanNama = String(mapel.nama ?? '')
         .replace(/^Simulasi TKA\s*-\s*/i, '')
         .trim()
         .toLowerCase();
@@ -2928,11 +2938,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
       const targetClass = getTargetClassFromMapel(mapel);
 
-      const existing = packages.find((p) => {
-        if (!p || processedPkgIds.has(p.id)) return false;
+      const existing = safePackages.find((p) => {
+        if (!p || typeof p !== 'object' || processedPkgIds.has(p.id)) return false;
         if (p.id === newPkgId) return true;
-        const pCode = (p.code || '').trim().toUpperCase();
-        const pTitle = (p.title || '')
+        const pCode = String(p.code ?? '').trim().toUpperCase();
+        const pTitle = String(p.title ?? '')
           .replace(/^Simulasi TKA\s*-\s*/i, '')
           .trim()
           .toLowerCase();
@@ -2951,15 +2961,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         processedPkgIds.add(existing.id);
         const cleanedQuestions = Array.isArray(existing.questions)
           ? existing.questions.filter(
-              (q) => !String(q?.id || '').startsWith('q_default_')
+              (q) => q && typeof q === 'object' && !String(q?.id ?? '').startsWith('q_default_')
             )
           : [];
         result.push({
           ...existing,
-          code: mapel.kode || existing.code,
-          title: mapel.nama || existing.title,
-          durationMinutes: mapel.alokasiMenit || existing.durationMinutes,
-          subtest: mapel.kategori || existing.subtest,
+          code: String(mapel.kode ?? existing.code ?? ''),
+          title: String(mapel.nama ?? existing.title ?? ''),
+          durationMinutes: Number(mapel.alokasiMenit) || existing.durationMinutes || 90,
+          subtest: String(mapel.kategori ?? existing.subtest ?? 'Wajib Umum'),
           targetClass: targetClass,
           questions: cleanedQuestions,
         });
@@ -2967,22 +2977,22 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         processedPkgIds.add(newPkgId);
         result.push({
           id: newPkgId,
-          code: mapel.kode || 'MAPEL-01',
-          title: mapel.nama || 'Mata Pelajaran Ujian',
+          code: String(mapel.kode ?? 'MAPEL-01'),
+          title: String(mapel.nama ?? 'Mata Pelajaran Ujian'),
           level: 'SMA / MA / SMK / Sederajat',
-          subtest: mapel.kategori || 'Wajib Umum',
-          durationMinutes: mapel.alokasiMenit || 90,
+          subtest: String(mapel.kategori ?? 'Wajib Umum'),
+          durationMinutes: Number(mapel.alokasiMenit) || 90,
           targetClass: targetClass,
           questions: [],
         });
       }
     });
 
-    packages.forEach((pkg) => {
+    safePackages.forEach((pkg) => {
       if (!pkg || typeof pkg !== 'object') return;
       if (!processedPkgIds.has(pkg.id)) {
-        const pCode = (pkg.code || '').trim().toUpperCase();
-        const pTitle = (pkg.title || '')
+        const pCode = String(pkg.code ?? '').trim().toUpperCase();
+        const pTitle = String(pkg.title ?? '')
           .replace(/^Simulasi TKA\s*-\s*/i, '')
           .trim()
           .toLowerCase();
@@ -2992,7 +3002,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         processedPkgIds.add(pkg.id);
         const cleanedQuestions = Array.isArray(pkg.questions)
           ? pkg.questions.filter(
-              (q) => !String(q?.id || '').startsWith('q_default_')
+              (q) => q && typeof q === 'object' && !String(q?.id ?? '').startsWith('q_default_')
             )
           : [];
         result.push({
@@ -3007,7 +3017,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     appConfig.mapelList,
     appConfig.deletedMapelCodes,
     appConfig.deletedMapelNames,
-    packages,
+    safePackages,
   ]);
 
   const visiblePackagesForKelas = useMemo(() => {
@@ -4083,12 +4093,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     SIDEBAR_MENUS.find((m) => m.id === activeMenu) || SIDEBAR_MENUS[8];
 
   return (
-    <div className="h-screen overflow-hidden flex bg-[#f4f6fa] text-slate-800">
+    <div className="h-dvh min-h-[100vh] overflow-hidden flex bg-[#f4f6fa] text-slate-800">
       {/* LEFT SIDEBAR (Exact Deep Cobalt Navy & Geometric Facets matching reference screenshot) */}
       <aside
         className={`${
           sidebarCollapsed ? 'w-20' : 'w-64'
-        } h-screen relative overflow-hidden shrink-0 bg-[#001a6e] text-white flex flex-col transition-all duration-200 select-none shadow-xl z-20`}
+        } h-dvh min-h-[100vh] relative overflow-hidden shrink-0 bg-[#001a6e] text-white flex flex-col transition-all duration-200 select-none shadow-xl z-20`}
       >
         {/* Exact Geometric Facet Overlay from ANBK Reference Screenshot */}
         <svg
@@ -4179,7 +4189,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       </aside>
 
       {/* RIGHT MAIN CONTENT AREA */}
-      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 h-dvh min-h-[100vh] overflow-hidden">
         {/* Top White Header Bar matching reference image */}
         <header className="shrink-0 bg-white px-7 py-3.5 flex items-center justify-between gap-4 border-b border-slate-200/80">
           <div>
@@ -4190,7 +4200,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
           <div className="flex items-center gap-4">
             {(() => {
-              const cleanInput = (adminUsername || '').trim().toUpperCase();
+              const cleanInput = String(adminUsername ?? '').trim().toUpperCase();
               const adminList = Array.isArray(appConfig?.adminList)
                 ? appConfig.adminList
                 : [];
@@ -6012,64 +6022,64 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const nowTs = Date.now();
-                        onUpdateSchedules(
-                          schedules.map((s) => ({
-                            ...s,
-                            isActive: true,
-                            updatedAt: nowTs,
-                          }))
-                        );
-                        showNotice(
-                          'Semua mata pelajaran diaktifkan! Token ujian kini keluar di halaman Proktor & Siswa.'
-                        );
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Aktifkan Semua Mapel</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const nowTs = Date.now();
-                        onUpdateSchedules(
-                          schedules.map((s) => ({
-                            ...s,
-                            isActive: false,
-                            updatedAt: nowTs,
-                          }))
-                        );
-                        showNotice(
-                          'Semua mata pelajaran dinonaktifkan. Token ujian disembunyikan dari Proktor & Siswa.'
-                        );
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-semibold cursor-pointer"
-                    >
-                      <span>Nonaktifkan Semua</span>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nowTs = Date.now();
+                          onUpdateSchedules(
+                            safeSchedules.map((s) => ({
+                              ...s,
+                              isActive: true,
+                              updatedAt: nowTs,
+                            }))
+                          );
+                          showNotice(
+                            'Semua mata pelajaran diaktifkan! Token ujian kini keluar di halaman Proktor & Siswa.'
+                          );
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Aktifkan Semua Mapel</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nowTs = Date.now();
+                          onUpdateSchedules(
+                            safeSchedules.map((s) => ({
+                              ...s,
+                              isActive: false,
+                              updatedAt: nowTs,
+                            }))
+                          );
+                          showNotice(
+                            'Semua mata pelajaran dinonaktifkan. Token ujian disembunyikan dari Proktor & Siswa.'
+                          );
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-semibold cursor-pointer"
+                      >
+                        <span>Nonaktifkan Semua</span>
+                      </button>
+                    </div>
                   </div>
-                </div>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-[#f8f9fc] border-b border-slate-100 text-slate-600 font-bold">
-                        <th className="py-3.5 px-5 w-12">No</th>
-                        <th className="py-3.5 px-4">Status Mapel</th>
-                        <th className="py-3.5 px-4">Hari dan Tanggal</th>
-                        <th className="py-3.5 px-4 text-center">Kelas</th>
-                        <th className="py-3.5 px-4">Mapel</th>
-                        <th className="py-3.5 px-4">Waktu Mulai</th>
-                        <th className="py-3.5 px-4">Durasi</th>
-                        <th className="py-3.5 px-4 text-right">Aksi</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {schedules.map((sch, index) => (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-[#f8f9fc] border-b border-slate-100 text-slate-600 font-bold">
+                          <th className="py-3.5 px-5 w-12">No</th>
+                          <th className="py-3.5 px-4">Status Mapel</th>
+                          <th className="py-3.5 px-4">Hari dan Tanggal</th>
+                          <th className="py-3.5 px-4 text-center">Kelas</th>
+                          <th className="py-3.5 px-4">Mapel</th>
+                          <th className="py-3.5 px-4">Waktu Mulai</th>
+                          <th className="py-3.5 px-4">Durasi</th>
+                          <th className="py-3.5 px-4 text-right">Aksi</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {safeSchedules.map((sch, index) => (
                         <tr key={sch.id} className="hover:bg-slate-50/90">
                           <td className="py-3.5 px-5 font-mono text-slate-500">
                             {index + 1}
@@ -8903,12 +8913,15 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
   onDeleteQuestion,
 }) => {
   const filteredQuestions = useMemo(() => {
-    const byFilter = pkg.questions.filter((q) => {
+    const baseQuestions = Array.isArray(pkg?.questions)
+      ? pkg.questions.filter((q): q is Question => Boolean(q && typeof q === 'object'))
+      : [];
+    const byFilter = baseQuestions.filter((q) => {
       if (!filterType || filterType === 'Semua Tipe Soal') return true;
       return q.type === filterType;
     });
-    return byFilter.length > 0 ? byFilter : pkg.questions;
-  }, [pkg.questions, filterType]);
+    return byFilter.length > 0 ? byFilter : baseQuestions;
+  }, [pkg?.questions, filterType]);
 
   const [currentIdx, setCurrentIdx] = useState(initialIndex);
   const [showAnswerKey, setShowAnswerKey] = useState(true);
@@ -8920,7 +8933,7 @@ export const QuestionPreviewModal: React.FC<QuestionPreviewModalProps> = ({
   }, [filteredQuestions.length, currentIdx]);
 
   const activeQuestion = filteredQuestions[currentIdx];
-  const cleanTitle = (pkg.title || '')
+  const cleanTitle = String(pkg?.title ?? '')
     .replace(/^Simulasi TKA\s*-\s*/i, '')
     .replace(/\s*\(SMA\/MA\/SMK\)/i, '');
 

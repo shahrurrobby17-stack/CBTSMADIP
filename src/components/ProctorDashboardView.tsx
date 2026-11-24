@@ -91,9 +91,9 @@ export interface ProctorParticipantRow {
   draftRemainingSeconds?: number;
 }
 
-export function normalizeKelasCode(raw?: string): string {
-  if (!raw) return '';
-  const s = raw
+export function normalizeKelasCode(raw?: string | number | null): string {
+  if (raw === null || raw === undefined) return '';
+  const s = String(raw)
     .replace(/^kelas\s+/i, '')
     .replace(/\s*\(.*?\)\s*/g, ' ')
     .replace(/[-_]/g, ' ')
@@ -118,14 +118,14 @@ export function normalizeKelasCode(raw?: string): string {
 }
 
 export function doesKelasMatch(
-  studentKelas?: string,
-  scheduleKelas?: string
+  studentKelas?: string | number | null,
+  scheduleKelas?: string | number | null
 ): boolean {
-  const rawA = (studentKelas || '')
+  const rawA = String(studentKelas ?? '')
     .replace(/^kelas\s+/i, '')
     .trim()
     .toUpperCase();
-  const rawB = (scheduleKelas || '')
+  const rawB = String(scheduleKelas ?? '')
     .replace(/^kelas\s+/i, '')
     .trim()
     .toUpperCase();
@@ -138,8 +138,9 @@ export function doesKelasMatch(
 }
 
 export function isParticipantLockedByViolation(
-  p: ProctorParticipantRow
+  p?: Partial<ProctorParticipantRow> | null
 ): boolean {
+  if (!p || typeof p !== 'object') return false;
   const vTs = typeof p.violationTimestamp === 'number' ? p.violationTimestamp : 0;
   const resetTs = typeof p.lastResetAt === 'number' ? p.lastResetAt : 0;
   return (
@@ -164,13 +165,13 @@ export const DEFAULT_EXAM_ROOMS = [
 export function resolveParticipantRuang(
   row?: Partial<ProctorParticipantRow> | null
 ): string {
-  if (!row) return 'Ruang 1';
-  const rawRuang = (row.ruang || '').trim();
+  if (!row || typeof row !== 'object') return 'Ruang 1';
+  const rawRuang = String(row.ruang ?? '').trim();
   if (rawRuang) {
     if (/^[1-9]\d*$/.test(rawRuang)) return `Ruang ${rawRuang}`;
     return rawRuang;
   }
-  const rawKelompok = (row.kelompok || '').trim();
+  const rawKelompok = String(row.kelompok ?? '').trim();
   // Ensure legacy demo row p8 ('kelompok: 2' without explicit ruang) starts in Ruang 1 so Ruang 2 is empty initially
   if (
     (row.id === 'p8' || row.id === 'ap8' || row.username === 'SA20261839') &&
@@ -206,9 +207,10 @@ const LEGACY_USERNAME_MAP: Record<string, string> = {
   TK1610: 'SA20261839',
 };
 
-export function shortenStudentUsername(raw?: string): string {
-  if (!raw) return '';
-  const clean = raw.trim().toUpperCase();
+export function shortenStudentUsername(raw?: string | number | null): string {
+  if (raw === null || raw === undefined) return '';
+  const clean = String(raw).trim().toUpperCase();
+  if (!clean) return '';
   if (LEGACY_USERNAME_MAP[clean]) {
     return LEGACY_USERNAME_MAP[clean];
   }
@@ -649,30 +651,39 @@ export function sanitizeParticipantRows(
   rows: ProctorParticipantRow[]
 ): ProctorParticipantRow[] {
   if (!Array.isArray(rows)) return [];
-  const hasCustomRows = rows.some((r) => isCustomUploadedParticipantRow(r));
-  let changed = false;
+  const validObjects = rows.filter(
+    (r): r is ProctorParticipantRow => Boolean(r && typeof r === 'object')
+  );
+  const hasCustomRows = validObjects.some((r) => isCustomUploadedParticipantRow(r));
+  let changed = validObjects.length !== rows.length;
   const filtered = hasCustomRows
-    ? rows.filter((r) => {
+    ? validObjects.filter((r) => {
         if (isDefaultDemoParticipantRow(r)) {
           changed = true;
           return false;
         }
         return true;
       })
-    : rows;
+    : validObjects;
 
   const normalizedRows = filtered.map((row, idx) => {
     const validLock = isParticipantLockedByViolation(row);
+    const rawKelasStr = String(row.kelas ?? '').trim();
     const resolvedKelas =
-      row.kelas && row.kelas.trim()
-        ? row.kelas.trim()
+      rawKelasStr
+        ? rawKelasStr
         : FALLBACK_KELAS_CYCLE[idx % FALLBACK_KELAS_CYCLE.length];
+    const rawKodeTesStr = String(row.kodeTes ?? '').trim();
     const resolvedKodeTes =
-      !row.kodeTes || row.kodeTes === 'GLDTKA25MAH2'
+      !rawKodeTesStr || rawKodeTesStr === 'GLDTKA25MAH2'
         ? 'SAS26SMADIP1'
-        : row.kodeTes;
+        : rawKodeTesStr;
+    const resolvedId = String(row.id ?? '').trim() || `row_${idx}_${Date.now()}`;
+    const resolvedNama = String(row.namaPeserta ?? '').trim() || 'PESERTA CBT';
     const resolvedUsername = shortenStudentUsername(row.username);
     const resolvedRuang = resolveParticipantRuang(row);
+    const needsIdFix = row.id !== resolvedId;
+    const needsNamaFix = row.namaPeserta !== resolvedNama;
     const needsKelasFill = row.kelas !== resolvedKelas;
     const needsKodeTesFix = row.kodeTes !== resolvedKodeTes;
     const needsUsernameFix = row.username !== resolvedUsername;
@@ -683,6 +694,8 @@ export function sanitizeParticipantRows(
 
     if (
       needsUnlock ||
+      needsIdFix ||
+      needsNamaFix ||
       needsKelasFill ||
       needsKodeTesFix ||
       needsUsernameFix ||
@@ -691,6 +704,8 @@ export function sanitizeParticipantRows(
       changed = true;
       return {
         ...row,
+        id: resolvedId,
+        namaPeserta: resolvedNama,
         username: resolvedUsername,
         kodeTes: resolvedKodeTes,
         kelas: resolvedKelas,
@@ -698,8 +713,8 @@ export function sanitizeParticipantRows(
         loginState:
           needsUnlock && row.loginState === 'Terkunci (Pelanggaran)'
             ? ('Belum Login' as const)
-            : row.loginState,
-        requestReset: needsUnlock ? false : row.requestReset,
+            : row.loginState || ('Belum Login' as const),
+        requestReset: needsUnlock ? false : Boolean(row.requestReset),
         violationReason: needsUnlock ? undefined : row.violationReason,
         violationAt: needsUnlock ? undefined : row.violationAt,
         violationSchema: needsUnlock ? undefined : row.violationSchema,

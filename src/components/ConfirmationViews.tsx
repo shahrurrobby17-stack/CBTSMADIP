@@ -47,17 +47,21 @@ export function resolvePackageForSchedule(
   sch: AdminScheduleItem | undefined,
   packages: ExamPackage[]
 ): ExamPackage | undefined {
-  if (!sch) return undefined;
+  if (!sch || typeof sch !== 'object') return undefined;
 
-  const targetMapelLower = cleanMapelTitle(sch.mapel);
-  const parsedDuration = parseInt(String(sch.durasi || ''), 10);
-  const normKelas = normalizeKelasCode(sch.kelas) || sch.kelas;
+  const safePackages = Array.isArray(packages)
+    ? packages.filter((p): p is ExamPackage => Boolean(p && typeof p === 'object'))
+    : [];
+  const rawMapelTitle = String(sch.mapel ?? '').trim();
+  const targetMapelLower = cleanMapelTitle(rawMapelTitle);
+  const parsedDuration = parseInt(String(sch.durasi ?? ''), 10);
+  const normKelas = normalizeKelasCode(sch.kelas) || String(sch.kelas ?? '').trim();
 
   let matched: ExamPackage | undefined = undefined;
 
-  if (targetMapelLower && packages.length > 0) {
+  if (targetMapelLower && safePackages.length > 0) {
     // 1. Strictly match exact subject title AND matching class first
-    const exactTitleAndClassMatches = packages.filter(
+    const exactTitleAndClassMatches = safePackages.filter(
       (pkg) =>
         cleanMapelTitle(pkg.title) === targetMapelLower &&
         doesKelasMatch(getPkgClass(pkg), sch.kelas)
@@ -66,9 +70,9 @@ export function resolvePackageForSchedule(
 
     // 2. If none matched for the exact class, allow exact title match ONLY on class-agnostic ("Semua Kelas") packages
     if (!matched) {
-      const exactTitleSharedClassMatches = packages.filter((pkg) => {
+      const exactTitleSharedClassMatches = safePackages.filter((pkg) => {
         if (cleanMapelTitle(pkg.title) !== targetMapelLower) return false;
-        const rawTarget = String(pkg.targetClass || '').trim().toUpperCase();
+        const rawTarget = String(pkg.targetClass ?? '').trim().toUpperCase();
         return (
           !rawTarget ||
           rawTarget === 'SEMUA' ||
@@ -83,9 +87,9 @@ export function resolvePackageForSchedule(
   // If no Bank Soal package matches this schedule's subject + class yet, return an empty 0-question package.
   if (!matched) {
     return {
-      id: `empty_sch_${sch.id}`,
+      id: `empty_sch_${String(sch.id ?? 'default')}`,
       code: String(sch.id || 'MAPEL').toUpperCase(),
-      title: sch.mapel.trim() || 'Mata Pelajaran Ujian',
+      title: rawMapelTitle || 'Mata Pelajaran Ujian',
       level: 'SMA / MA / SMK / Sederajat',
       subtest: 'Wajib Umum',
       durationMinutes:
@@ -97,7 +101,7 @@ export function resolvePackageForSchedule(
 
   return {
     ...matched,
-    title: sch.mapel.trim() || matched.title,
+    title: rawMapelTitle || String(matched.title ?? 'Mata Pelajaran Ujian'),
     targetClass: normKelas ? `Kelas ${normKelas}` : matched.targetClass,
     durationMinutes:
       !isNaN(parsedDuration) && parsedDuration > 0

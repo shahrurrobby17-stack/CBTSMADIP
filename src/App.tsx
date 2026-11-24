@@ -59,6 +59,7 @@ import {
   submitExamToServer,
 } from './utils/vercelStorage';
 import { Power } from 'lucide-react';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 type AppStage =
   | 'login'
@@ -648,7 +649,9 @@ export default function App() {
     return INITIAL_ADMIN_PROCTORS;
   });
 
-  const activeSchedules = schedules.filter((s) => s.isActive);
+  const activeSchedules = (Array.isArray(schedules) ? schedules : []).filter(
+    (s) => Boolean(s && typeof s === 'object' && s.isActive)
+  );
   const isScheduleActive = activeSchedules.length > 0;
 
   const filterOutSimulasiTka = useCallback((list: ExamPackage[]): ExamPackage[] => {
@@ -702,8 +705,8 @@ export default function App() {
                 : [],
             }))
             .filter((pkg: ExamPackage) => {
-              const pCode = (pkg.code || '').trim().toUpperCase();
-              const pTitle = (pkg.title || '').trim().toLowerCase();
+              const pCode = String(pkg.code ?? '').trim().toUpperCase();
+              const pTitle = String(pkg.title ?? '').trim().toLowerCase();
               if (pCode && deletedCodes.has(pCode)) return false;
               if (pTitle && deletedNames.has(pTitle)) return false;
               return true;
@@ -723,10 +726,10 @@ export default function App() {
             // lengkapi dengan paket standar yang belum ada
             if (list.length < 10) {
               const existingCodes = new Set(
-                list.map((p) => (p.code || '').trim().toUpperCase())
+                list.map((p) => String(p.code ?? '').trim().toUpperCase())
               );
               INITIAL_EXAM_PACKAGES.forEach((initPkg) => {
-                const initCode = (initPkg.code || '').trim().toUpperCase();
+                const initCode = String(initPkg.code ?? '').trim().toUpperCase();
                 if (initCode && !existingCodes.has(initCode)) {
                   list.push(initPkg);
                   existingCodes.add(initCode);
@@ -834,6 +837,7 @@ export default function App() {
   const lastFullscreenRequestAtRef = useRef<number>(0);
   const draftSyncTimerRef = useRef<number | null>(null);
   const isSyncInFlightRef = useRef<boolean>(false);
+  const syncInFlightPromiseRef = useRef<Promise<ProctorParticipantRow[]> | null>(null);
   const lastSyncAttemptAtRef = useRef<number>(0);
   const resultsClearedAtRef = useRef<number>(0);
 
@@ -1077,8 +1081,8 @@ export default function App() {
     if (!lastViolationInfo) return;
     const matched = participants.find(
       (p) =>
-        p.username.trim().toUpperCase() ===
-        lastViolationInfo.username.trim().toUpperCase()
+        String(p?.username ?? '').trim().toUpperCase() ===
+        String(lastViolationInfo.username ?? '').trim().toUpperCase()
     );
     if (!matched || !isParticipantLockedByViolation(matched)) {
       setLastViolationInfo(null);
@@ -1280,8 +1284,10 @@ export default function App() {
         const prevByUser = new Map<string, ProctorParticipantRow>();
         const prevById = new Map<string, ProctorParticipantRow>();
         prev.forEach((p) => {
-          prevByUser.set(p.username.trim().toUpperCase(), p);
-          prevById.set(p.id, p);
+          if (!p || typeof p !== 'object') return;
+          const uKey = String(p.username ?? '').trim().toUpperCase();
+          if (uKey) prevByUser.set(uKey, p);
+          if (p.id) prevById.set(p.id, p);
         });
 
         let hasAnyRealFieldOrRowChange = rawNext.length !== prev.length;
@@ -1290,7 +1296,7 @@ export default function App() {
         const stampedNext = rawNext.map((row) => {
           const prevRow =
             prevById.get(row.id) ||
-            prevByUser.get(row.username.trim().toUpperCase());
+            prevByUser.get(String(row?.username ?? '').trim().toUpperCase());
           if (!prevRow) {
             hasAnyRealFieldOrRowChange = true;
             return {
@@ -1382,7 +1388,7 @@ export default function App() {
           .filter((row) => {
             const prevRow =
               prevById.get(row.id) ||
-              prevByUser.get(row.username.trim().toUpperCase());
+              prevByUser.get(String(row?.username ?? '').trim().toUpperCase());
             if (!prevRow) return true;
             return (
               prevRow.loginState !== row.loginState ||
@@ -1404,7 +1410,7 @@ export default function App() {
           })
           .map((row) => ({
             id: row.id,
-            username: row.username.trim().toUpperCase(),
+            username: String(row.username ?? '').trim().toUpperCase(),
             namaPeserta: row.namaPeserta,
             kelas: row.kelas,
             kelompok: row.kelompok,
@@ -1476,7 +1482,9 @@ export default function App() {
         // If no rows were added/deleted and only <= 10 rows changed (e.g. Reset Login 1 student, Assign/Move a few),
         // use lightweight delta participantPatch so we never overwrite concurrent student drafts/finishes
         const hasAddedRow = nextParticipants.some(
-          (p) => !prevById.has(p.id) && !prevByUser.has(p.username.trim().toUpperCase())
+          (p) =>
+            !prevById.has(p.id) &&
+            !prevByUser.has(String(p?.username ?? '').trim().toUpperCase())
         );
 
         pendingPushCount.current += 1;
@@ -1748,10 +1756,16 @@ export default function App() {
   const syncFromVercelCloud = useCallback(
     async (options?: { force?: boolean }): Promise<ProctorParticipantRow[]> => {
       const isForced = Boolean(options?.force);
+      if (isSyncInFlightRef.current && syncInFlightPromiseRef.current) {
+        if (!isForced) {
+          return participantsRef.current;
+        }
+        // Coalesce concurrent forced syncs (e.g., during Admin login) so they never race or clobber state
+        return syncInFlightPromiseRef.current;
+      }
       if (
         !isForced &&
-        (isSyncInFlightRef.current ||
-          pendingPushCount.current > 0 ||
+        (pendingPushCount.current > 0 ||
           Date.now() - lastLocalMutationAt.current < 2500)
       ) {
         return participantsRef.current;
@@ -1761,6 +1775,7 @@ export default function App() {
       lastSyncAttemptAtRef.current = Date.now();
       const fetchStartedAt = Date.now();
 
+      const runSync = async (): Promise<ProctorParticipantRow[]> => {
       try {
         const res = await fetchVercelStorage({
           since:
@@ -2074,7 +2089,8 @@ export default function App() {
                 .trim()
                 .toUpperCase();
               const activeStudentRow = mergedParticipants.find(
-                (p) => p.username.trim().toUpperCase() === activeUserUpper
+                (p) =>
+                  String(p?.username ?? '').trim().toUpperCase() === activeUserUpper
               );
               if (
                 activeStudentRow &&
@@ -2089,14 +2105,16 @@ export default function App() {
             if (isAdminOrProctorStage) {
               const remoteByUser = new Map<string, ProctorParticipantRow>();
               res.data.participants!.forEach((r) => {
-                if (r && r.username) {
-                  remoteByUser.set(r.username.trim().toUpperCase(), r);
+                if (r && typeof r === 'object' && r.username) {
+                  remoteByUser.set(String(r.username).trim().toUpperCase(), r);
                 }
               });
               const serverNeedsParticipantHeal =
                 mergedParticipants.length !== res.data.participants!.length ||
                 mergedParticipants.some((m) => {
-                  const r = remoteByUser.get(m.username.trim().toUpperCase());
+                  const r = remoteByUser.get(
+                    String(m?.username ?? '').trim().toUpperCase()
+                  );
                   if (!r) return true;
                   return (
                     Boolean(r.requestReset) !== Boolean(m.requestReset) ||
@@ -2155,7 +2173,12 @@ export default function App() {
             Array.isArray(res.data.proctors) &&
             res.data.proctors.length > 0
           ) {
-            setProctors(res.data.proctors);
+            const validProctors = res.data.proctors.filter(
+              (pr): pr is AdminProctorItem => Boolean(pr && typeof pr === 'object')
+            );
+            if (validProctors.length > 0) {
+              setProctors(validProctors);
+            }
           }
 
           const remoteClearedAt =
@@ -2174,7 +2197,7 @@ export default function App() {
               ...res.data.resultsHistory,
               ...resultsHistoryRef.current,
             ]) {
-              if (!item || !item.id || seenIds.has(item.id)) continue;
+              if (!item || typeof item !== 'object' || !item.id || seenIds.has(item.id)) continue;
               const uKey = String(item?.participant?.username || '')
                 .trim()
                 .toUpperCase();
@@ -2258,9 +2281,19 @@ export default function App() {
         }
         isHydratedFromCloud.current = true;
         return participantsRef.current;
+      } catch (err) {
+        console.error('Cloud sync failed safely:', err);
+        isApplyingRemoteUpdate.current = false;
+        return participantsRef.current;
       } finally {
         isSyncInFlightRef.current = false;
+        syncInFlightPromiseRef.current = null;
       }
+      };
+
+      const p = runSync();
+      syncInFlightPromiseRef.current = p;
+      return p;
     },
     [filterOutSimulasiTka]
   );
@@ -2391,13 +2424,15 @@ export default function App() {
     schedules,
   ]);
 
+  const safeParticipantsList = Array.isArray(participants) ? participants : [];
+  const safePackagesList = Array.isArray(packages) ? packages : [];
   const currentStudentKelas =
     normalizeKelasCode(
       participant.kelas ||
-        participants.find(
+        safeParticipantsList.find(
           (p) =>
-            p.username.trim().toUpperCase() ===
-            participant.username.trim().toUpperCase()
+            String(p?.username ?? '').trim().toUpperCase() ===
+            String(participant?.username ?? '').trim().toUpperCase()
         )?.kelas
     ) || 'X';
 
@@ -2409,16 +2444,16 @@ export default function App() {
     (participant.activeSubjectTitle
       ? currentStudentActiveSchedules.find(
           (s) =>
-            s.mapel.trim().toLowerCase() ===
-            participant.activeSubjectTitle?.trim().toLowerCase()
+            String(s?.mapel ?? '').trim().toLowerCase() ===
+            String(participant.activeSubjectTitle ?? '').trim().toLowerCase()
         )
       : undefined) || currentStudentActiveSchedules[0];
 
-  const pkgBySelectedId = packages.find(
-    (p) => p.id === participant.selectedPackageId
+  const pkgBySelectedId = safePackagesList.find(
+    (p) => p && p.id === participant.selectedPackageId
   );
   const pkgBySchedule = matchedStudentSchedule
-    ? resolvePackageForSchedule(matchedStudentSchedule, packages)
+    ? resolvePackageForSchedule(matchedStudentSchedule, safePackagesList)
     : undefined;
 
   const selectedPackage: ExamPackage =
@@ -3582,72 +3617,78 @@ export default function App() {
 
   // Dedicated Full-Screen Proctor Dashboard (matches the reference image)
   if (stage === 'proctor_dashboard') {
+    const handleExitProctorToLogin = () => {
+      cancelAuthSpinner();
+      clearAuthSessionToken();
+      exitCbtFullscreen();
+      setStage('login');
+    };
     return (
-      <ProctorDashboardView
-        proctorName={proctorSession.name}
-        encryptionCode={proctorSession.encryptionCode}
-        onUpdateProctorName={(newName: string) => {
-          setProctorSession((prev) => ({ ...prev, name: newName }));
-        }}
-        proctors={proctors}
-        onUpdateProctors={handleUpdateProctors}
-        activeToken={activeToken}
-        tokenSecondsLeft={tokenSecondsLeft}
-        tokenDurationSeconds={TOKEN_DURATION_SECONDS}
-        onUpdateToken={handleUpdateToken}
-        adminSettings={adminSettings}
-        onUpdateAdminSettings={handleUpdateAdminSettings}
-        isScheduleActive={isScheduleActive}
-        activeSchedules={activeSchedules}
-        participants={participants}
-        onUpdateParticipants={handleUpdateParticipants}
-        packages={packages}
-        onUpdatePackages={handleUpdatePackages}
-        onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
-        resultsHistory={resultsHistory}
-        onClearHistory={() => handleUpdateResultsHistory([])}
-        onLogoutProctor={() => {
-          cancelAuthSpinner();
-          clearAuthSessionToken();
-          exitCbtFullscreen();
-          setStage('login');
-        }}
-      />
+      <ErrorBoundary onResetToLogin={handleExitProctorToLogin}>
+        <ProctorDashboardView
+          proctorName={proctorSession.name}
+          encryptionCode={proctorSession.encryptionCode}
+          onUpdateProctorName={(newName: string) => {
+            setProctorSession((prev) => ({ ...prev, name: newName }));
+          }}
+          proctors={proctors}
+          onUpdateProctors={handleUpdateProctors}
+          activeToken={activeToken}
+          tokenSecondsLeft={tokenSecondsLeft}
+          tokenDurationSeconds={TOKEN_DURATION_SECONDS}
+          onUpdateToken={handleUpdateToken}
+          adminSettings={adminSettings}
+          onUpdateAdminSettings={handleUpdateAdminSettings}
+          isScheduleActive={isScheduleActive}
+          activeSchedules={activeSchedules}
+          participants={participants}
+          onUpdateParticipants={handleUpdateParticipants}
+          packages={packages}
+          onUpdatePackages={handleUpdatePackages}
+          onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
+          resultsHistory={resultsHistory}
+          onClearHistory={() => handleUpdateResultsHistory([])}
+          onLogoutProctor={handleExitProctorToLogin}
+        />
+      </ErrorBoundary>
     );
   }
 
   // Dedicated Full-Screen Administrator Dashboard
   if (stage === 'admin_dashboard') {
+    const handleExitAdminToLogin = () => {
+      cancelAuthSpinner();
+      clearAuthSessionToken();
+      exitCbtFullscreen();
+      setStage('login');
+    };
     return (
-      <AdminDashboardView
-        adminUsername={adminUsername}
-        activeToken={activeToken}
-        tokenSecondsLeft={tokenSecondsLeft}
-        tokenDurationSeconds={TOKEN_DURATION_SECONDS}
-        onUpdateToken={handleUpdateToken}
-        adminSettings={adminSettings}
-        onUpdateAdminSettings={handleUpdateAdminSettings}
-        schedules={schedules}
-        onUpdateSchedules={handleUpdateSchedules}
-        participants={participants}
-        onUpdateParticipants={handleUpdateParticipants}
-        proctors={proctors}
-        onUpdateProctors={handleUpdateProctors}
-        packages={packages}
-        onUpdatePackages={handleUpdatePackages}
-        onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
-        resultsHistory={resultsHistory}
-        onClearHistory={() => handleUpdateResultsHistory([])}
-        storageEngine={storageEngine}
-        lastSyncedLabel={lastSyncedLabel}
-        onForceSyncStorage={pushToVercelCloud}
-        onLogoutAdmin={() => {
-          cancelAuthSpinner();
-          clearAuthSessionToken();
-          exitCbtFullscreen();
-          setStage('login');
-        }}
-      />
+      <ErrorBoundary onResetToLogin={handleExitAdminToLogin}>
+        <AdminDashboardView
+          adminUsername={adminUsername}
+          activeToken={activeToken}
+          tokenSecondsLeft={tokenSecondsLeft}
+          tokenDurationSeconds={TOKEN_DURATION_SECONDS}
+          onUpdateToken={handleUpdateToken}
+          adminSettings={adminSettings}
+          onUpdateAdminSettings={handleUpdateAdminSettings}
+          schedules={schedules}
+          onUpdateSchedules={handleUpdateSchedules}
+          participants={participants}
+          onUpdateParticipants={handleUpdateParticipants}
+          proctors={proctors}
+          onUpdateProctors={handleUpdateProctors}
+          packages={packages}
+          onUpdatePackages={handleUpdatePackages}
+          onResetDefaultPackages={() => handleUpdatePackages(INITIAL_EXAM_PACKAGES)}
+          resultsHistory={resultsHistory}
+          onClearHistory={() => handleUpdateResultsHistory([])}
+          storageEngine={storageEngine}
+          lastSyncedLabel={lastSyncedLabel}
+          onForceSyncStorage={pushToVercelCloud}
+          onLogoutAdmin={handleExitAdminToLogin}
+        />
+      </ErrorBoundary>
     );
   }
 
