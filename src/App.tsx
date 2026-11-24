@@ -913,7 +913,9 @@ export default function App() {
 
   const handleUpdateToken = useCallback(
     (nextToken: string, isManualUpdate = true) => {
-      const cleanToken = nextToken.trim().toUpperCase() || DEFAULT_EXAM_TOKEN;
+      const cleanToken =
+        nextToken.replace(/[\s\u200B-\u200D\uFEFF]+/g, '').toUpperCase() ||
+        DEFAULT_EXAM_TOKEN;
       const nowTs = Date.now();
       lastLocalMutationAt.current = nowTs;
       activeTokenRef.current = cleanToken;
@@ -934,7 +936,56 @@ export default function App() {
         forceTokenUpdate: isManualUpdate,
       })
         .then((res) => {
-          if (res.ok) markSyncedSuccess(res.engine);
+          if (res.ok) {
+            if (typeof res.updatedAt === 'number') {
+              latestUpdatedAtRef.current = Math.max(
+                latestUpdatedAtRef.current,
+                res.updatedAt
+              );
+            }
+            const serverToken =
+              typeof res.data?.activeToken === 'string'
+                ? res.data.activeToken
+                    .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+                    .toUpperCase()
+                : '';
+            const serverTokenTs =
+              typeof res.data?.tokenUpdatedAt === 'number'
+                ? res.data.tokenUpdatedAt
+                : 0;
+            if (serverToken) {
+              if (serverToken !== activeTokenRef.current) {
+                activeTokenRef.current = serverToken;
+                setActiveToken(serverToken);
+              }
+              if (serverTokenTs > 0) {
+                tokenUpdatedAtRef.current = Math.max(
+                  tokenUpdatedAtRef.current,
+                  serverTokenTs
+                );
+                const syncedEndMs =
+                  serverTokenTs + TOKEN_DURATION_SECONDS * 1000 > Date.now()
+                    ? serverTokenTs + TOKEN_DURATION_SECONDS * 1000
+                    : Date.now() + TOKEN_DURATION_SECONDS * 1000;
+                tokenEndTimeRef.current = syncedEndMs;
+                setTokenSecondsLeft(
+                  Math.max(0, Math.ceil((syncedEndMs - Date.now()) / 1000))
+                );
+              }
+              try {
+                localStorage.setItem(STORAGE_KEYS.TOKEN, serverToken);
+                if (tokenUpdatedAtRef.current > 0) {
+                  localStorage.setItem(
+                    STORAGE_KEYS.TOKEN_UPDATED_AT,
+                    String(tokenUpdatedAtRef.current)
+                  );
+                }
+              } catch {
+                // ignore
+              }
+            }
+            markSyncedSuccess(res.engine);
+          }
         })
         .finally(() => {
           pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
@@ -1521,12 +1572,20 @@ export default function App() {
         } catch {
           // ignore
         }
+        const hasAnyActiveSchedule = nextSchedules.some((s) => s.isActive);
         pendingPushCount.current += 1;
         saveVercelStorage({
           schedules: nextSchedules,
           deletedScheduleIds,
           forceReplaceSchedules: true,
           schedulesUpdatedAt: nowTs,
+          ...(hasAnyActiveSchedule && activeTokenRef.current
+            ? {
+                activeToken: activeTokenRef.current,
+                tokenUpdatedAt: tokenUpdatedAtRef.current || nowTs,
+                forceTokenUpdate: false,
+              }
+            : {}),
         })
           .then((res) => {
             if (res.ok) {
@@ -1535,6 +1594,39 @@ export default function App() {
                   latestUpdatedAtRef.current,
                   res.updatedAt
                 );
+              }
+              const serverToken =
+                typeof res.data?.activeToken === 'string'
+                  ? res.data.activeToken
+                      .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+                      .toUpperCase()
+                  : '';
+              const serverTokenTs =
+                typeof res.data?.tokenUpdatedAt === 'number'
+                  ? res.data.tokenUpdatedAt
+                  : 0;
+              if (serverToken) {
+                if (serverToken !== activeTokenRef.current) {
+                  activeTokenRef.current = serverToken;
+                  setActiveToken(serverToken);
+                }
+                if (serverTokenTs > 0) {
+                  tokenUpdatedAtRef.current = Math.max(
+                    tokenUpdatedAtRef.current,
+                    serverTokenTs
+                  );
+                }
+                try {
+                  localStorage.setItem(STORAGE_KEYS.TOKEN, serverToken);
+                  if (tokenUpdatedAtRef.current > 0) {
+                    localStorage.setItem(
+                      STORAGE_KEYS.TOKEN_UPDATED_AT,
+                      String(tokenUpdatedAtRef.current)
+                    );
+                  }
+                } catch {
+                  // ignore
+                }
               }
               markSyncedSuccess(res.engine);
             }
@@ -1734,52 +1826,101 @@ export default function App() {
             );
           }
 
-          // 1. Token CRDT reconciliation by tokenUpdatedAt (preserving remaining 10-minute window)
+          // 1. Token CRDT reconciliation by tokenUpdatedAt (preserving remaining window & ensuring server always holds activeToken)
+          const remoteTokenClean =
+            typeof res.data.activeToken === 'string'
+              ? res.data.activeToken
+                  .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+                  .toUpperCase()
+              : '';
           const remoteTokenTs =
             typeof res.data.tokenUpdatedAt === 'number'
               ? res.data.tokenUpdatedAt
               : 0;
-          if (
-            typeof res.data.activeToken === 'string' &&
-            res.data.activeToken &&
-            res.data.activeToken !== activeTokenRef.current
-          ) {
-            if (
-              remoteTokenTs >= tokenUpdatedAtRef.current ||
-              tokenUpdatedAtRef.current === 0
-            ) {
-              activeTokenRef.current = res.data.activeToken;
-              tokenUpdatedAtRef.current = Math.max(
-                tokenUpdatedAtRef.current,
-                remoteTokenTs
-              );
+          if (remoteTokenClean) {
+            if (remoteTokenClean !== activeTokenRef.current) {
+              if (
+                remoteTokenTs >= tokenUpdatedAtRef.current ||
+                tokenUpdatedAtRef.current === 0 ||
+                !isAdminOrProctorStage
+              ) {
+                activeTokenRef.current = remoteTokenClean;
+                tokenUpdatedAtRef.current = Math.max(
+                  tokenUpdatedAtRef.current,
+                  remoteTokenTs
+                );
+                const syncedEndMs =
+                  remoteTokenTs > 0 &&
+                  remoteTokenTs + tokenDurationSecondsRef.current * 1000 >
+                    Date.now()
+                    ? remoteTokenTs + tokenDurationSecondsRef.current * 1000
+                    : Date.now() + tokenDurationSecondsRef.current * 1000;
+                tokenEndTimeRef.current = syncedEndMs;
+                setActiveToken(remoteTokenClean);
+                setTokenSecondsLeft(
+                  Math.max(0, Math.ceil((syncedEndMs - Date.now()) / 1000))
+                );
+                try {
+                  localStorage.setItem(STORAGE_KEYS.TOKEN, remoteTokenClean);
+                  if (remoteTokenTs > 0) {
+                    localStorage.setItem(
+                      STORAGE_KEYS.TOKEN_UPDATED_AT,
+                      String(remoteTokenTs)
+                    );
+                  }
+                } catch {
+                  // ignore
+                }
+              } else if (isAdminOrProctorStage) {
+                saveVercelStorage({
+                  activeToken: activeTokenRef.current,
+                  tokenUpdatedAt: tokenUpdatedAtRef.current,
+                  forceTokenUpdate: false,
+                }).then((saveRes) => {
+                  const authServerToken =
+                    typeof saveRes.data?.activeToken === 'string'
+                      ? saveRes.data.activeToken
+                          .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+                          .toUpperCase()
+                      : '';
+                  if (authServerToken && authServerToken !== activeTokenRef.current) {
+                    activeTokenRef.current = authServerToken;
+                    setActiveToken(authServerToken);
+                  }
+                });
+              }
+            } else if (remoteTokenTs > tokenUpdatedAtRef.current) {
+              tokenUpdatedAtRef.current = remoteTokenTs;
               const syncedEndMs =
-                remoteTokenTs > 0 &&
-                remoteTokenTs + tokenDurationSecondsRef.current * 1000 > Date.now()
+                remoteTokenTs + tokenDurationSecondsRef.current * 1000 >
+                Date.now()
                   ? remoteTokenTs + tokenDurationSecondsRef.current * 1000
                   : Date.now() + tokenDurationSecondsRef.current * 1000;
               tokenEndTimeRef.current = syncedEndMs;
-              setActiveToken(res.data.activeToken);
               setTokenSecondsLeft(
                 Math.max(0, Math.ceil((syncedEndMs - Date.now()) / 1000))
               );
-              try {
-                localStorage.setItem(STORAGE_KEYS.TOKEN, res.data.activeToken);
-                if (remoteTokenTs > 0) {
-                  localStorage.setItem(
-                    STORAGE_KEYS.TOKEN_UPDATED_AT,
-                    String(remoteTokenTs)
-                  );
-                }
-              } catch {
-                // ignore
-              }
-            } else if (isAdminOrProctorStage) {
-              saveVercelStorage({
-                activeToken: activeTokenRef.current,
-                tokenUpdatedAt: tokenUpdatedAtRef.current,
-              });
             }
+          } else if (isAdminOrProctorStage && activeTokenRef.current) {
+            // Server has no activeToken stored yet while Admin/Proctor displays one -> push immediately so students can verify
+            const seedTs = tokenUpdatedAtRef.current || Date.now();
+            tokenUpdatedAtRef.current = seedTs;
+            saveVercelStorage({
+              activeToken: activeTokenRef.current,
+              tokenUpdatedAt: seedTs,
+              forceTokenUpdate: false,
+            }).then((saveRes) => {
+              const authServerToken =
+                typeof saveRes.data?.activeToken === 'string'
+                  ? saveRes.data.activeToken
+                      .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+                      .toUpperCase()
+                  : '';
+              if (authServerToken && authServerToken !== activeTokenRef.current) {
+                activeTokenRef.current = authServerToken;
+                setActiveToken(authServerToken);
+              }
+            });
           }
 
           // Sync remote adminSettings (deleted/custom mapel config & exam settings) if newer than local

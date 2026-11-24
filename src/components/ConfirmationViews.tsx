@@ -278,7 +278,9 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanInput = enteredToken.replace(/\s+/g, '').toUpperCase();
+    const cleanInput = enteredToken
+      .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+      .toUpperCase();
     if (!cleanInput) {
       setError('Silakan masukkan Token ujian terlebih dahulu.');
       return;
@@ -324,6 +326,8 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
       .trim()
       .toUpperCase();
 
+    let serverSessionUnauthorized = false;
+
     // Always verify live server status (catches Non Active deactivation in Kelompok Tes) + server token + latest questions
     setIsVerifyingToken(true);
     try {
@@ -340,8 +344,12 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
         }
       } else if (
         !verifyRes.networkError &&
-        verifyRes.reason &&
-        verifyRes.reason !== 'unauthorized'
+        verifyRes.reason === 'unauthorized'
+      ) {
+        serverSessionUnauthorized = true;
+      } else if (
+        !verifyRes.networkError &&
+        verifyRes.reason
       ) {
         setError(
           verifyRes.error ||
@@ -425,7 +433,9 @@ export const ParticipantConfirmationView: React.FC<ParticipantConfirmationProps>
 
     if (!isTokenValid) {
       setError(
-        'Token yang Anda masukkan tidak sesuai dengan token ujian aktif saat ini. Pastikan token sesuai dengan yang tampil di Beranda Proktor/Administrator.'
+        serverSessionUnauthorized
+          ? 'Sesi login peserta belum terverifikasi atau telah berakhir di server. Silakan klik Keluar lalu login kembali.'
+          : 'Token yang Anda masukkan tidak sesuai dengan token ujian aktif saat ini. Pastikan token sesuai dengan yang tampil di Beranda Proktor/Administrator.'
       );
       return;
     }

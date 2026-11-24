@@ -1866,6 +1866,8 @@ function redactStorageForRole(
   const isAuthenticatedStudent = session?.role === 'student' && Boolean(session.sub);
   const safeData: Record<string, unknown> = { ...data };
   delete safeData.activeToken;
+  delete safeData.previousActiveToken;
+  delete safeData.previousTokenValidUntil;
   delete safeData.proctors;
 
   if (Array.isArray(safeData.participants)) {
@@ -2559,10 +2561,40 @@ export default async function handler(req: any, res: any) {
           });
         }
 
-        const serverToken = String(existing.activeToken || '')
-          .replace(/\s+/g, '')
+        const normalizedEnteredToken = enteredToken
+          .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
           .toUpperCase();
-        if (!serverToken || !safeEqualStr(enteredToken, serverToken)) {
+        const serverToken = String(existing.activeToken || '')
+          .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+          .toUpperCase();
+        const prevToken = String(existing.previousActiveToken || '')
+          .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+          .toUpperCase();
+        const prevValidUntil =
+          typeof existing.previousTokenValidUntil === 'number'
+            ? existing.previousTokenValidUntil
+            : 0;
+
+        if (!serverToken) {
+          return res.status(403).json({
+            ok: false,
+            reason: 'invalid_token',
+            participantStatus: 'Active',
+            error:
+              'Token ujian belum tersinkron ke server. Mohon Administrator klik tombol "Simpan Token" atau "Rilis Token Baru" pada Beranda Administrator lalu coba kembali.',
+          });
+        }
+
+        const matchesCurrent =
+          Boolean(normalizedEnteredToken) &&
+          safeEqualStr(normalizedEnteredToken, serverToken);
+        const matchesGracePrev =
+          Boolean(normalizedEnteredToken) &&
+          Boolean(prevToken) &&
+          prevValidUntil > Date.now() &&
+          safeEqualStr(normalizedEnteredToken, prevToken);
+
+        if (!matchesCurrent && !matchesGracePrev) {
           return res.status(403).json({
             ok: false,
             reason: 'invalid_token',
@@ -3072,29 +3104,83 @@ export default async function handler(req: any, res: any) {
       }
 
       // Resolve activeToken by tokenUpdatedAt so stale instances never revert token rotation,
-      // and guard against two dashboards double-rotating automatically within 30 seconds
+      // allow manual forceTokenUpdate regardless of client clock skew,
+      // and keep a 90s grace window for automatic rotations so students aren't rejected mid-typing
+      const existTokenClean = String(existing.activeToken || '')
+        .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+        .toUpperCase();
       const existTokenTs =
         typeof existing.tokenUpdatedAt === 'number'
           ? existing.tokenUpdatedAt
           : 0;
       const incTokenTs =
         typeof body.tokenUpdatedAt === 'number' ? body.tokenUpdatedAt : 0;
-      let resolvedActiveToken = existing.activeToken;
+      let resolvedActiveToken = existTokenClean;
       let resolvedTokenUpdatedAt = existTokenTs;
-      if (typeof body.activeToken === 'string' && body.activeToken.trim()) {
-        const cleanIncToken = body.activeToken.trim().toUpperCase();
-        const isDuplicateAutoRotate =
-          !body.forceTokenUpdate &&
-          Boolean(existing.activeToken) &&
-          existTokenTs > 0 &&
-          incTokenTs > 0 &&
-          Math.abs(incTokenTs - existTokenTs) < 30_000 &&
-          cleanIncToken !== String(existing.activeToken).trim().toUpperCase();
+      let resolvedPrevToken = String(existing.previousActiveToken || '')
+        .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+        .toUpperCase();
+      let resolvedPrevValidUntil =
+        typeof existing.previousTokenValidUntil === 'number'
+          ? existing.previousTokenValidUntil
+          : 0;
 
-        if (!isDuplicateAutoRotate && (incTokenTs >= existTokenTs || !existing.activeToken)) {
-          resolvedActiveToken = cleanIncToken;
-          resolvedTokenUpdatedAt = Math.max(incTokenTs, existTokenTs, Date.now());
+      if (typeof body.activeToken === 'string' && body.activeToken.trim()) {
+        const cleanIncToken = body.activeToken
+          .replace(/[\s\u200B-\u200D\uFEFF]+/g, '')
+          .toUpperCase();
+        if (cleanIncToken) {
+          const isForceManual = Boolean(body.forceTokenUpdate);
+          const isDuplicateAutoRotate =
+            !isForceManual &&
+            Boolean(existTokenClean) &&
+            existTokenTs > 0 &&
+            incTokenTs > 0 &&
+            Math.abs(incTokenTs - existTokenTs) < 30_000 &&
+            cleanIncToken !== existTokenClean;
+
+          if (isForceManual) {
+            if (cleanIncToken !== existTokenClean) {
+              resolvedPrevToken = '';
+              resolvedPrevValidUntil = 0;
+            }
+            resolvedActiveToken = cleanIncToken;
+            resolvedTokenUpdatedAt = Math.max(
+              existTokenTs + 1,
+              incTokenTs,
+              Date.now()
+            );
+          } else if (
+            !isDuplicateAutoRotate &&
+            (!existTokenClean || incTokenTs >= existTokenTs)
+          ) {
+            if (existTokenClean && cleanIncToken !== existTokenClean) {
+              resolvedPrevToken = existTokenClean;
+              resolvedPrevValidUntil = Date.now() + 90_000;
+            }
+            resolvedActiveToken = cleanIncToken;
+            resolvedTokenUpdatedAt = Math.max(
+              incTokenTs,
+              existTokenTs,
+              Date.now()
+            );
+          }
         }
+      }
+
+      // Guarantee an activeToken exists on the server whenever at least one schedule is active
+      if (
+        !resolvedActiveToken &&
+        Array.isArray(nextSchedules) &&
+        nextSchedules.some((s) => s && s.isActive)
+      ) {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let autoToken = '';
+        for (let i = 0; i < 6; i++) {
+          autoToken += chars.charAt(crypto.randomInt(chars.length));
+        }
+        resolvedActiveToken = autoToken;
+        resolvedTokenUpdatedAt = Date.now();
       }
 
       // Resolve adminSettings (deleted/custom mapel config) by updatedAt timestamp
@@ -3142,6 +3228,15 @@ export default async function handler(req: any, res: any) {
           ? {
               activeToken: resolvedActiveToken,
               tokenUpdatedAt: resolvedTokenUpdatedAt,
+              ...(resolvedPrevToken && resolvedPrevValidUntil > Date.now()
+                ? {
+                    previousActiveToken: resolvedPrevToken,
+                    previousTokenValidUntil: resolvedPrevValidUntil,
+                  }
+                : {
+                    previousActiveToken: '',
+                    previousTokenValidUntil: 0,
+                  }),
             }
           : {}),
         ...(resolvedAdminSettings
