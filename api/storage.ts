@@ -1375,12 +1375,15 @@ function sanitizeParticipantsList(
 
       const maxResetAt =
         typeof row.lastResetAt === 'number' ? row.lastResetAt : 0;
+      const maxViolationResetAt =
+        typeof row.violationResetAt === 'number' ? row.violationResetAt : 0;
+      const effectiveResetAt = Math.max(maxResetAt, maxViolationResetAt);
       const vTimestamp =
         typeof row.violationTimestamp === 'number' ? row.violationTimestamp : 0;
       const isValidViolation =
         row.violationSchema === 3 &&
         vTimestamp > 0 &&
-        vTimestamp > maxResetAt &&
+        vTimestamp > effectiveResetAt &&
         (row.requestReset === true ||
           row.loginState === 'Terkunci (Pelanggaran)');
 
@@ -1393,6 +1396,11 @@ function sanitizeParticipantsList(
         delete row.violationAt;
         delete row.violationSchema;
         delete row.violationTimestamp;
+      }
+
+      if (maxViolationResetAt > 0 && maxViolationResetAt >= vTimestamp) {
+        row.violationCount = 0;
+        delete row.violationPackageId;
       }
 
       return row;
@@ -1813,7 +1821,10 @@ function shortenServerUsername(raw?: unknown): string {
 function isServerRowLockedByViolation(row: Record<string, any>): boolean {
   const vTs =
     typeof row.violationTimestamp === 'number' ? row.violationTimestamp : 0;
-  const resetTs = typeof row.lastResetAt === 'number' ? row.lastResetAt : 0;
+  const resetTs = Math.max(
+    typeof row.lastResetAt === 'number' ? row.lastResetAt : 0,
+    typeof row.violationResetAt === 'number' ? row.violationResetAt : 0
+  );
   return (
     row.violationSchema === 3 &&
     vTs > 0 &&
@@ -2042,12 +2053,19 @@ function getStudentFallbackPassword(index: number): string {
 
 function isServerPasswordMatch(
   expectedRaw: string,
-  inputRaw: string
+  inputRaw: string,
+  allowCaseInsensitive = false
 ): boolean {
   const expected = expectedRaw.trim();
   const input = inputRaw.trim();
   if (!expected || !input) return false;
   if (safeEqualStr(input, expected)) return true;
+  if (
+    allowCaseInsensitive &&
+    safeEqualStr(input.toUpperCase(), expected.toUpperCase())
+  ) {
+    return true;
+  }
   if (
     expected === expected.toUpperCase() &&
     safeEqualStr(input.toUpperCase(), expected)
@@ -2412,7 +2430,7 @@ export default async function handler(req: any, res: any) {
           const expectedPass =
             String(row.password || '').trim() ||
             getStudentFallbackPassword(matchedIndex);
-          if (!isServerPasswordMatch(expectedPass, passwordInput)) {
+          if (!isServerPasswordMatch(expectedPass, passwordInput, true)) {
             return res.status(401).json({
               ok: false,
               reason: 'invalid_password',
@@ -2639,12 +2657,13 @@ export default async function handler(req: any, res: any) {
           .trim()
           .toUpperCase();
 
-        if (
-          !session ||
-          session.role !== 'student' ||
-          !reqUsername ||
-          session.sub !== reqUsername
-        ) {
+        const isAuthorizedSubmitter =
+          Boolean(session && reqUsername) &&
+          ((session!.role === 'student' && session!.sub === reqUsername) ||
+            session!.role === 'proctor' ||
+            session!.role === 'admin');
+
+        if (!isAuthorizedSubmitter) {
           return res.status(401).json({
             ok: false,
             error: 'Sesi peserta tidak valid untuk mengirim jawaban ujian.',
@@ -2672,76 +2691,153 @@ export default async function handler(req: any, res: any) {
             const targetTitleClean = cleanServerMapelTitle(packageTitle);
             const studentKelas = normalizeServerKelas(participantObj?.kelas);
 
-            let matchedPkg = serverPackages.find(
-              (p) => p && String(p.id || '').trim() === packageId
+            const getRealQuestions = (pkg: Record<string, any> | undefined) =>
+              Array.isArray(pkg?.questions)
+                ? pkg!.questions.filter(
+                    (q: any) => q && !String(q?.id || '').startsWith('q_default_')
+                  )
+                : [];
+
+            const pickBestPackage = (
+              candidates: Record<string, any>[]
+            ): Record<string, any> | undefined => {
+              const valid = candidates.filter((p) => getRealQuestions(p).length > 0);
+              if (valid.length === 0) return undefined;
+              valid.sort(
+                (a, b) => getRealQuestions(b).length - getRealQuestions(a).length
+              );
+              return valid[0];
+            };
+
+            const isClassAgnosticTarget = (targetClass: unknown): boolean => {
+              const raw = String(targetClass || '').trim().toUpperCase();
+              return !raw || raw === 'SEMUA' || raw === 'SEMUA KELAS';
+            };
+
+            // 1. Exact packageId match (only if it contains real questions)
+            let matchedPkg = pickBestPackage(
+              serverPackages.filter(
+                (p) => p && String(p.id || '').trim() === packageId
+              )
             );
+
+            // 2. Title + student class match (pick package with most real questions)
             if (!matchedPkg && targetTitleClean) {
-              matchedPkg = serverPackages.find(
-                (p) =>
-                  p &&
-                  cleanServerMapelTitle(p.title) === targetTitleClean &&
-                  doesServerKelasMatch(p.targetClass, studentKelas)
+              matchedPkg = pickBestPackage(
+                serverPackages.filter(
+                  (p) =>
+                    p &&
+                    cleanServerMapelTitle(p.title) === targetTitleClean &&
+                    doesServerKelasMatch(p.targetClass, studentKelas)
+                )
               );
             }
 
-            const questions = Array.isArray(matchedPkg?.questions)
-              ? matchedPkg!.questions.filter(
-                  (q: any) => !String(q?.id || '').startsWith('q_default_')
+            // 3. Title + class-agnostic ("Semua Kelas" / empty targetClass) match
+            if (!matchedPkg && targetTitleClean) {
+              matchedPkg = pickBestPackage(
+                serverPackages.filter(
+                  (p) =>
+                    p &&
+                    cleanServerMapelTitle(p.title) === targetTitleClean &&
+                    isClassAgnosticTarget(p.targetClass)
                 )
-              : [];
+              );
+            }
+
+            // 4. Match by overlapping submitted question IDs (handles renamed/migrated packages)
+            if (!matchedPkg) {
+              const submittedIds = new Set(
+                Object.keys(answersMap).filter(
+                  (id) => id && !id.startsWith('q_default_')
+                )
+              );
+              if (submittedIds.size > 0) {
+                const scored = serverPackages
+                  .map((p) => {
+                    const realQs = getRealQuestions(p);
+                    if (realQs.length === 0) {
+                      return { pkg: p, overlap: 0, titleMatch: false, count: 0 };
+                    }
+                    let overlap = 0;
+                    for (const q of realQs) {
+                      if (submittedIds.has(String(q.id || ''))) overlap += 1;
+                    }
+                    return {
+                      pkg: p,
+                      overlap,
+                      titleMatch:
+                        Boolean(targetTitleClean) &&
+                        cleanServerMapelTitle(p?.title) === targetTitleClean,
+                      count: realQs.length,
+                    };
+                  })
+                  .filter((entry) => entry.overlap > 0);
+                scored.sort((a, b) => {
+                  if (a.titleMatch !== b.titleMatch) return a.titleMatch ? -1 : 1;
+                  if (b.overlap !== a.overlap) return b.overlap - a.overlap;
+                  return b.count - a.count;
+                });
+                if (scored.length > 0) {
+                  matchedPkg = scored[0].pkg;
+                }
+              }
+            }
+
+            // 5. Last-resort title-only match (handles student class label edits mid-exam)
+            if (!matchedPkg && targetTitleClean) {
+              matchedPkg = pickBestPackage(
+                serverPackages.filter(
+                  (p) => p && cleanServerMapelTitle(p.title) === targetTitleClean
+                )
+              );
+            }
+
+            const questions = getRealQuestions(matchedPkg);
 
             const nowTs = Date.now();
-            let summary: Record<string, any>;
-
-            if (questions.length > 0) {
-              let totalPoints = 0;
-              let maxPoints = 0;
-              let correctCount = 0;
-              let answeredCount = 0;
-
-              for (const q of questions) {
-                const qPoints = Number(q.points) || 10;
-                maxPoints += qPoints;
-                const evalRes = evaluateServerQuestionScore(q, answersMap[q.id]);
-                if (evalRes.isAnswered) answeredCount += 1;
-                if (evalRes.isCorrect) correctCount += 1;
-                totalPoints += evalRes.earnedPoints;
-              }
-
-              const finalScore =
-                maxPoints > 0 ? Math.round((totalPoints / maxPoints) * 100) : 0;
-
-              summary = {
-                id: `res_${nowTs}_${crypto.randomBytes(3).toString('hex')}`,
-                participant: participantObj,
-                packageTitle:
-                  packageTitle || matchedPkg?.title || 'Ujian SAS',
-                completedAt: new Date(nowTs).toLocaleString('id-ID', {
-                  day: '2-digit',
-                  month: 'short',
-                  year: 'numeric',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                }),
-                timeUsedSeconds: usedSeconds,
-                totalQuestions: questions.length,
-                answeredCount,
-                correctCount,
-                totalPoints,
-                maxPoints,
-                finalScore,
-              };
-            } else if (
-              body.clientFallbackSummary &&
-              typeof body.clientFallbackSummary === 'object'
-            ) {
-              summary = {
-                ...(body.clientFallbackSummary as Record<string, any>),
-                participant: participantObj,
-              };
-            } else {
+            if (questions.length === 0) {
+              // Never accept client-computed fallback summaries (prevents bogus 0 scores from redacted questions and score tampering)
               return { fallbackClientGrade: true };
             }
+
+            let totalPoints = 0;
+            let maxPoints = 0;
+            let correctCount = 0;
+            let answeredCount = 0;
+
+            for (const q of questions) {
+              const qPoints = Number(q.points) || 10;
+              maxPoints += qPoints;
+              const evalRes = evaluateServerQuestionScore(q, answersMap[q.id]);
+              if (evalRes.isAnswered) answeredCount += 1;
+              if (evalRes.isCorrect) correctCount += 1;
+              totalPoints += evalRes.earnedPoints;
+            }
+
+            const finalScore =
+              maxPoints > 0 ? Math.round((totalPoints / maxPoints) * 100) : 0;
+
+            const summary: Record<string, any> = {
+              id: `res_${nowTs}_${crypto.randomBytes(3).toString('hex')}`,
+              participant: participantObj,
+              packageTitle:
+                packageTitle || matchedPkg?.title || 'Ujian SAS',
+              completedAt: new Date(nowTs).toLocaleString('id-ID', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+              }),
+              timeUsedSeconds: usedSeconds,
+              totalQuestions: questions.length,
+              answeredCount,
+              correctCount,
+              totalPoints,
+              maxPoints,
+              finalScore,
+            };
 
             const existingParticipants = Array.isArray(existing.participants)
               ? sanitizeParticipantsList(existing.participants)
@@ -2810,7 +2906,8 @@ export default async function handler(req: any, res: any) {
           return res.status(404).json({
             ok: false,
             fallbackClientGrade: true,
-            error: 'Paket soal belum tersinkron di server.',
+            error:
+              'Bank soal dengan kunci jawaban belum tersedia di server untuk menilai ujian ini. Jawaban tetap tersimpan aman di antrean perangkat — hubungi Proktor/Admin untuk sinkronisasi bank soal lalu kirim ulang.',
           });
         }
 
@@ -2939,8 +3036,13 @@ export default async function handler(req: any, res: any) {
                 kodeTes: _kt,
                 namaPeserta: _np,
                 lastResetAt: _lr,
+                violationResetAt: _vr,
                 ...allowedFields
               } = p;
+              // Students may only transition to 'Selesai' via authoritative submit_exam action
+              if (allowedFields.loginState === 'Selesai') {
+                delete allowedFields.loginState;
+              }
               return allowedFields;
             });
 

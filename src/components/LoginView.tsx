@@ -25,6 +25,13 @@ export interface ViolationAlertInfo {
   answersWiped?: boolean;
 }
 
+export interface PendingSubmissionNotice {
+  localResultId: string;
+  username: string;
+  fullName: string;
+  packageTitle: string;
+}
+
 interface LoginViewProps {
   onLoginSuccess: (username: string) => void;
   onOpenProctorModal?: () => void;
@@ -33,6 +40,7 @@ interface LoginViewProps {
   resultsHistory?: ExamResultSummary[];
   lastViolationInfo?: ViolationAlertInfo | null;
   violationMessage?: string;
+  pendingSubmissions?: PendingSubmissionNotice[];
   onRequestResetLogin?: (username: string) => void;
   onRefreshParticipants?: () => Promise<ProctorParticipantRow[]>;
   onExitApp?: () => void;
@@ -67,6 +75,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   resultsHistory = [],
   lastViolationInfo,
   violationMessage,
+  pendingSubmissions = [],
   onRefreshParticipants,
   onOpenProctorModal,
   onExitApp,
@@ -278,6 +287,36 @@ export const LoginView: React.FC<LoginViewProps> = ({
           Silakan login dengan menggunakan username dan password yang anda miliki
         </p>
 
+        {/* Pemberitahuan Antrean Jawaban Ujian Belum Terkirim ke Server */}
+        {pendingSubmissions.length > 0 && (
+          <div className="mt-4 p-3.5 rounded-xl bg-amber-50 border border-amber-300 space-y-1.5">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="text-xs leading-relaxed text-amber-900 space-y-1">
+                <div className="font-extrabold text-amber-950">
+                  {pendingSubmissions.length} Hasil Ujian Belum Terkirim ke Server
+                </div>
+                <p>
+                  Terdapat jawaban ujian tersimpan di perangkat ini yang tertunda saat koneksi terputus:
+                </p>
+                <ul className="list-disc pl-4 space-y-0.5 font-semibold text-amber-950">
+                  {pendingSubmissions.slice(0, 3).map((item) => (
+                    <li key={item.localResultId}>
+                      {item.fullName} (<span className="font-mono">{item.username}</span>) — {item.packageTitle}
+                    </li>
+                  ))}
+                  {pendingSubmissions.length > 3 && (
+                    <li>dan {pendingSubmissions.length - 3} hasil lainnya</li>
+                  )}
+                </ul>
+                <p className="text-[11px] text-amber-800">
+                  Silakan <strong>login kembali</strong> dengan akun peserta tersebut (atau login Proktor/Admin) saat jaringan aktif agar jawaban otomatis terkirim ke server.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Peringatan Pelanggaran Keluar Sistem CBT */}
         {isLockedByViolation && activeLockedParticipant && (
           <div className="mt-4 p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-2.5">
@@ -395,16 +434,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => {
-                  setPassword(e.target.value.toUpperCase());
+                  setPassword(e.target.value);
                   setErrorMsg('');
                 }}
                 placeholder="Password"
                 aria-label="Password"
                 autoComplete="new-password"
                 autoCorrect="off"
-                autoCapitalize="characters"
+                autoCapitalize="none"
                 spellCheck={false}
-                className="w-full pb-2 pt-1 pr-8 text-[14px] uppercase placeholder:normal-case text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-none"
+                className="w-full pb-2 pt-1 pr-8 text-[14px] text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-none"
               />
               <button
                 type="button"

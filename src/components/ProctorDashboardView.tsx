@@ -713,9 +713,19 @@ export function sanitizeParticipantRows(
     const needsUnlock =
       !validLock &&
       (row.requestReset || row.loginState === 'Terkunci (Pelanggaran)');
+    const violationResetAt =
+      typeof row.violationResetAt === 'number' ? row.violationResetAt : 0;
+    const vTs =
+      typeof row.violationTimestamp === 'number' ? row.violationTimestamp : 0;
+    const needsViolationClear =
+      violationResetAt > 0 &&
+      violationResetAt >= vTs &&
+      ((typeof row.violationCount === 'number' && row.violationCount > 0) ||
+        Boolean(row.violationPackageId));
 
     if (
       needsUnlock ||
+      needsViolationClear ||
       needsIdFix ||
       needsNamaFix ||
       needsKelasFill ||
@@ -741,6 +751,10 @@ export function sanitizeParticipantRows(
         violationAt: needsUnlock ? undefined : row.violationAt,
         violationSchema: needsUnlock ? undefined : row.violationSchema,
         violationTimestamp: needsUnlock ? undefined : row.violationTimestamp,
+        violationCount: needsViolationClear ? 0 : row.violationCount,
+        violationPackageId: needsViolationClear
+          ? undefined
+          : row.violationPackageId,
       };
     }
     return row;

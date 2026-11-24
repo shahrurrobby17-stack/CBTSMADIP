@@ -40,8 +40,6 @@ import {
 import {
   DEFAULT_EXAM_TOKEN,
   INITIAL_EXAM_PACKAGES,
-  evaluateQuestionScore,
-  isQuestionAnswered,
 } from './data/cbtData';
 import {
   AdminScheduleItem,
@@ -54,6 +52,7 @@ import {
   clearAuthSessionToken,
   fetchVercelStorage,
   getAuthSessionRole,
+  hasAuthSessionToken,
   requestResetFromServer,
   saveVercelStorage,
   submitExamToServer,
@@ -96,7 +95,7 @@ interface PendingExamSubmission {
   answers: Record<string, StudentAnswer>;
   timeUsedSeconds: number;
   participant: ParticipantProfile;
-  clientFallbackSummary: ExamResultSummary;
+  clientFallbackSummary?: ExamResultSummary;
   queuedAt: number;
 }
 
@@ -439,6 +438,8 @@ interface StudentExamDraft {
   answers: Record<string, StudentAnswer>;
   remainingSeconds?: number;
   violationCount: number;
+  violationUpdatedAt?: number;
+  lastAppliedViolationResetAt?: number;
   updatedAt: number;
 }
 
@@ -483,6 +484,86 @@ function clearStudentDraftInLocal(username: string, packageId: string): void {
     const all = readAllStudentDrafts();
     delete all[getDraftKey(username, packageId)];
     localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(all));
+  } catch {
+    // ignore
+  }
+}
+
+function isLocalDraftViolationClearedByRow(
+  draft: StudentExamDraft | null | undefined,
+  row: ProctorParticipantRow | null | undefined
+): boolean {
+  if (!draft || !row) return false;
+  const resetAt =
+    typeof row.violationResetAt === 'number' ? row.violationResetAt : 0;
+  if (resetAt <= 0) return false;
+  const localVUpdatedAt =
+    typeof draft.violationUpdatedAt === 'number'
+      ? draft.violationUpdatedAt
+      : typeof draft.updatedAt === 'number'
+      ? draft.updatedAt
+      : 0;
+  if (resetAt >= localVUpdatedAt) return true;
+  const lastApplied =
+    typeof draft.lastAppliedViolationResetAt === 'number'
+      ? draft.lastAppliedViolationResetAt
+      : 0;
+  return (
+    resetAt > lastApplied &&
+    !isParticipantLockedByViolation(row) &&
+    (typeof row.violationCount !== 'number' || row.violationCount === 0)
+  );
+}
+
+function syncLocalDraftViolationResetForRows(
+  rows: ProctorParticipantRow[]
+): void {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  try {
+    const all = readAllStudentDrafts();
+    const keys = Object.keys(all);
+    if (keys.length === 0) return;
+
+    const resetRowByUser = new Map<string, ProctorParticipantRow>();
+    for (const row of rows) {
+      if (
+        row &&
+        typeof row === 'object' &&
+        typeof row.violationResetAt === 'number' &&
+        row.violationResetAt > 0
+      ) {
+        const u = String(row.username ?? '').trim().toUpperCase();
+        if (u) resetRowByUser.set(u, row);
+      }
+    }
+    if (resetRowByUser.size === 0) return;
+
+    let mutated = false;
+    for (const key of keys) {
+      const draft = all[key];
+      if (!draft || typeof draft !== 'object') continue;
+      const u = String(draft.username ?? '').trim().toUpperCase();
+      const row = u ? resetRowByUser.get(u) : undefined;
+      if (!row) continue;
+      const resetAt = row.violationResetAt || 0;
+      if (isLocalDraftViolationClearedByRow(draft, row)) {
+        if (
+          draft.violationCount !== 0 ||
+          (draft.lastAppliedViolationResetAt || 0) < resetAt
+        ) {
+          all[key] = {
+            ...draft,
+            violationCount: 0,
+            violationUpdatedAt: 0,
+            lastAppliedViolationResetAt: resetAt,
+          };
+          mutated = true;
+        }
+      }
+    }
+    if (mutated) {
+      localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(all));
+    }
   } catch {
     // ignore
   }
@@ -1063,6 +1144,18 @@ export default function App() {
     useState<ExamResultSummary | null>(null);
   const [isSubmittingExamResult, setIsSubmittingExamResult] =
     useState<boolean>(false);
+  const [examSubmissionStatus, setExamSubmissionStatus] = useState<
+    'syncing' | 'synced' | 'offline_queued'
+  >('synced');
+  const [examSubmissionError, setExamSubmissionError] = useState<string | null>(
+    null
+  );
+  const [pendingSubmissions, setPendingSubmissions] = useState<
+    PendingExamSubmission[]
+  >(() => readPendingExamSubmissions());
+  const refreshPendingSubmissionsState = useCallback(() => {
+    setPendingSubmissions(readPendingExamSubmissions());
+  }, []);
 
   const [answers, setAnswers] = useState<Record<string, StudentAnswer>>({});
   const answersRef = useRef<Record<string, StudentAnswer>>(answers);
@@ -1360,6 +1453,7 @@ export default function App() {
 
         const nextParticipants = sanitizeParticipantRows(stampedNext);
         participantsRef.current = nextParticipants;
+        syncLocalDraftViolationResetForRows(nextParticipants);
 
         // If ONLY UI checkbox `selected` state changed, keep it purely local without flooding /api/storage
         if (!hasAnyRealFieldOrRowChange) {
@@ -2079,6 +2173,7 @@ export default function App() {
               { serverAuthoritativeStatus: !isAdminOrProctorStage }
             );
             participantsRef.current = mergedParticipants;
+            syncLocalDraftViolationResetForRows(mergedParticipants);
             setParticipants(mergedParticipants);
 
             // Jika siswa sedang berada di halaman konfirmasi lalu dinonaktifkan di Kelompok Tes, segera keluarkan ke halaman login
@@ -2607,6 +2702,14 @@ export default function App() {
         (r) => r.username.trim().toUpperCase() === cleanUser
       );
       const localDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
+      const localViolationCleared = isLocalDraftViolationClearedByRow(
+        localDraft,
+        existingRow
+      );
+      const rowViolationResetAt =
+        typeof existingRow?.violationResetAt === 'number'
+          ? existingRow.violationResetAt
+          : 0;
       const sameViolationPkg =
         !existingRow?.violationPackageId ||
         existingRow.violationPackageId === currentPkgId;
@@ -2619,6 +2722,7 @@ export default function App() {
           ? existingRow.violationCount
           : 0;
       const prevLocalVCount =
+        !localViolationCleared &&
         typeof localDraft?.violationCount === 'number' &&
         localDraft.violationCount > 0 &&
         localDraft.violationCount < MAX_VIOLATION_LIMIT
@@ -2646,6 +2750,11 @@ export default function App() {
           answers: currentAnswersSnapshot,
           remainingSeconds: currentRemainingSecs,
           violationCount: nextViolationCount,
+          violationUpdatedAt: nowTs,
+          lastAppliedViolationResetAt: Math.max(
+            localDraft?.lastAppliedViolationResetAt || 0,
+            rowViolationResetAt
+          ),
           updatedAt: nowTs,
         });
       }
@@ -2951,6 +3060,60 @@ export default function App() {
     const resolvedFullName = matchedRow.namaPeserta || cleanUser;
     const resolvedKelas = normalizeKelasCode(matchedRow.kelas) || 'X';
 
+    // If this student has an unsent offline exam submission queued on this browser,
+    // immediately flush it with their freshly authenticated Bearer session token and show the result screen!
+    const queuedForStudent = readPendingExamSubmissions().filter(
+      (item) =>
+        String(item?.participant?.username || '').trim().toUpperCase() ===
+        resolvedUsername
+    );
+    if (queuedForStudent.length > 0 && hasAuthSessionToken()) {
+      const latestQueued = queuedForStudent[queuedForStudent.length - 1];
+      setLastViolationInfo(null);
+      setParticipant({
+        ...latestQueued.participant,
+        username: resolvedUsername,
+        fullName: resolvedFullName,
+        kelas: resolvedKelas,
+      });
+      setAnswers(latestQueued.answers || {});
+      answersRef.current = latestQueued.answers || {};
+      setTimeUsedSeconds(latestQueued.timeUsedSeconds || 0);
+      setLatestExamSummary(null);
+      setExamSubmissionError(null);
+      setIsSubmittingExamResult(true);
+      setExamSubmissionStatus('syncing');
+      setStage('exam_result');
+      flushPendingExamSubmissions({ targetUsername: resolvedUsername })
+        .then((res) => {
+          if (res.syncedSummaries.length > 0) {
+            setLatestExamSummary(
+              res.syncedSummaries[res.syncedSummaries.length - 1]
+            );
+            setExamSubmissionError(null);
+            setExamSubmissionStatus('synced');
+          } else {
+            const stillQueued = readPendingExamSubmissions().some(
+              (item) =>
+                String(item?.participant?.username || '')
+                  .trim()
+                  .toUpperCase() === resolvedUsername
+            );
+            if (stillQueued && res.lastError) {
+              setExamSubmissionError(res.lastError);
+            }
+            setExamSubmissionStatus(stillQueued ? 'offline_queued' : 'synced');
+          }
+        })
+        .catch(() => {
+          setExamSubmissionStatus('offline_queued');
+        })
+        .finally(() => {
+          setIsSubmittingExamResult(false);
+        });
+      return;
+    }
+
     const studentClassSchedules = activeSchedules.filter((s) =>
       doesKelasMatch(resolvedKelas, s.kelas)
     );
@@ -3062,6 +3225,23 @@ export default function App() {
     examStartedAtRef.current = Date.now();
     requestCbtFullscreen();
     const localDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
+    const localViolationCleared = isLocalDraftViolationClearedByRow(
+      localDraft,
+      matchedRow
+    );
+    const rowViolationResetAt =
+      typeof matchedRow?.violationResetAt === 'number'
+        ? matchedRow.violationResetAt
+        : 0;
+
+    if (localViolationCleared && localDraft) {
+      writeStudentDraftToLocal({
+        ...localDraft,
+        violationCount: 0,
+        violationUpdatedAt: 0,
+        lastAppliedViolationResetAt: rowViolationResetAt,
+      });
+    }
 
     const sameViolationPkg =
       !matchedRow?.violationPackageId ||
@@ -3071,7 +3251,9 @@ export default function App() {
         ? matchedRow.violationCount
         : 0;
     const localVCount =
-      sameViolationPkg && typeof localDraft?.violationCount === 'number'
+      !localViolationCleared &&
+      sameViolationPkg &&
+      typeof localDraft?.violationCount === 'number'
         ? localDraft.violationCount
         : 0;
     const mergedViolationCount = Math.max(rowVCount, localVCount);
@@ -3178,12 +3360,19 @@ export default function App() {
         typeof matchedRow?.violationCount === 'number'
           ? matchedRow.violationCount
           : 0;
+      const existingDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
       writeStudentDraftToLocal({
         username: cleanUser,
         packageId: currentPkgId,
         answers: answersRef.current,
         remainingSeconds: secsLeft,
         violationCount: currentVCount,
+        violationUpdatedAt:
+          currentVCount > 0 ? existingDraft?.violationUpdatedAt : 0,
+        lastAppliedViolationResetAt: Math.max(
+          existingDraft?.lastAppliedViolationResetAt || 0,
+          matchedRow?.violationResetAt || 0
+        ),
         updatedAt: Date.now(),
       });
     },
@@ -3209,6 +3398,7 @@ export default function App() {
           typeof matchedRow?.violationCount === 'number'
             ? matchedRow.violationCount
             : 0;
+        const existingDraft = readStudentDraftFromLocal(cleanUser, currentPkgId);
 
         writeStudentDraftToLocal({
           username: cleanUser,
@@ -3216,6 +3406,12 @@ export default function App() {
           answers: nextMap,
           remainingSeconds: examRemainingSecondsRef.current,
           violationCount: currentVCount,
+          violationUpdatedAt:
+            currentVCount > 0 ? existingDraft?.violationUpdatedAt : 0,
+          lastAppliedViolationResetAt: Math.max(
+            existingDraft?.lastAppliedViolationResetAt || 0,
+            matchedRow?.violationResetAt || 0
+          ),
           updatedAt: Date.now(),
         });
 
@@ -3294,38 +3490,151 @@ export default function App() {
     []
   );
 
-  const flushPendingExamSubmissions = useCallback(async () => {
-    const queue = readPendingExamSubmissions();
-    if (queue.length === 0) return;
-
-    for (const item of queue) {
-      try {
-        const res = await submitExamToServer({
-          packageId: item.packageId,
-          packageTitle: item.packageTitle,
-          answers: item.answers,
-          timeUsedSeconds: item.timeUsedSeconds,
-          participant: item.participant,
-          clientFallbackSummary: item.clientFallbackSummary,
-        });
-        if (res.ok) {
-          removePendingExamSubmission(item.localResultId);
-          if (res.summary) {
-            applyAuthoritativeResultSummary(item.localResultId, res.summary);
-          }
-          if (typeof res.updatedAt === 'number') {
-            latestUpdatedAtRef.current = Math.max(
-              latestUpdatedAtRef.current,
-              res.updatedAt
-            );
-          }
-          markSyncedSuccess(res.engine || 'vercel-serverless');
-        }
-      } catch {
-        // Keep in queue until next online/retry cycle
+  const flushPendingExamSubmissions = useCallback(
+    async (options?: {
+      targetUsername?: string;
+    }): Promise<{
+      syncedCount: number;
+      remainingCount: number;
+      syncedSummaries: ExamResultSummary[];
+      lastError?: string;
+    }> => {
+      const queue = readPendingExamSubmissions();
+      if (queue.length === 0) {
+        refreshPendingSubmissionsState();
+        return { syncedCount: 0, remainingCount: 0, syncedSummaries: [] };
       }
-    }
-  }, [applyAuthoritativeResultSummary, markSyncedSuccess]);
+      // Never fire unauthenticated requests that would always 401; wait until a session token exists
+      if (!hasAuthSessionToken()) {
+        refreshPendingSubmissionsState();
+        return {
+          syncedCount: 0,
+          remainingCount: queue.length,
+          syncedSummaries: [],
+        };
+      }
+
+      const authRole = getAuthSessionRole();
+      const targetUpper = String(options?.targetUsername || '')
+        .trim()
+        .toUpperCase();
+      const currentStudentUpper = String(participantRef.current?.username || '')
+        .trim()
+        .toUpperCase();
+
+      const syncedSummaries: ExamResultSummary[] = [];
+      let lastError: string | undefined;
+
+      for (const item of queue) {
+        const itemUser = String(item?.participant?.username || '')
+          .trim()
+          .toUpperCase();
+        if (targetUpper && itemUser !== targetUpper) continue;
+        // Student sessions can only submit their own queued results; admin/proctor can flush all queued items on the PC
+        if (
+          authRole === 'student' &&
+          currentStudentUpper &&
+          itemUser &&
+          itemUser !== currentStudentUpper &&
+          (!targetUpper || itemUser !== targetUpper)
+        ) {
+          continue;
+        }
+
+        try {
+          const res = await submitExamToServer({
+            packageId: item.packageId,
+            packageTitle: item.packageTitle,
+            answers: item.answers,
+            timeUsedSeconds: item.timeUsedSeconds,
+            participant: item.participant,
+          });
+          if (res.ok && res.summary) {
+            removePendingExamSubmission(item.localResultId);
+            syncedSummaries.push(res.summary);
+            applyAuthoritativeResultSummary(item.localResultId, res.summary);
+            if (
+              stageRef.current === 'exam_result' &&
+              itemUser === currentStudentUpper
+            ) {
+              setLatestExamSummary(res.summary);
+              setExamSubmissionError(null);
+              setExamSubmissionStatus('synced');
+              setIsSubmittingExamResult(false);
+            }
+            if (typeof res.updatedAt === 'number') {
+              latestUpdatedAtRef.current = Math.max(
+                latestUpdatedAtRef.current,
+                res.updatedAt
+              );
+            }
+            markSyncedSuccess(res.engine || 'vercel-serverless');
+          } else if (res.error) {
+            lastError = res.error;
+            if (
+              stageRef.current === 'exam_result' &&
+              itemUser === currentStudentUpper
+            ) {
+              setExamSubmissionError(res.error);
+            }
+          }
+        } catch {
+          // Keep in queue until next online/retry cycle
+        }
+      }
+
+      const remaining = readPendingExamSubmissions();
+      refreshPendingSubmissionsState();
+      return {
+        syncedCount: syncedSummaries.length,
+        remainingCount: remaining.length,
+        syncedSummaries,
+        lastError,
+      };
+    },
+    [
+      applyAuthoritativeResultSummary,
+      markSyncedSuccess,
+      refreshPendingSubmissionsState,
+    ]
+  );
+
+  const retryCurrentExamSubmission = useCallback(() => {
+    const cleanUser = String(participantRef.current?.username || '')
+      .trim()
+      .toUpperCase();
+    if (!cleanUser) return;
+    setIsSubmittingExamResult(true);
+    setExamSubmissionError(null);
+    setExamSubmissionStatus('syncing');
+    flushPendingExamSubmissions({ targetUsername: cleanUser })
+      .then((res) => {
+        if (res.syncedSummaries.length > 0) {
+          setLatestExamSummary(
+            res.syncedSummaries[res.syncedSummaries.length - 1]
+          );
+          setExamSubmissionError(null);
+          setExamSubmissionStatus('synced');
+        } else {
+          const stillQueued = readPendingExamSubmissions().some(
+            (item) =>
+              String(item?.participant?.username || '')
+                .trim()
+                .toUpperCase() === cleanUser
+          );
+          if (stillQueued && res.lastError) {
+            setExamSubmissionError(res.lastError);
+          }
+          setExamSubmissionStatus(stillQueued ? 'offline_queued' : 'synced');
+        }
+      })
+      .catch(() => {
+        setExamSubmissionStatus('offline_queued');
+      })
+      .finally(() => {
+        setIsSubmittingExamResult(false);
+      });
+  }, [flushPendingExamSubmissions]);
 
   useEffect(() => {
     flushPendingExamSubmissions().catch(() => {});
@@ -3336,6 +3645,19 @@ export default function App() {
     return () => window.removeEventListener('online', onOnline);
   }, [flushPendingExamSubmissions]);
 
+  // While staying on ExamResultView with an offline-queued submission, auto-retry every 15s using live in-memory token
+  useEffect(() => {
+    if (stage !== 'exam_result' || examSubmissionStatus !== 'offline_queued') {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (navigator.onLine !== false && hasAuthSessionToken()) {
+        retryCurrentExamSubmission();
+      }
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [stage, examSubmissionStatus, retryCurrentExamSubmission]);
+
   const handleFinishExam = useCallback(
     (usedSeconds: number) => {
       if (draftSyncTimerRef.current) {
@@ -3344,48 +3666,12 @@ export default function App() {
       }
       setTimeUsedSeconds(usedSeconds);
 
-      // Compute local fallback summary (server will grade authoritatively with answer keys)
+      // Never grade redacted student questions on the client (that would produce bogus 0 scores).
+      // Raw answers are persisted to PENDING_RESULTS and graded authoritatively by the server.
       const latestAnswers = answersRef.current || answers;
-      const questions = Array.isArray(selectedPackage?.questions)
-        ? selectedPackage.questions
-        : [];
-      let totalPoints = 0;
-      let maxPoints = 0;
-      let correctCount = 0;
-      let answeredCount = 0;
-
-      questions.forEach((q) => {
-        const ans = latestAnswers[q.id];
-        maxPoints += q.points;
-        if (isQuestionAnswered(q, ans)) answeredCount += 1;
-        const { isCorrect, earnedPoints } = evaluateQuestionScore(q, ans);
-        if (isCorrect) correctCount += 1;
-        totalPoints += earnedPoints;
-      });
-
-      const finalScore =
-        maxPoints > 0 ? Math.round((totalPoints / maxPoints) * 100) : 0;
-
       const nowTs = Date.now();
-      const summary: ExamResultSummary = {
-        id: `res_${nowTs}_${Math.random().toString(36).slice(2, 6)}`,
-        participant,
-        packageTitle: selectedPackage?.title || FALLBACK_EMPTY_PACKAGE.title,
-        completedAt: new Date().toLocaleString('id-ID', {
-          day: '2-digit',
-          month: 'short',
-          year: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-        timeUsedSeconds: usedSeconds,
-        totalQuestions: questions.length,
-        answeredCount,
-        correctCount,
-        totalPoints,
-        maxPoints,
-        finalScore,
-      };
+      const localResultId = `res_${nowTs}_${Math.random().toString(36).slice(2, 6)}`;
+      const pkgTitle = selectedPackage?.title || FALLBACK_EMPTY_PACKAGE.title;
 
       const cleanUser = participant.username.trim().toUpperCase();
       const pkgId = selectedPackage?.id || FALLBACK_EMPTY_PACKAGE.id;
@@ -3435,51 +3721,21 @@ export default function App() {
         return nextList;
       });
 
-      setResultsHistory((prev) => {
-        const targetPkg = String(summary.packageTitle || '')
-          .replace(/^Simulasi TKA\s*-\s*/i, '')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .toLowerCase();
-        const dedupedPrev = prev.filter((item) => {
-          if (!item) return false;
-          if (item.id === summary.id) return false;
-          const itemUser = String(item?.participant?.username || '')
-            .trim()
-            .toUpperCase();
-          const itemPkg = String(item?.packageTitle || '')
-            .replace(/^Simulasi TKA\s*-\s*/i, '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .toLowerCase();
-          return !(cleanUser && targetPkg && itemUser === cleanUser && itemPkg === targetPkg);
-        });
-        const nextHistory = [summary, ...dedupedPrev];
-        resultsHistoryRef.current = nextHistory;
-        try {
-          localStorage.setItem(
-            STORAGE_KEYS.HISTORY,
-            JSON.stringify(nextHistory)
-          );
-        } catch {
-          // ignore
-        }
-        return nextHistory;
-      });
-
       const submissionPayload: PendingExamSubmission = {
-        localResultId: summary.id,
+        localResultId,
         packageId: pkgId,
-        packageTitle: summary.packageTitle,
+        packageTitle: pkgTitle,
         answers: latestAnswers,
         timeUsedSeconds: usedSeconds,
         participant,
-        clientFallbackSummary: summary,
         queuedAt: nowTs,
       };
       enqueuePendingExamSubmission(submissionPayload);
+      refreshPendingSubmissionsState();
       setLatestExamSummary(null);
+      setExamSubmissionError(null);
       setIsSubmittingExamResult(true);
+      setExamSubmissionStatus('syncing');
 
       // Authoritative server grading & persistence with automatic retry backoff
       pendingPushCount.current += 1;
@@ -3491,16 +3747,17 @@ export default function App() {
             answers: submissionPayload.answers,
             timeUsedSeconds: submissionPayload.timeUsedSeconds,
             participant: submissionPayload.participant,
-            clientFallbackSummary: submissionPayload.clientFallbackSummary,
           });
-          if (res.ok) {
+          if (res.ok && res.summary) {
             removePendingExamSubmission(submissionPayload.localResultId);
-            const authoritative = res.summary || summary;
+            refreshPendingSubmissionsState();
             applyAuthoritativeResultSummary(
               submissionPayload.localResultId,
-              authoritative
+              res.summary
             );
-            setLatestExamSummary(authoritative);
+            setLatestExamSummary(res.summary);
+            setExamSubmissionError(null);
+            setExamSubmissionStatus('synced');
             setIsSubmittingExamResult(false);
             if (typeof res.updatedAt === 'number') {
               latestUpdatedAtRef.current = Math.max(
@@ -3512,17 +3769,32 @@ export default function App() {
             pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
             return;
           }
+          if (res.fallbackClientGrade) {
+            // Server does not yet have answer keys for this package: keep raw answers safely queued (never save 0)
+            setExamSubmissionError(
+              res.error ||
+                'Bank soal dengan kunci jawaban belum tersedia di server untuk menilai ujian ini. Jawaban tetap tersimpan aman di antrean perangkat.'
+            );
+            setExamSubmissionStatus('offline_queued');
+            setIsSubmittingExamResult(false);
+            pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
+            return;
+          }
+          if (res.error) {
+            setExamSubmissionError(res.error);
+          }
         } catch {
           // Fall through to retry schedule
         }
 
         const backoffMs = [2500, 6000, 12000][retryIdx];
-        if (typeof backoffMs === 'number') {
+        if (typeof backoffMs === 'number' && hasAuthSessionToken()) {
           window.setTimeout(() => {
             attemptSubmit(retryIdx + 1);
           }, backoffMs);
         } else {
-          // Remain persisted in PENDING_RESULTS queue for auto-flush on online/reconnect
+          // Remain persisted in PENDING_RESULTS queue for auto-flush on reconnect or next authenticated login
+          setExamSubmissionStatus('offline_queued');
           setIsSubmittingExamResult(false);
           pendingPushCount.current = Math.max(0, pendingPushCount.current - 1);
         }
@@ -3536,6 +3808,7 @@ export default function App() {
       applyAuthoritativeResultSummary,
       markSyncedSuccess,
       participant,
+      refreshPendingSubmissionsState,
       selectedPackage,
     ]
   );
@@ -3615,6 +3888,7 @@ export default function App() {
     exitCbtFullscreen();
     clearAuthSessionToken();
     setLatestExamSummary(null);
+    setExamSubmissionError(null);
     setAnswers({});
     answersRef.current = {};
     setStage('login');
@@ -3745,6 +4019,12 @@ export default function App() {
               ? adminSettings.pesanPelanggaran
               : undefined
           }
+          pendingSubmissions={pendingSubmissions.map((item) => ({
+            localResultId: item.localResultId,
+            username: item.participant?.username || '-',
+            fullName: item.participant?.fullName || item.participant?.username || 'Peserta',
+            packageTitle: item.packageTitle || 'Ujian SAS',
+          }))}
           onRequestResetLogin={handleRequestResetFromLogin}
           onRefreshParticipants={() => syncFromVercelCloud({ force: true })}
         />
@@ -3760,7 +4040,11 @@ export default function App() {
           }}
           onProctorLoginSuccess={(proctorName, encryptionCode) => {
             setProctorSession({ name: proctorName, encryptionCode });
-            syncFromVercelCloud({ force: true }).catch(() => {});
+            flushPendingExamSubmissions()
+              .catch(() => {})
+              .finally(() => {
+                syncFromVercelCloud({ force: true }).catch(() => {});
+              });
             if (authSpinTimerRef.current) {
               window.clearTimeout(authSpinTimerRef.current);
             }
@@ -3792,7 +4076,11 @@ export default function App() {
           }}
           onAdminLoginSuccess={(adminUser) => {
             setAdminUsername(adminUser);
-            syncFromVercelCloud({ force: true }).catch(() => {});
+            flushPendingExamSubmissions()
+              .catch(() => {})
+              .finally(() => {
+                syncFromVercelCloud({ force: true }).catch(() => {});
+              });
             if (authSpinTimerRef.current) {
               window.clearTimeout(authSpinTimerRef.current);
             }
@@ -3941,6 +4229,9 @@ export default function App() {
           showResultScore={Boolean(adminSettings.tampilkanNilaiPeserta)}
           serverSummary={latestExamSummary}
           isSyncingResult={isSubmittingExamResult}
+          syncStatus={examSubmissionStatus}
+          syncError={examSubmissionError}
+          onRetrySubmit={retryCurrentExamSubmission}
           onRetakeOrChangePackage={() => setStage('confirm_participant')}
           onLogout={handleLogout}
         />

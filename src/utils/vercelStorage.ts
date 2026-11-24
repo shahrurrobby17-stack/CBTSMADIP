@@ -102,6 +102,10 @@ export function getAuthSessionRole(): 'admin' | 'proctor' | 'student' | null {
   return authSessionToken ? authSessionRole : null;
 }
 
+export function hasAuthSessionToken(): boolean {
+  return Boolean(authSessionToken);
+}
+
 export function clearAuthSessionToken(): void {
   authSessionToken = null;
   authSessionRole = null;
@@ -210,7 +214,6 @@ export async function submitExamToServer(params: {
   answers: Record<string, StudentAnswer>;
   timeUsedSeconds: number;
   participant: ParticipantProfile;
-  clientFallbackSummary?: ExamResultSummary;
 }): Promise<SubmitExamServerResponse> {
   try {
     const res = await fetch('/api/storage', {
@@ -223,7 +226,6 @@ export async function submitExamToServer(params: {
         answers: params.answers,
         timeUsedSeconds: params.timeUsedSeconds,
         participant: params.participant,
-        clientFallbackSummary: params.clientFallbackSummary,
         schemaVersion: 3,
       }),
     });
