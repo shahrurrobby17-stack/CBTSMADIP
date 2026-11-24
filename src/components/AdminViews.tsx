@@ -5622,6 +5622,69 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           <span>Reset Semua Pelanggaran</span>
                         </button>
                       )}
+                    {(activeMenu === 'daftar_peserta' ||
+                      activeMenu === 'status_peserta') && (() => {
+                      const violationTotalCount = participants.filter(
+                        (p) =>
+                          isParticipantLockedByViolation(p) ||
+                          Boolean(p.requestReset) ||
+                          p.loginState === 'Terkunci (Pelanggaran)' ||
+                          (typeof p.violationCount === 'number' && p.violationCount > 0)
+                      ).length;
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (violationTotalCount === 0) {
+                              showNotice(
+                                'Tidak ada catatan pelanggaran peserta yang perlu di-reset saat ini.'
+                              );
+                              return;
+                            }
+                            const nowTs = Date.now();
+                            setParticipants((prev) =>
+                              prev.map((row) => {
+                                const hasViolation =
+                                  isParticipantLockedByViolation(row) ||
+                                  Boolean(row.requestReset) ||
+                                  row.loginState === 'Terkunci (Pelanggaran)' ||
+                                  (typeof row.violationCount === 'number' &&
+                                    row.violationCount > 0) ||
+                                  Boolean(row.violationReason || row.violationTimestamp);
+                                if (!hasViolation) return row;
+                                const wasLocked =
+                                  row.loginState === 'Terkunci (Pelanggaran)';
+                                return {
+                                  ...row,
+                                  loginState: wasLocked ? 'Belum Login' : row.loginState,
+                                  requestReset: false,
+                                  violationReason: undefined,
+                                  violationAt: undefined,
+                                  violationSchema: undefined,
+                                  violationTimestamp: undefined,
+                                  violationCount: 0,
+                                  violationPackageId: undefined,
+                                  violationResetAt: nowTs,
+                                  lastResetAt: wasLocked ? nowTs : row.lastResetAt,
+                                  loginUpdatedAt: wasLocked ? nowTs : row.loginUpdatedAt,
+                                };
+                              })
+                            );
+                            showNotice(
+                              `Berhasil mereset pelanggaran untuk ${violationTotalCount} peserta. Hitungan pelanggaran kembali ke 0/6.`
+                            );
+                          }}
+                          className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer inline-flex items-center gap-1.5"
+                          title="Reset seluruh catatan dan hitungan pelanggaran peserta (kembali ke 0/6)"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>
+                            Reset Pelanggaran
+                            {violationTotalCount > 0 ? ` (${violationTotalCount})` : ''}
+                          </span>
+                        </button>
+                      );
+                    })()}
                     <button
                       type="button"
                       onClick={() => setActiveMenu('kelompok_tes')}

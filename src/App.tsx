@@ -1314,6 +1314,8 @@ export default function App() {
             prevRow.loginState !== row.loginState ||
             Boolean(prevRow.requestReset) !== Boolean(row.requestReset) ||
             prevRow.violationTimestamp !== row.violationTimestamp ||
+            prevRow.violationCount !== row.violationCount ||
+            prevRow.violationResetAt !== row.violationResetAt ||
             prevRow.lastResetAt !== row.lastResetAt;
           const draftChanged =
             prevRow.draftAnswers !== row.draftAnswers ||
@@ -1397,6 +1399,7 @@ export default function App() {
               prevRow.violationTimestamp !== row.violationTimestamp ||
               prevRow.violationCount !== row.violationCount ||
               prevRow.violationPackageId !== row.violationPackageId ||
+              prevRow.violationResetAt !== row.violationResetAt ||
               prevRow.lastResetAt !== row.lastResetAt ||
               prevRow.draftAnswers !== row.draftAnswers ||
               prevRow.draftPackageId !== row.draftPackageId ||
@@ -1429,6 +1432,7 @@ export default function App() {
             draftPackageId: (row.draftPackageId ?? null) as any,
             draftRemainingSeconds: (row.draftRemainingSeconds ?? null) as any,
             lastResetAt: row.lastResetAt,
+            violationResetAt: row.violationResetAt,
             loginUpdatedAt: row.loginUpdatedAt,
             metaUpdatedAt: row.metaUpdatedAt,
             draftUpdatedAt: row.draftUpdatedAt,
@@ -2121,6 +2125,7 @@ export default function App() {
                     r.loginState !== m.loginState ||
                     r.status !== m.status ||
                     (m.lastResetAt || 0) > (r.lastResetAt || 0) ||
+                    (m.violationResetAt || 0) > (r.violationResetAt || 0) ||
                     (m.violationTimestamp || 0) > (r.violationTimestamp || 0) ||
                     (m.metaUpdatedAt || 0) > (r.metaUpdatedAt || 0)
                   );

@@ -1100,6 +1100,13 @@ function mergeServerDuplicateRows(
     typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0;
   const maxResetAt = Math.max(existResetAt, incResetAt);
 
+  const existViolationResetAt =
+    typeof existing.violationResetAt === 'number' ? existing.violationResetAt : 0;
+  const incViolationResetAt =
+    typeof incoming.violationResetAt === 'number' ? incoming.violationResetAt : 0;
+  const maxViolationResetAt = Math.max(existViolationResetAt, incViolationResetAt);
+  const effectiveResetAt = Math.max(maxResetAt, maxViolationResetAt);
+
   const preferIncomingIdentity =
     incMetaTs > existMetaTs ||
     incLoginTs > existLoginTs ||
@@ -1167,7 +1174,7 @@ function mergeServerDuplicateRows(
   const isLocked =
     !finishedAfterViolation &&
     maxViolationTs > 0 &&
-    maxViolationTs > maxResetAt;
+    maxViolationTs > effectiveResetAt;
 
   let resolvedLoginState = 'Belum Login';
   let resolvedRequestReset = false;
@@ -1192,11 +1199,19 @@ function mergeServerDuplicateRows(
     resolvedViolationAt = vSource.violationAt || vFallback.violationAt;
     resolvedViolationPackageId =
       vSource.violationPackageId || vFallback.violationPackageId;
-    resolvedViolationCount = Math.max(
-      typeof existing.violationCount === 'number' ? existing.violationCount : 0,
-      typeof incoming.violationCount === 'number' ? incoming.violationCount : 0,
-      1
-    );
+    const existValidCount =
+      maxViolationResetAt === 0 || existViolationTs > maxViolationResetAt
+        ? typeof existing.violationCount === 'number'
+          ? existing.violationCount
+          : 0
+        : 0;
+    const incValidCount =
+      maxViolationResetAt === 0 || incViolationTs > maxViolationResetAt
+        ? typeof incoming.violationCount === 'number'
+          ? incoming.violationCount
+          : 0
+        : 0;
+    resolvedViolationCount = Math.max(existValidCount, incValidCount, 1);
   } else {
     resolvedRequestReset = false;
     if (maxResetAt > 0 && maxResetAt >= maxLoginUpdatedAt) {
@@ -1231,7 +1246,9 @@ function mergeServerDuplicateRows(
       typeof existing.violationCount === 'number' ? existing.violationCount : 0,
       typeof incoming.violationCount === 'number' ? incoming.violationCount : 0
     );
-    if (resolvedLoginState === 'Selesai') {
+    const violationsExplicitlyCleared =
+      maxViolationResetAt > 0 && maxViolationResetAt >= maxViolationTs;
+    if (resolvedLoginState === 'Selesai' || violationsExplicitlyCleared) {
       resolvedViolationCount = 0;
       resolvedViolationPackageId = undefined;
     } else if (maxVCount > 0) {
@@ -1300,6 +1317,7 @@ function mergeServerDuplicateRows(
   }
 
   if (maxResetAt > 0) result.lastResetAt = maxResetAt;
+  if (maxViolationResetAt > 0) result.violationResetAt = maxViolationResetAt;
   if (maxLoginUpdatedAt > 0) result.loginUpdatedAt = maxLoginUpdatedAt;
   if (maxMetaUpdatedAt > 0) result.metaUpdatedAt = maxMetaUpdatedAt;
   if (maxDraftUpdatedAt > 0) result.draftUpdatedAt = maxDraftUpdatedAt;

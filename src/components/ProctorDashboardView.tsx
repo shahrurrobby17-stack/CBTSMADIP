@@ -81,6 +81,7 @@ export interface ProctorParticipantRow {
   violationSchema?: number;
   violationTimestamp?: number;
   lastResetAt?: number;
+  violationResetAt?: number;
   loginUpdatedAt?: number;
   metaUpdatedAt?: number;
   draftUpdatedAt?: number;
@@ -142,7 +143,10 @@ export function isParticipantLockedByViolation(
 ): boolean {
   if (!p || typeof p !== 'object') return false;
   const vTs = typeof p.violationTimestamp === 'number' ? p.violationTimestamp : 0;
-  const resetTs = typeof p.lastResetAt === 'number' ? p.lastResetAt : 0;
+  const resetTs = Math.max(
+    typeof p.lastResetAt === 'number' ? p.lastResetAt : 0,
+    typeof p.violationResetAt === 'number' ? p.violationResetAt : 0
+  );
   return (
     p.violationSchema === 3 &&
     vTs > 0 &&
@@ -370,6 +374,13 @@ export function reconcileParticipantRow(
     typeof incoming.lastResetAt === 'number' ? incoming.lastResetAt : 0;
   const maxResetAt = Math.max(existResetAt, incResetAt);
 
+  const existViolationResetAt =
+    typeof existing.violationResetAt === 'number' ? existing.violationResetAt : 0;
+  const incViolationResetAt =
+    typeof incoming.violationResetAt === 'number' ? incoming.violationResetAt : 0;
+  const maxViolationResetAt = Math.max(existViolationResetAt, incViolationResetAt);
+  const effectiveResetAt = Math.max(maxResetAt, maxViolationResetAt);
+
   // Prefer the identity (id/username/password) of whichever record has newer timestamps, exam progress, or Active status
   const preferIncomingIdentity =
     incMetaTs > existMetaTs ||
@@ -436,7 +447,7 @@ export function reconcileParticipantRow(
   const isLocked =
     !finishedAfterViolation &&
     maxViolationTs > 0 &&
-    maxViolationTs > maxResetAt;
+    maxViolationTs > effectiveResetAt;
 
   let resolvedLoginState: ProctorParticipantRow['loginState'] = 'Belum Login';
   let resolvedRequestReset = false;
@@ -461,13 +472,21 @@ export function reconcileParticipantRow(
     resolvedViolationAt = vSource.violationAt || vFallback.violationAt;
     resolvedViolationPackageId =
       vSource.violationPackageId || vFallback.violationPackageId;
-    resolvedViolationCount = Math.max(
-      typeof existing.violationCount === 'number' ? existing.violationCount : 0,
-      typeof incoming.violationCount === 'number' ? incoming.violationCount : 0,
-      1
-    );
+    const existValidCount =
+      maxViolationResetAt === 0 || existViolationTs > maxViolationResetAt
+        ? typeof existing.violationCount === 'number'
+          ? existing.violationCount
+          : 0
+        : 0;
+    const incValidCount =
+      maxViolationResetAt === 0 || incViolationTs > maxViolationResetAt
+        ? typeof incoming.violationCount === 'number'
+          ? incoming.violationCount
+          : 0
+        : 0;
+    resolvedViolationCount = Math.max(existValidCount, incValidCount, 1);
   } else {
-    // Unlocked (either never violated, or Reset Login occurred at maxResetAt >= maxViolationTs)
+    // Unlocked (either never violated, or Reset Login occurred at effectiveResetAt >= maxViolationTs)
     resolvedRequestReset = false;
     if (maxResetAt > 0 && maxResetAt >= maxLoginUpdatedAt) {
       resolvedLoginState = 'Belum Login';
@@ -499,7 +518,9 @@ export function reconcileParticipantRow(
       typeof existing.violationCount === 'number' ? existing.violationCount : 0,
       typeof incoming.violationCount === 'number' ? incoming.violationCount : 0
     );
-    if (resolvedLoginState === 'Selesai') {
+    const violationsExplicitlyCleared =
+      maxViolationResetAt > 0 && maxViolationResetAt >= maxViolationTs;
+    if (resolvedLoginState === 'Selesai' || violationsExplicitlyCleared) {
       resolvedViolationCount = 0;
       resolvedViolationPackageId = undefined;
     } else if (maxVCount > 0) {
@@ -539,6 +560,7 @@ export function reconcileParticipantRow(
     draftRemainingSeconds:
       resolvedLoginState === 'Selesai' ? undefined : bestDraftRemainingSeconds,
     ...(maxResetAt > 0 ? { lastResetAt: maxResetAt } : {}),
+    ...(maxViolationResetAt > 0 ? { violationResetAt: maxViolationResetAt } : {}),
     ...(maxLoginUpdatedAt > 0 ? { loginUpdatedAt: maxLoginUpdatedAt } : {}),
     ...(maxMetaUpdatedAt > 0 ? { metaUpdatedAt: maxMetaUpdatedAt } : {}),
     ...(maxDraftUpdatedAt > 0 ? { draftUpdatedAt: maxDraftUpdatedAt } : {}),
@@ -1284,6 +1306,53 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
       })
     );
     showNotice('Seluruh permintaan Reset Login peserta telah dibersihkan.');
+  };
+
+  const handleResetAllViolations = () => {
+    const hasAnyViolation = participants.some(
+      (r) =>
+        isParticipantLockedByViolation(r) ||
+        Boolean(r.requestReset) ||
+        r.loginState === 'Terkunci (Pelanggaran)' ||
+        (typeof r.violationCount === 'number' && r.violationCount > 0) ||
+        Boolean(r.violationReason || r.violationTimestamp)
+    );
+    if (!hasAnyViolation) {
+      showNotice('Tidak ada catatan pelanggaran peserta yang perlu di-reset saat ini.');
+      return;
+    }
+    const nowTs = Date.now();
+    let resetCount = 0;
+    setParticipants((prev) =>
+      prev.map((r) => {
+        const hasViolation =
+          isParticipantLockedByViolation(r) ||
+          Boolean(r.requestReset) ||
+          r.loginState === 'Terkunci (Pelanggaran)' ||
+          (typeof r.violationCount === 'number' && r.violationCount > 0) ||
+          Boolean(r.violationReason || r.violationTimestamp);
+        if (!hasViolation) return r;
+        resetCount += 1;
+        const wasLocked = r.loginState === 'Terkunci (Pelanggaran)';
+        return {
+          ...r,
+          loginState: wasLocked ? 'Belum Login' : r.loginState,
+          requestReset: false,
+          violationReason: undefined,
+          violationAt: undefined,
+          violationSchema: undefined,
+          violationTimestamp: undefined,
+          violationCount: 0,
+          violationPackageId: undefined,
+          violationResetAt: nowTs,
+          lastResetAt: wasLocked ? nowTs : r.lastResetAt,
+          loginUpdatedAt: wasLocked ? nowTs : r.loginUpdatedAt,
+        };
+      })
+    );
+    showNotice(
+      `Berhasil mereset pelanggaran untuk ${resetCount > 0 ? `${resetCount} peserta` : 'seluruh peserta'}. Hitungan pelanggaran kembali ke 0/6.`
+    );
   };
 
   const displayPackages = useMemo(() => {
@@ -3587,6 +3656,30 @@ export const ProctorDashboardView: React.FC<ProctorDashboardViewProps> = ({
                           <span>Reset Semua Pelanggaran</span>
                         </button>
                       )}
+                    {(activeMenu === 'daftar_peserta' ||
+                      activeMenu === 'status_peserta') && (() => {
+                      const violationTotalCount = participants.filter(
+                        (p) =>
+                          isParticipantLockedByViolation(p) ||
+                          Boolean(p.requestReset) ||
+                          p.loginState === 'Terkunci (Pelanggaran)' ||
+                          (typeof p.violationCount === 'number' && p.violationCount > 0)
+                      ).length;
+                      return (
+                        <button
+                          type="button"
+                          onClick={handleResetAllViolations}
+                          className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer inline-flex items-center gap-1.5"
+                          title="Reset seluruh catatan dan hitungan pelanggaran (kembali ke 0/6)"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>
+                            Reset Pelanggaran
+                            {violationTotalCount > 0 ? ` (${violationTotalCount})` : ''}
+                          </span>
+                        </button>
+                      );
+                    })()}
                     <button
                       type="button"
                       onClick={() => setActiveMenu('kelompok_tes')}
